@@ -1,0 +1,54 @@
+spring:
+  application:
+    name: echotrace-api
+  datasource:
+    url: ${DB_URL:jdbc:mysql://127.0.0.1:3306/echotrace?useUnicode=true&characterEncoding=utf8&serverTimezone=Asia/Shanghai}
+    username: ${DB_USERNAME:echotrace}
+    password: ${DB_PASSWORD:change-me}
+  jpa:
+    open-in-view: false
+    hibernate:
+      ddl-auto: validate
+  flyway:
+    enabled: true
+  servlet:
+    multipart:
+      max-file-size: 1GB
+      max-request-size: 1GB
+
+server:
+  port: ${SERVER_PORT:8080}
+
+rocketmq:
+  name-server: ${ROCKETMQ_NAMESRV:127.0.0.1:9876}
+  producer:
+    group: echotrace-api-producer
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info
+
+app:
+  security:
+    jwt-secret: ${JWT_SECRET:replace-with-a-32-byte-secret-before-production}
+    token-ttl-hours: ${JWT_TTL_HOURS:24}
+  storage:
+    endpoint: ${MINIO_ENDPOINT:http://127.0.0.1:9000}
+    access-key: ${MINIO_ACCESS_KEY:minioadmin}
+    secret-key: ${MINIO_SECRET_KEY:minioadmin}
+    bucket: ${MINIO_BUCKET:echotrace}
+  rocketmq:
+    enabled: ${ROCKETMQ_ENABLED:false}
+    transcription-topic: ${ROCKETMQ_TRANSCRIPTION_TOPIC:echotrace.transcription}
+    analysis-topic: ${ROCKETMQ_ANALYSIS_TOPIC:echotrace.analysis}
+  dashscope:
+    enabled: ${DASHSCOPE_ENABLED:false}
+    api-key: ${DASHSCOPE_API_KEY:}
+    base-url: ${DASHSCOPE_BASE_URL:https://dashscope.aliyuncs.com/api/v1}
+    asr-model: ${DASHSCOPE_ASR_MODEL:paraformer-v2}
+    chat-model: ${DASHSCOPE_CHAT_MODEL:qwen-plus}
+  workers:
+    enabled: ${WORKERS_ENABLED:true}
+    poll-interval-ms: ${WORKER_POLL_INTERVAL_MS:5000}
