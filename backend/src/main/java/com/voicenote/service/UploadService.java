@@ -10,6 +10,8 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.io.InputStream;
+import java.time.Duration;
+import java.time.Instant;
 import java.security.DigestInputStream;
 import java.security.MessageDigest;
 import java.util.HexFormat;
@@ -17,6 +19,7 @@ import java.util.HexFormat;
 @Service
 public class UploadService {
     private static final String OPERATION = "CREATE_UPLOAD_INTENT";
+    private static final Duration WRITE_LEASE = Duration.ofMinutes(15);
     private final AudioBlobRepository blobs;
     private final IdempotencyService idempotency;
     private final ObjectStorage storage;
@@ -32,7 +35,12 @@ public class UploadService {
         IdempotencyRecord record = idempotency.reserve(ownerId, OPERATION, idempotencyKey, requestHash);
         if (record.getResourceId() != null) return byId(ownerId, record.getResourceId());
         AudioBlob blob = blobs.findByOwnerIdAndSha256(ownerId, command.sha256()).map(existing -> {
-            if (existing.getStatus() == BlobStatus.FAILED) { existing.reopenForUpload(); return blobs.save(existing); }
+            boolean reopened = existing.getStatus() == BlobStatus.FAILED
+                    ? existing.reopenForUpload()
+                    : existing.reopenStaleWrite(Instant.now().minus(WRITE_LEASE));
+            if (reopened) {
+                return blobs.save(existing);
+            }
             return existing;
         }).orElseGet(() -> blobs.save(new AudioBlob(ownerId, command.sha256(), command.contentLength(), command.contentType(), command.originalFilename())));
         UploadIntent response = toIntent(blob);
@@ -56,7 +64,12 @@ public class UploadService {
                 throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "CONTENT_HASH_MISMATCH", "Uploaded bytes do not match X-Content-SHA256");
             }
             markReady(blob.getId());
-        } catch (ApiException exception) { throw exception; }
+        } catch (ApiException exception) {
+            if (exception.getStatus().is5xxServerError()) {
+                markFailed(blob.getId(), "Object storage upload failed");
+            }
+            throw exception;
+        }
         catch (Exception exception) {
             markFailed(blob.getId(), "Upload did not complete");
             throw new ApiException(HttpStatus.BAD_GATEWAY, "UPLOAD_FAILED", "Audio upload failed");

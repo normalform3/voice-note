@@ -41,6 +41,7 @@ public class AnalysisRun {
     public String getModelId() { return modelId; }
     public AnalysisRunStatus getStatus() { return status; }
     public String getResultDocument() { return resultDocument; }
+    public String getFailureMessage() { return failureMessage; }
     public int getCallsUsed() { return callsUsed; }
     public int getMaxCalls() { return maxCalls; }
     public boolean start() { if (status != AnalysisRunStatus.QUEUED) return false; status = AnalysisRunStatus.RUNNING; updatedAt = Instant.now(); return true; }

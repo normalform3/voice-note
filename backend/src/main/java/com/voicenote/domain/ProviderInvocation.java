@@ -26,4 +26,5 @@ public class ProviderInvocation {
     public void markInFlight() { status = InvocationStatus.IN_FLIGHT; leaseUntil = Instant.now().plusSeconds(90); updatedAt = Instant.now(); }
     public void markSucceeded(String response) { status = InvocationStatus.SUCCEEDED; responseSnapshot = response; leaseUntil = null; updatedAt = Instant.now(); }
     public void markUnknown() { status = InvocationStatus.UNKNOWN; leaseUntil = null; updatedAt = Instant.now(); }
+    public void resetForRetry() { status = InvocationStatus.READY; leaseUntil = null; updatedAt = Instant.now(); }
 }

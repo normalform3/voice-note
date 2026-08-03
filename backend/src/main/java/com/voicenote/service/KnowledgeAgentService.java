@@ -22,9 +22,13 @@ public class KnowledgeAgentService {
     private final OutboxService outbox;
     private final ObjectMapper mapper;
     private final AppProperties properties;
+    private final ProgressEventPublisher progressEvents;
 
-    public KnowledgeAgentService(KnowledgeRunRepository runs, KnowledgeRunEvidenceRepository evidence, IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, AppProperties properties) {
-        this.runs = runs; this.evidence = evidence; this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper; this.properties = properties;
+    public KnowledgeAgentService(KnowledgeRunRepository runs, KnowledgeRunEvidenceRepository evidence, IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, AppProperties properties, ProgressEventPublisher progressEvents) {
+        this.runs = runs; this.evidence = evidence; this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper; this.properties = properties; this.progressEvents = progressEvents;
+    }
+    KnowledgeAgentService(KnowledgeRunRepository runs, KnowledgeRunEvidenceRepository evidence, IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, AppProperties properties) {
+        this(runs, evidence, idempotency, outbox, mapper, properties, new ProgressEventPublisher(event -> { }));
     }
 
     @Transactional
@@ -54,7 +58,7 @@ public class KnowledgeAgentService {
         if (!run.consumeTool()) { runs.save(run); throw new ApiException(HttpStatus.CONFLICT, "AGENT_TOOL_BUDGET_EXHAUSTED", "Knowledge agent tool budget exhausted"); }
         runs.save(run);
     }
-    @Transactional public void fail(String runId, String message) { KnowledgeRun run = runs.findById(runId).orElseThrow(); run.fail(message); runs.save(run); }
+    @Transactional public void fail(String runId, String message) { KnowledgeRun run = runs.findById(runId).orElseThrow(); run.fail(message); runs.save(run); notifySettled(run); }
 
     @Transactional
     public void complete(String runId, String rawResult, Collection<KnowledgeSearchService.ReadableChunk> readableChunks) {
@@ -83,12 +87,16 @@ public class KnowledgeAgentService {
                 }
             }
             if (!allowed.isEmpty() && citations == 0) throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "MISSING_EVIDENCE", "Knowledge answer must cite source transcript segments");
-            run.succeed(mapper.writeValueAsString(parsed)); runs.save(run);
+            run.succeed(mapper.writeValueAsString(parsed)); runs.save(run); notifySettled(run);
         } catch (ApiException exception) { throw exception; }
         catch (Exception exception) { throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "KNOWLEDGE_RESULT_INVALID", "Knowledge agent did not return valid JSON"); }
     }
 
     public record RunWork(String runId, String ownerId, String question) { }
+    private void notifySettled(KnowledgeRun run) {
+        if (properties.getRocketmq().isEnabled()) outbox.enqueue("knowledge_run", run.getId(), EventType.PROGRESS_CHANGED);
+        else progressEvents.publish(new ProgressEventPublisher.ProgressNotification(run.getOwnerId(), "knowledge-run-settled", run.getId()));
+    }
     public record KnowledgeRunView(String id, KnowledgeRunStatus status, int toolCallsUsed, int maxToolCalls, String resultDocument, String failureMessage) {
         public static KnowledgeRunView from(KnowledgeRun run) { return new KnowledgeRunView(run.getId(), run.getStatus(), run.getToolCallsUsed(), run.getMaxToolCalls(), run.getResultDocument(), run.getFailureMessage()); }
     }

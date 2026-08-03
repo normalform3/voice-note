@@ -6,6 +6,8 @@ import com.voicenote.repository.TranscriptSegmentRepository;
 import com.voicenote.repository.TranscriptionTaskRepository;
 import com.voicenote.security.UserPrincipal;
 import com.voicenote.service.TranscriptionTaskService;
+import com.voicenote.service.PipelineProgressService;
+import com.voicenote.domain.PipelineStage;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import org.springframework.security.core.Authentication;
@@ -15,16 +17,20 @@ import java.util.List;
 @RestController
 @RequestMapping("/api/transcription-tasks")
 public class TranscriptionTaskController {
-    private final TranscriptionTaskService taskService; private final TranscriptionTaskRepository tasks; private final TranscriptSegmentRepository segments;
-    public TranscriptionTaskController(TranscriptionTaskService taskService, TranscriptionTaskRepository tasks, TranscriptSegmentRepository segments) { this.taskService = taskService; this.tasks = tasks; this.segments = segments; }
-    @PostMapping TranscriptionTaskService.TaskView create(@RequestHeader("Idempotency-Key") String key, @Valid @RequestBody CreateTaskRequest request, Authentication authentication) {
-        UserPrincipal user = CurrentUser.require(authentication); return TranscriptionTaskService.TaskView.from(taskService.create(user.id(), key, new TranscriptionTaskService.CreateTaskCommand(request.audioBlobId(), request.asrConfig())));
+    private final TranscriptionTaskService taskService; private final TranscriptSegmentRepository segments; private final PipelineProgressService progress;
+    public TranscriptionTaskController(TranscriptionTaskService taskService, TranscriptSegmentRepository segments, PipelineProgressService progress) { this.taskService = taskService; this.segments = segments; this.progress = progress; }
+    @PostMapping PipelineProgressService.TaskProgressView create(@RequestHeader("Idempotency-Key") String key, @Valid @RequestBody CreateTaskRequest request, Authentication authentication) {
+        UserPrincipal user = CurrentUser.require(authentication); TranscriptionTask task = taskService.create(user.id(), key, new TranscriptionTaskService.CreateTaskCommand(request.audioBlobId(), request.asrConfig()));
+        return progress.ownedView(user.id(), task.getId());
     }
-    @PostMapping("/{taskId}/retry") TranscriptionTaskService.TaskView retry(@PathVariable String taskId, @RequestHeader("Idempotency-Key") String key, Authentication authentication) {
-        return TranscriptionTaskService.TaskView.from(taskService.retry(CurrentUser.require(authentication).id(), key, taskId));
+    @PostMapping("/{taskId}/retry") PipelineProgressService.TaskProgressView retry(@PathVariable String taskId, @RequestHeader("Idempotency-Key") String key, Authentication authentication) {
+        UserPrincipal user = CurrentUser.require(authentication); taskService.retry(user.id(), key, taskId); return progress.ownedView(user.id(), taskId);
     }
-    @GetMapping List<TranscriptionTaskService.TaskView> list(Authentication authentication) { return tasks.findByOwnerIdOrderByUpdatedAtDesc(CurrentUser.require(authentication).id()).stream().map(TranscriptionTaskService.TaskView::from).toList(); }
-    @GetMapping("/{taskId}") TranscriptionTaskService.TaskView get(@PathVariable String taskId, Authentication authentication) { return TranscriptionTaskService.TaskView.from(taskService.ownedTask(CurrentUser.require(authentication).id(), taskId)); }
+    @PostMapping("/{taskId}/stages/{stage}/retry") PipelineProgressService.TaskProgressView retryStage(@PathVariable String taskId, @PathVariable PipelineStage stage, @RequestHeader("Idempotency-Key") String key, Authentication authentication) {
+        return taskService.retryStage(CurrentUser.require(authentication).id(), key, taskId, stage);
+    }
+    @GetMapping List<PipelineProgressService.TaskProgressView> list(Authentication authentication) { return progress.ownedViews(CurrentUser.require(authentication).id()); }
+    @GetMapping("/{taskId}") PipelineProgressService.TaskProgressView get(@PathVariable String taskId, Authentication authentication) { return progress.ownedView(CurrentUser.require(authentication).id(), taskId); }
     @GetMapping("/{taskId}/segments") List<SegmentView> transcript(@PathVariable String taskId, Authentication authentication) {
         TranscriptionTask task = taskService.ownedTask(CurrentUser.require(authentication).id(), taskId);
         return segments.findByTranscriptionTaskIdAndTranscriptVersionOrderBySegmentIndex(task.getId(), task.getTranscriptVersion()).stream().map(SegmentView::from).toList();

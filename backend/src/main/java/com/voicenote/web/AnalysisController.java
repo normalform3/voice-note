@@ -23,6 +23,7 @@ public class AnalysisController {
         AnalysisRun run = analyses.ownedRun(CurrentUser.require(authentication).id(), runId);
         return new AnalysisDetail(AnalysisService.AnalysisView.from(run), evidence.findByAnalysisRunId(runId).stream().map(EvidenceView::from).toList());
     }
+    @GetMapping List<AnalysisService.AnalysisView> list(Authentication authentication) { return analyses.ownedRuns(CurrentUser.require(authentication).id()).stream().map(AnalysisService.AnalysisView::from).toList(); }
     public record CreateAnalysisRequest(@NotBlank String transcriptionTaskId, String mode, @NotBlank String goal) { }
     public record AnalysisDetail(AnalysisService.AnalysisView run, List<EvidenceView> evidence) { }
     public record EvidenceView(String resultPath, String segmentId, Integer startOffset, Integer endOffset) { static EvidenceView from(AnalysisEvidence value) { return new EvidenceView(value.getResultPath(), value.getTranscriptSegmentId(), value.getStartOffset(), value.getEndOffset()); } }

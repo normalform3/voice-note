@@ -5,6 +5,7 @@ import com.voicenote.repository.AudioBlobRepository;
 import com.voicenote.repository.TaskAttemptRepository;
 import com.voicenote.repository.TranscriptionTaskRepository;
 import com.voicenote.web.ApiException;
+import com.voicenote.config.AppProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -22,14 +23,20 @@ public class TranscriptionTaskService {
     private final IdempotencyService idempotency;
     private final OutboxService outbox;
     private final ObjectMapper mapper;
+    private final PipelineProgressService pipeline;
+    private final AppProperties properties;
+    private final KnowledgeDocumentService knowledgeDocuments;
 
     public TranscriptionTaskService(TranscriptionTaskRepository tasks, TaskAttemptRepository attempts, AudioBlobRepository blobs,
-                                    IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper) {
-        this.tasks = tasks; this.attempts = attempts; this.blobs = blobs; this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper;
+                                    IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, PipelineProgressService pipeline, AppProperties properties, KnowledgeDocumentService knowledgeDocuments) {
+        this.tasks = tasks; this.attempts = attempts; this.blobs = blobs; this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper; this.pipeline = pipeline; this.properties = properties; this.knowledgeDocuments = knowledgeDocuments;
     }
 
     @Transactional
     public TranscriptionTask create(String ownerId, String key, CreateTaskCommand command) {
+        if (!properties.getKnowledge().isEnabled()) {
+            throw new ApiException(HttpStatus.CONFLICT, "KNOWLEDGE_INDEX_DISABLED", "Knowledge indexing must be enabled before creating an audio pipeline task");
+        }
         AsrConfig config = command.asrConfig() == null ? AsrConfig.defaultConfig() : command.asrConfig().normalized();
         String requestHash = Hashing.canonicalJsonHash(new CreateTaskCommand(command.audioBlobId(), config));
         IdempotencyRecord record = idempotency.reserve(ownerId, CREATE_OPERATION, key, requestHash);
@@ -41,6 +48,7 @@ public class TranscriptionTaskService {
         TranscriptionTask task = tasks.findByOwnerIdAndAudioBlobIdAndAsrConfigHashAndPipelineVersion(ownerId, blob.getId(), configHash, PIPELINE_VERSION)
                 .orElseGet(() -> {
                     TranscriptionTask created = tasks.save(new TranscriptionTask(ownerId, blob.getId(), configHash, PIPELINE_VERSION));
+                    pipeline.initialize(created);
                     outbox.enqueue("transcription_task", created.getId(), EventType.TRANSCRIPTION_REQUESTED);
                     return created;
                 });
@@ -64,6 +72,24 @@ public class TranscriptionTaskService {
         try { idempotency.complete(record, task.getId(), mapper.writeValueAsString(TaskView.from(task))); }
         catch (Exception exception) { throw new IllegalStateException("Cannot persist idempotent retry response", exception); }
         return tasks.save(task);
+    }
+
+    @Transactional
+    public PipelineProgressService.TaskProgressView retryStage(String ownerId, String key, String taskId, PipelineStage stage) {
+        IdempotencyRecord record = idempotency.reserve(ownerId, RETRY_OPERATION + "_" + stage.name(), key, Hashing.sha256(taskId + ":" + stage.name()));
+        if (record.getResourceId() != null) return pipeline.ownedView(ownerId, record.getResourceId());
+        if (stage == PipelineStage.KNOWLEDGE_INDEX) {
+            knowledgeDocuments.retryForTask(ownerId, taskId);
+        } else if (stage == PipelineStage.ASR_SUBMIT) {
+            retry(ownerId, key + ":asr", taskId);
+            pipeline.retryStage(ownerId, taskId, stage);
+        } else {
+            throw new ApiException(HttpStatus.CONFLICT, "STAGE_RETRY_UNSUPPORTED", "This stage is recovered automatically; only ASR submission and knowledge indexing can be restarted manually");
+        }
+        PipelineProgressService.TaskProgressView response = pipeline.ownedView(ownerId, taskId);
+        try { idempotency.complete(record, taskId, mapper.writeValueAsString(response)); }
+        catch (Exception exception) { throw new IllegalStateException("Cannot persist idempotent retry response", exception); }
+        return response;
     }
 
     @Transactional

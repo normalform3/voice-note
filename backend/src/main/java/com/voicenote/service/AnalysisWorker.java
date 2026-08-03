@@ -19,11 +19,12 @@ public class AnalysisWorker {
         try {
             List<String> maps = new ArrayList<>();
             for (int i = 0; i < run.chunks().size(); i++) maps.add(call(run.runId(), "MAP", i, "Extract facts relevant to this goal: " + run.goal() + ". Return JSON with claims and evidence segmentIds only.\n\n" + run.chunks().get(i)));
-            String draft = call(run.runId(), "ANALYSIS", 0, "Create a structured JSON answer for goal: " + run.goal() + ". Every finding must cite valid segmentIds. Source findings:\n" + String.join("\n", maps));
+            String draft = call(run.runId(), "ANALYSIS", 0, "Create a JSON answer for goal: " + run.goal() + ". Return exactly {\"answer\":string,\"findings\":[{\"title\":string,\"content\":string,\"evidence\":[{\"segmentId\":string}]}]}. Every finding must cite valid segmentIds. Source findings:\n" + String.join("\n", maps));
             String critic = call(run.runId(), "CRITIC", 0, "Review this JSON for unsupported claims, missing goal coverage, and contradictions. Return {\"approved\":true|false,\"issues\":[]}.\n" + draft);
             String result = critic.contains("\"approved\":false") ? call(run.runId(), "REPAIR", 0, "Repair only the identified issues and return the complete evidence-backed JSON document. Draft:\n" + draft + "\nCritique:\n" + critic) : draft;
             analyses.completeRun(run.runId(), result);
         } catch (ProviderException exception) { analyses.failRun(runId, exception); }
+        catch (RuntimeException exception) { analyses.failRun(runId, new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ANALYSIS_FAILED", exception.getMessage())); }
     }
     private String call(String runId, String stage, int index, String prompt) {
         AnalysisService.StageAction action = analyses.prepareStage(runId, stage, index, prompt);

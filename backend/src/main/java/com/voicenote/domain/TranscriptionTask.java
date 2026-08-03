@@ -14,17 +14,21 @@ public class TranscriptionTask {
     @Column(name = "asr_config_hash", nullable = false, columnDefinition = "CHAR(64)") private String asrConfigHash;
     @Column(name = "pipeline_version", nullable = false) private String pipelineVersion;
     @Enumerated(EnumType.STRING) @Column(nullable = false) private TaskStatus status;
+    @Enumerated(EnumType.STRING) @Column(name = "current_stage") private PipelineStage currentStage;
+    @Column(name = "progress_percent", nullable = false) private int progressPercent;
+    @Column(name = "transcript_ready", nullable = false) private boolean transcriptReady;
     @Column(name = "current_attempt_number", nullable = false) private int currentAttemptNumber;
     @Column(name = "transcript_version", nullable = false) private int transcriptVersion;
     @Column(name = "failure_code") private String failureCode;
     @Column(name = "failure_message") private String failureMessage;
+    @Enumerated(EnumType.STRING) @Column(name = "failed_stage") private PipelineStage failedStage;
     @Column(name = "created_at", nullable = false) private Instant createdAt;
     @Column(name = "updated_at", nullable = false) private Instant updatedAt;
 
     protected TranscriptionTask() { }
     public TranscriptionTask(String ownerId, String audioBlobId, String asrConfigHash, String pipelineVersion) {
         this.id = UUID.randomUUID().toString(); this.ownerId = ownerId; this.audioBlobId = audioBlobId;
-        this.asrConfigHash = asrConfigHash; this.pipelineVersion = pipelineVersion; this.status = TaskStatus.QUEUED;
+        this.asrConfigHash = asrConfigHash; this.pipelineVersion = pipelineVersion; this.status = TaskStatus.QUEUED; this.currentStage = PipelineStage.ASR_SUBMIT;
         this.createdAt = Instant.now(); this.updatedAt = createdAt;
     }
     public String getId() { return id; }
@@ -32,12 +36,19 @@ public class TranscriptionTask {
     public String getAudioBlobId() { return audioBlobId; }
     public String getAsrConfigHash() { return asrConfigHash; }
     public TaskStatus getStatus() { return status; }
+    public PipelineStage getCurrentStage() { return currentStage; }
+    public int getProgressPercent() { return progressPercent; }
+    public boolean isTranscriptReady() { return transcriptReady; }
     public int getCurrentAttemptNumber() { return currentAttemptNumber; }
     public int getTranscriptVersion() { return transcriptVersion; }
     public String getFailureCode() { return failureCode; }
     public String getFailureMessage() { return failureMessage; }
+    public PipelineStage getFailedStage() { return failedStage; }
     public int nextAttemptNumber() { currentAttemptNumber += 1; updatedAt = Instant.now(); return currentAttemptNumber; }
     public void mark(TaskStatus status) { this.status = status; this.updatedAt = Instant.now(); }
-    public void fail(TaskStatus status, String code, String message) { this.status = status; this.failureCode = code; this.failureMessage = message; this.updatedAt = Instant.now(); }
+    public void advance(PipelineStage stage, int progress) { this.currentStage = stage; this.progressPercent = progress; this.failureCode = null; this.failureMessage = null; this.failedStage = null; this.updatedAt = Instant.now(); }
+    public void transcriptPersisted() { this.transcriptReady = true; this.currentStage = PipelineStage.KNOWLEDGE_PREPARE; this.progressPercent = 70; this.updatedAt = Instant.now(); }
+    public void completePipeline() { this.status = TaskStatus.SUCCEEDED; this.currentStage = PipelineStage.COMPLETED; this.progressPercent = 100; this.failedStage = null; this.failureCode = null; this.failureMessage = null; this.updatedAt = Instant.now(); }
+    public void fail(TaskStatus status, String code, String message) { this.status = status; this.failureCode = code; this.failureMessage = message; this.failedStage = currentStage; this.updatedAt = Instant.now(); }
     public int nextTranscriptVersion() { transcriptVersion += 1; updatedAt = Instant.now(); return transcriptVersion; }
 }

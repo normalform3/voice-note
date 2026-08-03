@@ -13,7 +13,10 @@ public class RocketMqMessagePublisher implements MessagePublisher {
     private final AppProperties properties;
     public RocketMqMessagePublisher(RocketMQTemplate rocket, AppProperties properties) { this.rocket = rocket; this.properties = properties; }
     @Override public void publish(OutboxEvent event) {
-        String topic = event.getEventType() == com.voicenote.domain.EventType.TRANSCRIPTION_REQUESTED ? properties.getRocketmq().getTranscriptionTopic() : properties.getRocketmq().getAnalysisTopic();
-        rocket.syncSend(topic, event.getId());
+        String topic = switch (event.getEventType()) {
+            case TRANSCRIPTION_REQUESTED, PROGRESS_CHANGED -> properties.getRocketmq().getTranscriptionTopic();
+            default -> properties.getRocketmq().getAnalysisTopic();
+        };
+        rocket.syncSend(topic + ":" + event.getEventType().name(), event.getId());
     }
 }

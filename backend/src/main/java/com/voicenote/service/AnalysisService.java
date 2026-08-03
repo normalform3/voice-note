@@ -22,14 +22,15 @@ public class AnalysisService {
     private final AnalysisRunRepository runs; private final TranscriptionTaskRepository tasks; private final TranscriptSegmentRepository segments;
     private final AnalysisInvocationRepository invocations; private final AnalysisEvidenceRepository evidence;
     private final IdempotencyService idempotency; private final OutboxService outbox; private final ObjectMapper mapper; private final AppProperties properties;
-    public AnalysisService(AnalysisRunRepository runs, TranscriptionTaskRepository tasks, TranscriptSegmentRepository segments, AnalysisInvocationRepository invocations, AnalysisEvidenceRepository evidence, IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, AppProperties properties) {
-        this.runs = runs; this.tasks = tasks; this.segments = segments; this.invocations = invocations; this.evidence = evidence; this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper; this.properties = properties;
+    private final ProgressEventPublisher progressEvents;
+    public AnalysisService(AnalysisRunRepository runs, TranscriptionTaskRepository tasks, TranscriptSegmentRepository segments, AnalysisInvocationRepository invocations, AnalysisEvidenceRepository evidence, IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, AppProperties properties, ProgressEventPublisher progressEvents) {
+        this.runs = runs; this.tasks = tasks; this.segments = segments; this.invocations = invocations; this.evidence = evidence; this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper; this.properties = properties; this.progressEvents = progressEvents;
     }
     @Transactional
     public AnalysisRun create(String ownerId, String key, CreateAnalysisCommand command) {
         TranscriptionTask task = tasks.findById(command.transcriptionTaskId()).filter(value -> value.getOwnerId().equals(ownerId))
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "TASK_NOT_FOUND", "Transcription task was not found"));
-        if (task.getStatus() != TaskStatus.SUCCEEDED) throw new ApiException(HttpStatus.CONFLICT, "TRANSCRIPT_NOT_READY", "Analysis requires a successful transcription");
+        if (!task.isTranscriptReady()) throw new ApiException(HttpStatus.CONFLICT, "TRANSCRIPT_NOT_READY", "Analysis requires a persisted transcription");
         List<TranscriptSegment> source = segments.findByTranscriptionTaskIdAndTranscriptVersionOrderBySegmentIndex(task.getId(), task.getTranscriptVersion());
         String snapshotHash = Hashing.canonicalJsonHash(source.stream().map(segment -> Map.of("id", segment.getId(), "text", segment.getTextContent(), "start", segment.getStartMs(), "end", segment.getEndMs())).toList());
         String mode = command.mode() == null || command.mode().isBlank() ? "custom" : command.mode().trim().toLowerCase();
@@ -46,6 +47,7 @@ public class AnalysisService {
     }
     @Transactional public void markQueued(String runId) { runs.findById(runId).orElseThrow(); }
     @Transactional(readOnly = true) public AnalysisRun ownedRun(String ownerId, String runId) { return runs.findById(runId).filter(value -> value.getOwnerId().equals(ownerId)).orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ANALYSIS_NOT_FOUND", "Analysis run was not found")); }
+    @Transactional(readOnly = true) public List<AnalysisRun> ownedRuns(String ownerId) { return runs.findByOwnerIdOrderByCreatedAtDesc(ownerId); }
     @Transactional(readOnly = true) public List<String> queuedRunIds() { return runs.findTop10ByStatusOrderByCreatedAtAsc(AnalysisRunStatus.QUEUED).stream().map(AnalysisRun::getId).toList(); }
     @Transactional public RunWork claim(String runId) {
         AnalysisRun run = runs.findById(runId).orElse(null); if (run == null || !run.start()) return null;
@@ -62,22 +64,26 @@ public class AnalysisService {
     }
     @Transactional public void completeStage(String runId, String stage, int index, String response) { AnalysisInvocation invocation = invocations.findByAnalysisRunIdAndStageNameAndChunkIndex(runId, stage, index).orElseThrow(); invocation.markSucceeded(response); invocations.save(invocation); }
     @Transactional public void failRun(String runId, ProviderException failure) {
-        AnalysisRun run = runs.findById(runId).orElseThrow(); run.fail(failure.getCode() + ": " + failure.getMessage()); runs.save(run);
+        AnalysisRun run = runs.findById(runId).orElseThrow(); run.fail(failure.getCode() + ": " + failure.getMessage()); runs.save(run); notifySettled(run);
     }
     @Transactional public void completeRun(String runId, String result) {
         AnalysisRun run = runs.findById(runId).orElseThrow(); TranscriptionTask task = tasks.findById(run.getTranscriptionTaskId()).orElseThrow();
         List<TranscriptSegment> source = segments.findByTranscriptionTaskIdAndTranscriptVersionOrderBySegmentIndex(task.getId(), task.getTranscriptVersion());
-        String normalized = normalizeAndPersistEvidence(run, source, result); run.succeed(normalized, "reviewed"); runs.save(run);
+        String normalized = normalizeAndPersistEvidence(run, source, result); run.succeed(normalized, "reviewed"); runs.save(run); notifySettled(run);
     }
     private AnalysisInvocation invocation(String runId, String stage, int index, String prompt) {
         return invocations.findByAnalysisRunIdAndStageNameAndChunkIndex(runId, stage, index)
                 .orElseGet(() -> invocations.save(new AnalysisInvocation(runId, stage, index, Hashing.sha256(prompt))));
     }
+    private void notifySettled(AnalysisRun run) {
+        if (properties.getRocketmq().isEnabled()) outbox.enqueue("analysis_run", run.getId(), EventType.PROGRESS_CHANGED);
+        else progressEvents.publish(new ProgressEventPublisher.ProgressNotification(run.getOwnerId(), "analysis-run-settled", run.getId()));
+    }
     private String normalizeAndPersistEvidence(AnalysisRun run, List<TranscriptSegment> source, String raw) {
         try {
             JsonNode parsed = mapper.readTree(raw);
-            if (!parsed.isObject() || !parsed.path("findings").isArray()) {
-                throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ANALYSIS_SCHEMA_INVALID", "Analysis must return a JSON object with findings");
+            if (!parsed.isObject() || !parsed.path("answer").isTextual() || !parsed.path("findings").isArray()) {
+                throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ANALYSIS_SCHEMA_INVALID", "Analysis must return an answer and findings JSON object");
             }
             Set<String> validIds = new HashSet<>(); for (TranscriptSegment segment : source) validIds.add(segment.getId());
             int evidenceCount = 0;
@@ -101,7 +107,7 @@ public class AnalysisService {
         catch (Exception exception) { throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ANALYSIS_SCHEMA_INVALID", "Analysis did not return valid JSON"); }
     }
     public record CreateAnalysisCommand(String transcriptionTaskId, String mode, String goal) { }
-    public record AnalysisView(String id, AnalysisRunStatus status, int callsUsed, int maxCalls, String resultDocument) { public static AnalysisView from(AnalysisRun run) { return new AnalysisView(run.getId(), run.getStatus(), run.getCallsUsed(), run.getMaxCalls(), run.getResultDocument()); } }
+    public record AnalysisView(String id, String transcriptionTaskId, AnalysisRunStatus status, int callsUsed, int maxCalls, String resultDocument, String failureMessage) { public static AnalysisView from(AnalysisRun run) { return new AnalysisView(run.getId(), run.getTranscriptionTaskId(), run.getStatus(), run.getCallsUsed(), run.getMaxCalls(), run.getResultDocument(), run.getFailureMessage()); } }
     public record RunWork(String runId, String mode, String goal, List<String> chunks) { }
     public record StageAction(boolean cached, String value) { static StageAction cached(String response) { return new StageAction(true, response); } static StageAction call(String prompt) { return new StageAction(false, prompt); } }
     static List<String> chunk(List<TranscriptSegment> source) {

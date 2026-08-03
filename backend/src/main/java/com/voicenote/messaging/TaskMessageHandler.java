@@ -19,8 +19,9 @@ public class TaskMessageHandler {
     private final AnalysisService analyses;
     private final KnowledgeDocumentService knowledgeDocuments;
     private final KnowledgeAgentService knowledgeRuns;
-    public TaskMessageHandler(JdbcTemplate jdbc, OutboxEventRepository outbox, TranscriptionTaskService transcriptionTasks, AnalysisService analyses, KnowledgeDocumentService knowledgeDocuments, KnowledgeAgentService knowledgeRuns) {
-        this.jdbc = jdbc; this.outbox = outbox; this.transcriptionTasks = transcriptionTasks; this.analyses = analyses; this.knowledgeDocuments = knowledgeDocuments; this.knowledgeRuns = knowledgeRuns;
+    private final ProgressMessageHandler progress;
+    public TaskMessageHandler(JdbcTemplate jdbc, OutboxEventRepository outbox, TranscriptionTaskService transcriptionTasks, AnalysisService analyses, KnowledgeDocumentService knowledgeDocuments, KnowledgeAgentService knowledgeRuns, ProgressMessageHandler progress) {
+        this.jdbc = jdbc; this.outbox = outbox; this.transcriptionTasks = transcriptionTasks; this.analyses = analyses; this.knowledgeDocuments = knowledgeDocuments; this.knowledgeRuns = knowledgeRuns; this.progress = progress;
     }
     @Transactional
     public void consume(String consumerName, String eventId) {
@@ -31,5 +32,6 @@ public class TaskMessageHandler {
         if (event.getEventType() == EventType.ANALYSIS_REQUESTED) analyses.markQueued(event.getAggregateId());
         if (event.getEventType() == EventType.KNOWLEDGE_INDEX_REQUESTED) knowledgeDocuments.markQueued(event.getAggregateId());
         if (event.getEventType() == EventType.KNOWLEDGE_RUN_REQUESTED) knowledgeRuns.markQueued(event.getAggregateId());
+        if (event.getEventType() == EventType.PROGRESS_CHANGED && "in-process".equals(consumerName)) progress.consume("in-process-progress", eventId);
     }
 }

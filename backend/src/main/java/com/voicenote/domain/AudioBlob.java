@@ -16,6 +16,7 @@ public class AudioBlob {
     @Column(name = "original_filename", nullable = false) private String originalFilename;
     @Column(name = "object_key", nullable = false) private String objectKey;
     @Enumerated(EnumType.STRING) @Column(nullable = false) private BlobStatus status;
+    @Column(name = "write_started_at") private Instant writeStartedAt;
     @Column(name = "failure_reason") private String failureReason;
     @Column(name = "created_at", nullable = false) private Instant createdAt;
     @Column(name = "completed_at") private Instant completedAt;
@@ -36,8 +37,10 @@ public class AudioBlob {
     public String getObjectKey() { return objectKey; }
     public BlobStatus getStatus() { return status; }
     public String getFailureReason() { return failureReason; }
-    public boolean claimWrite() { if (status != BlobStatus.UPLOADING) return false; status = BlobStatus.WRITING; return true; }
-    public boolean reopenForUpload() { if (status != BlobStatus.FAILED) return false; status = BlobStatus.UPLOADING; failureReason = null; return true; }
-    public void markReady() { status = BlobStatus.READY; completedAt = Instant.now(); failureReason = null; }
-    public void markFailed(String reason) { status = BlobStatus.FAILED; failureReason = reason; }
+    public boolean claimWrite() { if (status != BlobStatus.UPLOADING) return false; status = BlobStatus.WRITING; writeStartedAt = Instant.now(); return true; }
+    public boolean reopenForUpload() { if (status != BlobStatus.FAILED) return false; return reopen(); }
+    public boolean reopenStaleWrite(Instant cutoff) { if (status != BlobStatus.WRITING || (writeStartedAt != null && writeStartedAt.isAfter(cutoff))) return false; return reopen(); }
+    public void markReady() { status = BlobStatus.READY; completedAt = Instant.now(); failureReason = null; writeStartedAt = null; }
+    public void markFailed(String reason) { status = BlobStatus.FAILED; failureReason = reason; writeStartedAt = null; }
+    private boolean reopen() { status = BlobStatus.UPLOADING; failureReason = null; return true; }
 }

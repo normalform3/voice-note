@@ -19,9 +19,10 @@ public class KnowledgeDocumentService {
     private final OutboxService outbox;
     private final ObjectMapper mapper;
     private final AppProperties properties;
+    private final PipelineProgressService pipeline;
 
-    public KnowledgeDocumentService(KnowledgeDocumentRepository documents, KnowledgeChunkRepository chunks, OutboxService outbox, ObjectMapper mapper, AppProperties properties) {
-        this.documents = documents; this.chunks = chunks; this.outbox = outbox; this.mapper = mapper; this.properties = properties;
+    public KnowledgeDocumentService(KnowledgeDocumentRepository documents, KnowledgeChunkRepository chunks, OutboxService outbox, ObjectMapper mapper, AppProperties properties, PipelineProgressService pipeline) {
+        this.documents = documents; this.chunks = chunks; this.outbox = outbox; this.mapper = mapper; this.properties = properties; this.pipeline = pipeline;
     }
 
     @Transactional
@@ -57,7 +58,13 @@ public class KnowledgeDocumentService {
     @Transactional public void retry(String ownerId, String documentId) {
         KnowledgeDocument document = ownedDocument(ownerId, documentId);
         if (!document.retry()) throw new ApiException(HttpStatus.CONFLICT, "DOCUMENT_NOT_RETRYABLE", "Only failed knowledge documents can be retried");
+        pipeline.retryStage(ownerId, document.getTranscriptionTaskId(), PipelineStage.KNOWLEDGE_INDEX);
         documents.save(document); outbox.enqueue("knowledge_document", document.getId(), EventType.KNOWLEDGE_INDEX_REQUESTED);
+    }
+    @Transactional public void retryForTask(String ownerId, String taskId) {
+        KnowledgeDocument document = documents.findTopByOwnerIdAndTranscriptionTaskIdOrderByUpdatedAtDesc(ownerId, taskId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "DOCUMENT_NOT_FOUND", "Knowledge document was not found"));
+        retry(ownerId, document.getId());
     }
 
     static List<ChunkDraft> chunk(List<TranscriptSegment> source, int maximumCharacters) {

@@ -23,6 +23,7 @@ public class OutboxEvent {
         this.status = OutboxStatus.READY; this.availableAt = Instant.now(); this.createdAt = Instant.now();
     }
     public String getId() { return id; }
+    public String getAggregateType() { return aggregateType; }
     public String getAggregateId() { return aggregateId; }
     public EventType getEventType() { return eventType; }
     public String getPayload() { return payload; }

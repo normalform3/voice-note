@@ -9,6 +9,7 @@ import java.util.Optional;
 
 public interface TaskAttemptRepository extends JpaRepository<TaskAttempt, String> {
     Optional<TaskAttempt> findByTranscriptionTaskIdAndAttemptNumber(String taskId, int attemptNumber);
+    Optional<TaskAttempt> findTopByTranscriptionTaskIdOrderByAttemptNumberDesc(String taskId);
     List<TaskAttempt> findTop20ByStatusOrderByCreatedAtAsc(AttemptStatus status);
     List<TaskAttempt> findTop20ByStatusAndNextPollAtBeforeOrderByNextPollAtAsc(AttemptStatus status, Instant before);
 }

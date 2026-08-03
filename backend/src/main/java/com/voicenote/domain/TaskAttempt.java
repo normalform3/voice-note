@@ -34,6 +34,8 @@ public class TaskAttempt {
     public boolean claimSubmission() { if (status != AttemptStatus.QUEUED) return false; status = AttemptStatus.SUBMITTING; updatedAt = Instant.now(); return true; }
     public void submitted(String providerTaskId, String providerInputUrl) { this.providerTaskId = providerTaskId; this.providerInputUrl = providerInputUrl; this.status = AttemptStatus.PROVIDER_RUNNING; this.nextPollAt = Instant.now().plusSeconds(5); this.updatedAt = Instant.now(); }
     public void reschedulePoll() { this.nextPollAt = Instant.now().plusSeconds(8); this.updatedAt = Instant.now(); }
+    public void retrySubmission() { this.status = AttemptStatus.QUEUED; this.providerTaskId = null; this.providerInputUrl = null; this.nextPollAt = null; this.errorCode = null; this.errorMessage = null; this.updatedAt = Instant.now(); }
+    public void retryPollNow() { this.status = AttemptStatus.PROVIDER_RUNNING; this.nextPollAt = Instant.now(); this.errorCode = null; this.errorMessage = null; this.updatedAt = Instant.now(); }
     public void succeed() { this.status = AttemptStatus.SUCCEEDED; this.nextPollAt = null; this.updatedAt = Instant.now(); }
     public void fail(AttemptStatus status, String code, String message) { this.status = status; this.errorCode = code; this.errorMessage = message; this.updatedAt = Instant.now(); }
 }
