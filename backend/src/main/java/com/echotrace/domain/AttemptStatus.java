@@ -1,3 +1,0 @@
-package com.echotrace.domain;
-
-public enum AttemptStatus { QUEUED, SUBMITTING, PROVIDER_RUNNING, SUCCEEDED, RETRYABLE_FAILED, FINAL_FAILED, SUBMISSION_UNKNOWN }

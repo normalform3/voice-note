@@ -11,10 +11,10 @@
         <relativePath/>
     </parent>
 
-    <groupId>com.echotrace</groupId>
-    <artifactId>echotrace-api</artifactId>
+    <groupId>com.voicenote</groupId>
+    <artifactId>voicenote-api</artifactId>
     <version>0.1.0-SNAPSHOT</version>
-    <name>echotrace-api</name>
+    <name>voicenote-api</name>
     <description>Evidence-backed AI audio analysis</description>
 
     <properties>

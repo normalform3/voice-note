@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+
+# Starts development-only local forwards for VoiceNote infrastructure.
+# Configuration is read from .tunnel.env at the repository root when present.
+
+set -euo pipefail
+
+PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+TUNNEL_CONFIG_FILE="${TUNNEL_CONFIG_FILE:-${PROJECT_ROOT}/.tunnel.env}"
+
+if [[ -f "${TUNNEL_CONFIG_FILE}" ]]; then
+  # shellcheck disable=SC1090
+  source "${TUNNEL_CONFIG_FILE}"
+fi
+
+: "${SSH_TUNNEL_TARGET:?Set SSH_TUNNEL_TARGET, for example: developer@your-server}"
+SSH_PORT="${SSH_PORT:-22}"
+SSH_IDENTITY_FILE="${SSH_IDENTITY_FILE:-}"
+
+MYSQL_LOCAL_PORT="${MYSQL_LOCAL_PORT:-3306}"
+MYSQL_REMOTE_HOST="${MYSQL_REMOTE_HOST:-127.0.0.1}"
+MYSQL_REMOTE_PORT="${MYSQL_REMOTE_PORT:-3306}"
+REDIS_LOCAL_PORT="${REDIS_LOCAL_PORT:-6379}"
+REDIS_REMOTE_HOST="${REDIS_REMOTE_HOST:-127.0.0.1}"
+REDIS_REMOTE_PORT="${REDIS_REMOTE_PORT:-6379}"
+MINIO_LOCAL_PORT="${MINIO_LOCAL_PORT:-9000}"
+MINIO_REMOTE_HOST="${MINIO_REMOTE_HOST:-127.0.0.1}"
+MINIO_REMOTE_PORT="${MINIO_REMOTE_PORT:-9000}"
+ROCKETMQ_NAMESRV_LOCAL_PORT="${ROCKETMQ_NAMESRV_LOCAL_PORT:-9876}"
+ROCKETMQ_NAMESRV_REMOTE_HOST="${ROCKETMQ_NAMESRV_REMOTE_HOST:-127.0.0.1}"
+ROCKETMQ_NAMESRV_REMOTE_PORT="${ROCKETMQ_NAMESRV_REMOTE_PORT:-9876}"
+ROCKETMQ_BROKER_LOCAL_PORT="${ROCKETMQ_BROKER_LOCAL_PORT:-10911}"
+ROCKETMQ_BROKER_REMOTE_HOST="${ROCKETMQ_BROKER_REMOTE_HOST:-127.0.0.1}"
+ROCKETMQ_BROKER_REMOTE_PORT="${ROCKETMQ_BROKER_REMOTE_PORT:-10911}"
+
+if ! command -v ssh >/dev/null 2>&1; then
+  echo "ssh command not found" >&2
+  exit 1
+fi
+
+SSH_COMMAND=(
+  ssh -N
+  -p "${SSH_PORT}"
+  -o ExitOnForwardFailure=yes
+  -o ServerAliveInterval=30
+  -o ServerAliveCountMax=3
+)
+
+if [[ -n "${SSH_IDENTITY_FILE}" ]]; then
+  if [[ ! -f "${SSH_IDENTITY_FILE}" ]]; then
+    echo "SSH_IDENTITY_FILE does not exist: ${SSH_IDENTITY_FILE}" >&2
+    exit 1
+  fi
+  SSH_COMMAND+=(-i "${SSH_IDENTITY_FILE}" -o IdentitiesOnly=yes)
+fi
+
+echo "Opening development SSH tunnels to ${SSH_TUNNEL_TARGET}"
+echo "  MySQL:     127.0.0.1:${MYSQL_LOCAL_PORT}"
+echo "  Redis:     127.0.0.1:${REDIS_LOCAL_PORT}"
+echo "  MinIO:     127.0.0.1:${MINIO_LOCAL_PORT}"
+echo "  RocketMQ:  NameServer 127.0.0.1:${ROCKETMQ_NAMESRV_LOCAL_PORT}, Broker 127.0.0.1:${ROCKETMQ_BROKER_LOCAL_PORT}"
+echo "Press Ctrl-C to close all tunnels."
+
+exec "${SSH_COMMAND[@]}" \
+  -L "${MYSQL_LOCAL_PORT}:${MYSQL_REMOTE_HOST}:${MYSQL_REMOTE_PORT}" \
+  -L "${REDIS_LOCAL_PORT}:${REDIS_REMOTE_HOST}:${REDIS_REMOTE_PORT}" \
+  -L "${MINIO_LOCAL_PORT}:${MINIO_REMOTE_HOST}:${MINIO_REMOTE_PORT}" \
+  -L "${ROCKETMQ_NAMESRV_LOCAL_PORT}:${ROCKETMQ_NAMESRV_REMOTE_HOST}:${ROCKETMQ_NAMESRV_REMOTE_PORT}" \
+  -L "${ROCKETMQ_BROKER_LOCAL_PORT}:${ROCKETMQ_BROKER_REMOTE_HOST}:${ROCKETMQ_BROKER_REMOTE_PORT}" \
+  "${SSH_TUNNEL_TARGET}"

@@ -1,0 +1,11 @@
+ALTER TABLE analysis_runs
+    ADD COLUMN version BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE audio_blobs
+    ADD COLUMN version BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE task_attempts
+    ADD COLUMN version BIGINT NOT NULL DEFAULT 0;
+
+ALTER TABLE transcription_tasks
+    ADD COLUMN version BIGINT NOT NULL DEFAULT 0;
