@@ -5,6 +5,7 @@ import com.voicenote.config.AppProperties;
 import com.voicenote.domain.*;
 import com.voicenote.repository.KnowledgeChunkRepository;
 import com.voicenote.repository.KnowledgeDocumentRepository;
+import com.voicenote.repository.TranscriptionTaskRepository;
 import com.voicenote.web.ApiException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -20,9 +21,12 @@ public class KnowledgeDocumentService {
     private final ObjectMapper mapper;
     private final AppProperties properties;
     private final PipelineProgressService pipeline;
+    private final TranscriptionTaskRepository tasks;
 
-    public KnowledgeDocumentService(KnowledgeDocumentRepository documents, KnowledgeChunkRepository chunks, OutboxService outbox, ObjectMapper mapper, AppProperties properties, PipelineProgressService pipeline) {
-        this.documents = documents; this.chunks = chunks; this.outbox = outbox; this.mapper = mapper; this.properties = properties; this.pipeline = pipeline;
+    public KnowledgeDocumentService(KnowledgeDocumentRepository documents, KnowledgeChunkRepository chunks, OutboxService outbox, ObjectMapper mapper,
+                                    AppProperties properties, PipelineProgressService pipeline, TranscriptionTaskRepository tasks) {
+        this.documents = documents; this.chunks = chunks; this.outbox = outbox; this.mapper = mapper; this.properties = properties;
+        this.pipeline = pipeline; this.tasks = tasks;
     }
 
     @Transactional
@@ -42,6 +46,27 @@ public class KnowledgeDocumentService {
                 });
     }
 
+    @Transactional
+    public KnowledgeDocument createForOrganizedDocument(OrganizedDocument source, List<OrganizedDocumentBlock> blocks) {
+        return documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(source.getOwnerId(), source.getTranscriptionTaskId(), source.getTranscriptVersion())
+                .orElseGet(() -> {
+                    KnowledgeDocument document = documents.save(new KnowledgeDocument(source.getOwnerId(), source.getTranscriptionTaskId(), source.getTranscriptVersion(),
+                            source.getTitle(), source.getId(), Math.toIntExact(source.getVersion())));
+                    List<OrganizedChunkDraft> drafts = chunkOrganized(blocks, properties.getKnowledge().getChunkCharacters());
+                    for (int index = 0; index < drafts.size(); index++) {
+                        OrganizedChunkDraft draft = drafts.get(index);
+                        try {
+                            chunks.save(new KnowledgeChunk(document.getId(), index, draft.startMs(), draft.endMs(), mapper.writeValueAsString(draft.segmentIds()),
+                                    mapper.writeValueAsString(draft.blockIds()), draft.content(), Hashing.sha256(draft.content())));
+                        } catch (Exception exception) { throw new IllegalStateException("Cannot persist organized knowledge chunk", exception); }
+                    }
+                    outbox.enqueue("knowledge_document", document.getId(), EventType.KNOWLEDGE_INDEX_REQUESTED,
+                            "{\"taskId\":\"" + source.getTranscriptionTaskId() + "\",\"stage\":\"KNOWLEDGE_BUILD\",\"documentId\":\"" + document.getId() + "\"}",
+                            "task:" + source.getTranscriptionTaskId() + ":knowledge:" + document.getId());
+                    return document;
+                });
+    }
+
     @Transactional public void markQueued(String documentId) { documents.findById(documentId).orElseThrow().queue(); }
     @Transactional(readOnly = true) public List<KnowledgeDocument> ownedDocuments(String ownerId) { return documents.findByOwnerIdOrderByUpdatedAtDesc(ownerId); }
     @Transactional(readOnly = true) public KnowledgeDocument ownedDocument(String ownerId, String documentId) {
@@ -53,7 +78,11 @@ public class KnowledgeDocumentService {
         if (document == null || !document.beginIndexing()) return null;
         return new IndexWork(document, chunks.findByKnowledgeDocumentIdOrderByChunkIndex(documentId));
     }
-    @Transactional public void complete(String documentId) { KnowledgeDocument document = documents.findById(documentId).orElseThrow(); document.ready(); documents.save(document); }
+    @Transactional public boolean complete(String documentId) {
+        KnowledgeDocument document = documents.findById(documentId).orElseThrow();
+        if (tasks.findById(document.getTranscriptionTaskId()).map(TranscriptionTask::isCancelled).orElse(true)) return false;
+        document.ready(); documents.save(document); return true;
+    }
     @Transactional public void fail(String documentId, String message) { KnowledgeDocument document = documents.findById(documentId).orElseThrow(); document.fail(message); documents.save(document); }
     @Transactional public void retry(String ownerId, String documentId) {
         KnowledgeDocument document = ownedDocument(ownerId, documentId);
@@ -65,6 +94,13 @@ public class KnowledgeDocumentService {
         KnowledgeDocument document = documents.findTopByOwnerIdAndTranscriptionTaskIdOrderByUpdatedAtDesc(ownerId, taskId)
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "DOCUMENT_NOT_FOUND", "Knowledge document was not found"));
         retry(ownerId, document.getId());
+    }
+    @Transactional
+    public String recoverForTask(String taskId) {
+        return documents.findTopByTranscriptionTaskIdOrderByUpdatedAtDesc(taskId)
+                .filter(document -> document.recover())
+                .map(document -> { documents.save(document); return document.getId(); })
+                .orElse(null);
     }
 
     static List<ChunkDraft> chunk(List<TranscriptSegment> source, int maximumCharacters) {
@@ -84,6 +120,26 @@ public class KnowledgeDocumentService {
         return output;
     }
 
+    List<OrganizedChunkDraft> chunkOrganized(List<OrganizedDocumentBlock> source, int maximumCharacters) {
+        int limit = Math.max(maximumCharacters, 400);
+        List<OrganizedChunkDraft> output = new ArrayList<>();
+        StringBuilder content = new StringBuilder(); List<String> blockIds = new ArrayList<>(); List<String> segmentIds = new ArrayList<>(); long start = 0; long end = 0;
+        for (OrganizedDocumentBlock block : source) {
+            String heading = block.getTopicTitle() == null || block.getTopicTitle().isBlank() ? "整理片段" : block.getTopicTitle();
+            String line = "## " + heading + "\n" + block.getTextContent() + "\n";
+            if (!content.isEmpty() && content.length() + line.length() > limit) {
+                output.add(new OrganizedChunkDraft(start, end, List.copyOf(blockIds), List.copyOf(segmentIds), content.toString()));
+                content = new StringBuilder(); blockIds = new ArrayList<>(); segmentIds = new ArrayList<>();
+            }
+            if (content.isEmpty()) start = block.getStartMs();
+            content.append(line); blockIds.add(block.getId()); end = block.getEndMs();
+            try { segmentIds.addAll(mapper.readValue(block.getSourceSegmentIds(), new com.fasterxml.jackson.core.type.TypeReference<List<String>>() { })); }
+            catch (Exception exception) { throw new IllegalStateException("Organized block has invalid source references", exception); }
+        }
+        if (!content.isEmpty()) output.add(new OrganizedChunkDraft(start, end, List.copyOf(blockIds), List.copyOf(segmentIds), content.toString()));
+        return output;
+    }
+
     private String titleFor(String filename) {
         int extension = filename.lastIndexOf('.');
         return extension > 0 ? filename.substring(0, extension) : filename;
@@ -91,4 +147,5 @@ public class KnowledgeDocumentService {
 
     public record IndexWork(KnowledgeDocument document, List<KnowledgeChunk> chunks) { }
     record ChunkDraft(long startMs, long endMs, List<String> segmentIds, String content) { }
+    record OrganizedChunkDraft(long startMs, long endMs, List<String> blockIds, List<String> segmentIds, String content) { }
 }

@@ -42,18 +42,33 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
     @Override public void upsert(KnowledgeDocument document, KnowledgeChunk chunk, List<Double> denseVector) {
         try {
             List<String> segmentIds = mapper.readValue(chunk.getSegmentIds(), new TypeReference<>() { });
+            List<String> blockIds = chunk.getOrganizedDocumentBlockIds() == null ? List.of() : mapper.readValue(chunk.getOrganizedDocumentBlockIds(), new TypeReference<>() { });
             Map<String, Object> bm25 = new LinkedHashMap<>();
             bm25.put("text", chunk.getTextContent()); bm25.put("model", "qdrant/bm25");
             bm25.put("options", Map.of("language", "none", "tokenizer", "multilingual"));
+            Map<String, Object> payload = new LinkedHashMap<>();
+            payload.put("ownerId", document.getOwnerId()); payload.put("documentId", document.getId()); payload.put("taskId", document.getTranscriptionTaskId());
+            payload.put("chunkId", chunk.getId()); payload.put("segmentIds", segmentIds); payload.put("organizedDocumentBlockIds", blockIds);
+            payload.put("startMs", chunk.getStartMs()); payload.put("endMs", chunk.getEndMs());
             Map<String, Object> point = Map.of(
                     "id", chunk.getId(),
                     "vector", Map.of(DENSE, denseVector, BM25, bm25),
-                    "payload", Map.of("ownerId", document.getOwnerId(), "documentId", document.getId(), "taskId", document.getTranscriptionTaskId(),
-                            "chunkId", chunk.getId(), "segmentIds", segmentIds, "startMs", chunk.getStartMs(), "endMs", chunk.getEndMs()));
+                    "payload", payload);
             client.put().uri("/collections/{collection}/points?wait=true", properties.getKnowledge().getCollection())
                     .contentType(MediaType.APPLICATION_JSON).body(Map.of("points", List.of(point))).retrieve().toBodilessEntity();
         } catch (ProviderException exception) { throw exception; }
         catch (Exception exception) { throw unavailable(exception); }
+    }
+
+    @Override public void deleteDocument(String ownerId, String documentId) {
+        Map<String, Object> filter = Map.of("must", List.of(
+                Map.of("key", "ownerId", "match", Map.of("value", ownerId)),
+                Map.of("key", "documentId", "match", Map.of("value", documentId))));
+        try {
+            client.post().uri("/collections/{collection}/points/delete?wait=true", properties.getKnowledge().getCollection())
+                    .contentType(MediaType.APPLICATION_JSON).body(Map.of("filter", filter)).retrieve().toBodilessEntity();
+        } catch (RestClientResponseException exception) { throw unavailable(exception); }
+        catch (RuntimeException exception) { throw unavailable(exception); }
     }
 
     @Override public List<RetrievalHit> search(String ownerId, String query, List<Double> denseVector, int limit) {

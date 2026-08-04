@@ -45,11 +45,17 @@ public class AppProperties {
     public static class RocketMq {
         private boolean enabled;
         private String transcriptionTopic;
+        private String documentTopic;
+        private String knowledgeTopic;
         private String analysisTopic;
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
         public String getTranscriptionTopic() { return transcriptionTopic; }
         public void setTranscriptionTopic(String transcriptionTopic) { this.transcriptionTopic = transcriptionTopic; }
+        public String getDocumentTopic() { return documentTopic; }
+        public void setDocumentTopic(String documentTopic) { this.documentTopic = documentTopic; }
+        public String getKnowledgeTopic() { return knowledgeTopic; }
+        public void setKnowledgeTopic(String knowledgeTopic) { this.knowledgeTopic = knowledgeTopic; }
         public String getAnalysisTopic() { return analysisTopic; }
         public void setAnalysisTopic(String analysisTopic) { this.analysisTopic = analysisTopic; }
     }

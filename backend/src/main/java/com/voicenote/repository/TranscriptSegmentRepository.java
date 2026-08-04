@@ -7,4 +7,5 @@ import java.util.List;
 public interface TranscriptSegmentRepository extends JpaRepository<TranscriptSegment, String> {
     List<TranscriptSegment> findByTranscriptionTaskIdAndTranscriptVersionOrderBySegmentIndex(String taskId, int transcriptVersion);
     void deleteByTranscriptionTaskIdAndTranscriptVersion(String taskId, int transcriptVersion);
+    void deleteByTranscriptionTaskId(String taskId);
 }

@@ -12,4 +12,6 @@ public interface TaskStageAttemptRepository extends JpaRepository<TaskStageAttem
     List<TaskStageAttempt> findByTranscriptionTaskIdOrderByQueuedAtAsc(String taskId);
     Optional<TaskStageAttempt> findTopByTranscriptionTaskIdAndStageOrderByAttemptNumberDesc(String taskId, PipelineStage stage);
     List<TaskStageAttempt> findTop50ByStatusAndNextRetryAtBeforeOrderByNextRetryAtAsc(StageAttemptStatus status, Instant time);
+    List<TaskStageAttempt> findTop50ByStatusAndLeaseUntilBeforeOrderByLeaseUntilAsc(StageAttemptStatus status, Instant time);
+    void deleteByTranscriptionTaskId(String taskId);
 }

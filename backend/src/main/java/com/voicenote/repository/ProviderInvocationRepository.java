@@ -6,4 +6,5 @@ import java.util.Optional;
 
 public interface ProviderInvocationRepository extends JpaRepository<ProviderInvocation, String> {
     Optional<ProviderInvocation> findByTaskAttemptIdAndInvocationType(String taskAttemptId, String invocationType);
+    void deleteByTaskAttemptId(String taskAttemptId);
 }

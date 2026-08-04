@@ -43,9 +43,11 @@ public class DashscopeAsrProvider implements AsrProvider {
             String key = data.path("upload_dir").asText() + "/" + safeName(audio.getOriginalFilename());
             uploadToDashscope(data, key, audio);
             String inputUrl = "oss://" + key;
-            String body = mapper.writeValueAsString(mapper.createObjectNode()
-                    .put("model", properties.getDashscope().getAsrModel())
-                    .set("input", mapper.createObjectNode().set("file_urls", mapper.createArrayNode().add(inputUrl))));
+            var bodyNode = mapper.createObjectNode();
+            bodyNode.put("model", properties.getDashscope().getAsrModel());
+            bodyNode.set("input", mapper.createObjectNode().set("file_urls", mapper.createArrayNode().add(inputUrl)));
+            bodyNode.set("parameters", mapper.createObjectNode().put("diarization_enabled", true));
+            String body = mapper.writeValueAsString(bodyNode);
             JsonNode response = client.post().uri("services/audio/asr/transcription")
                     .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                     .header("X-DashScope-Async", "enable")
@@ -110,7 +112,9 @@ public class DashscopeAsrProvider implements AsrProvider {
         JsonNode transcripts = transcript.path("transcripts");
         if (!transcripts.isArray()) return output;
         for (JsonNode channel : transcripts) for (JsonNode sentence : channel.path("sentences")) {
-            output.add(new AsrSegment(sentence.path("speaker_id").isMissingNode() ? null : "Speaker " + sentence.path("speaker_id").asText(),
+            JsonNode speaker = sentence.path("speaker_id");
+            String speakerLabel = speaker.isMissingNode() || speaker.isNull() || speaker.asText().isBlank() ? "SPEAKER_UNKNOWN" : "Speaker " + speaker.asText();
+            output.add(new AsrSegment(speakerLabel,
                     sentence.path("begin_time").asLong(), sentence.path("end_time").asLong(), sentence.path("text").asText()));
         }
         return output;

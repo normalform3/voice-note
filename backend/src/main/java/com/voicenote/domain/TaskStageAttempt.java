@@ -40,6 +40,7 @@ public class TaskStageAttempt {
     public Instant getCompletedAt() { return completedAt; }
     public Long getWaitDurationMs() { return waitDurationMs; }
     public Instant getNextRetryAt() { return nextRetryAt; }
+    public Instant getLeaseUntil() { return leaseUntil; }
     public String getErrorCode() { return errorCode; }
     public String getErrorMessage() { return errorMessage; }
     public String getResultSnapshot() { return resultSnapshot; }
@@ -52,4 +53,5 @@ public class TaskStageAttempt {
     public void retry(String code, String message, Instant nextRetry) { status = StageAttemptStatus.RETRY_WAIT; errorCode = code; errorMessage = message; nextRetryAt = nextRetry; leaseUntil = null; completedAt = Instant.now(); }
     public void retried() { status = StageAttemptStatus.RETRIED; nextRetryAt = null; leaseUntil = null; }
     public void fail(String code, String message, boolean unknown) { status = unknown ? StageAttemptStatus.UNKNOWN : StageAttemptStatus.FAILED; errorCode = code; errorMessage = message; completedAt = Instant.now(); leaseUntil = null; }
+    public void cancel() { if (status == StageAttemptStatus.QUEUED || status == StageAttemptStatus.RUNNING || status == StageAttemptStatus.RETRY_WAIT) { status = StageAttemptStatus.CANCELLED; completedAt = Instant.now(); leaseUntil = null; nextRetryAt = null; } }
 }

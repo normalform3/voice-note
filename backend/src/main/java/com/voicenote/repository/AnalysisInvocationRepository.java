@@ -6,4 +6,5 @@ import java.util.Optional;
 
 public interface AnalysisInvocationRepository extends JpaRepository<AnalysisInvocation, String> {
     Optional<AnalysisInvocation> findByAnalysisRunIdAndStageNameAndChunkIndex(String runId, String stageName, int chunkIndex);
+    void deleteByAnalysisRunId(String runId);
 }

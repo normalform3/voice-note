@@ -3,6 +3,7 @@ package com.voicenote.service;
 import com.voicenote.domain.AudioBlob;
 import com.voicenote.domain.BlobStatus;
 import com.voicenote.domain.IdempotencyRecord;
+import com.voicenote.domain.TranscriptionTask;
 import com.voicenote.repository.AudioBlobRepository;
 import com.voicenote.web.ApiException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -24,8 +25,18 @@ public class UploadService {
     private final IdempotencyService idempotency;
     private final ObjectStorage storage;
     private final ObjectMapper objectMapper;
-    public UploadService(AudioBlobRepository blobs, IdempotencyService idempotency, ObjectStorage storage, ObjectMapper objectMapper) {
+    private final TranscriptionTaskService tasks;
+    private final PipelineProgressService progress;
+    @org.springframework.beans.factory.annotation.Autowired
+    public UploadService(AudioBlobRepository blobs, IdempotencyService idempotency, ObjectStorage storage, ObjectMapper objectMapper,
+                         TranscriptionTaskService tasks, PipelineProgressService progress) {
         this.blobs = blobs; this.idempotency = idempotency; this.storage = storage; this.objectMapper = objectMapper;
+        this.tasks = tasks; this.progress = progress;
+    }
+    /** Kept for narrow upload unit tests; production uses the autowired pipeline-aware constructor. */
+    UploadService(AudioBlobRepository blobs, IdempotencyService idempotency, ObjectStorage storage, ObjectMapper objectMapper) {
+        this.blobs = blobs; this.idempotency = idempotency; this.storage = storage; this.objectMapper = objectMapper;
+        this.tasks = null; this.progress = null;
     }
 
     @Transactional
@@ -81,6 +92,18 @@ public class UploadService {
         AudioBlob blob = blobs.findById(blobId).filter(value -> value.getOwnerId().equals(ownerId))
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "AUDIO_NOT_FOUND", "Audio upload was not found"));
         return toIntent(blob);
+    }
+
+    @Transactional
+    public PipelineProgressService.TaskProgressView complete(String ownerId, String idempotencyKey, String blobId, TranscriptionTaskService.AsrConfig asrConfig) {
+        if (tasks == null || progress == null) throw new IllegalStateException("Pipeline task creation is not configured");
+        AudioBlob blob = blobs.findById(blobId).filter(value -> value.getOwnerId().equals(ownerId))
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "AUDIO_NOT_FOUND", "Audio upload was not found"));
+        if (blob.getStatus() != BlobStatus.READY) {
+            throw new ApiException(HttpStatus.CONFLICT, "AUDIO_NOT_READY", "Wait for the upload to finish before creating a task");
+        }
+        TranscriptionTask task = tasks.create(ownerId, idempotencyKey, new TranscriptionTaskService.CreateTaskCommand(blobId, asrConfig));
+        return progress.ownedView(ownerId, task.getId());
     }
 
     @Transactional

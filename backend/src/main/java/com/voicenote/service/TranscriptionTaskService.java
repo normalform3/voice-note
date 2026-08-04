@@ -14,9 +14,10 @@ import java.util.List;
 
 @Service
 public class TranscriptionTaskService {
-    private static final String PIPELINE_VERSION = "asr-v1";
+    private static final String PIPELINE_VERSION = "three-phase-v1";
     private static final String CREATE_OPERATION = "CREATE_TRANSCRIPTION_TASK";
     private static final String RETRY_OPERATION = "RETRY_TRANSCRIPTION_TASK";
+    private static final String CANCEL_OPERATION = "CANCEL_TRANSCRIPTION_TASK";
     private final TranscriptionTaskRepository tasks;
     private final TaskAttemptRepository attempts;
     private final AudioBlobRepository blobs;
@@ -26,10 +27,13 @@ public class TranscriptionTaskService {
     private final PipelineProgressService pipeline;
     private final AppProperties properties;
     private final KnowledgeDocumentService knowledgeDocuments;
+    private final DocumentOrganizationService organizedDocuments;
 
     public TranscriptionTaskService(TranscriptionTaskRepository tasks, TaskAttemptRepository attempts, AudioBlobRepository blobs,
-                                    IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, PipelineProgressService pipeline, AppProperties properties, KnowledgeDocumentService knowledgeDocuments) {
-        this.tasks = tasks; this.attempts = attempts; this.blobs = blobs; this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper; this.pipeline = pipeline; this.properties = properties; this.knowledgeDocuments = knowledgeDocuments;
+                                    IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, PipelineProgressService pipeline,
+                                    AppProperties properties, KnowledgeDocumentService knowledgeDocuments, DocumentOrganizationService organizedDocuments) {
+        this.tasks = tasks; this.attempts = attempts; this.blobs = blobs; this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper;
+        this.pipeline = pipeline; this.properties = properties; this.knowledgeDocuments = knowledgeDocuments; this.organizedDocuments = organizedDocuments;
     }
 
     @Transactional
@@ -62,7 +66,7 @@ public class TranscriptionTaskService {
         IdempotencyRecord record = idempotency.reserve(ownerId, RETRY_OPERATION, key, Hashing.sha256(taskId));
         if (record.getResourceId() != null) return ownedTask(ownerId, record.getResourceId());
         TranscriptionTask task = ownedTask(ownerId, taskId);
-        if (!(task.getStatus() == TaskStatus.RETRYABLE_FAILED || task.getStatus() == TaskStatus.FINAL_FAILED || task.getStatus() == TaskStatus.SUBMISSION_UNKNOWN)) {
+        if (!(task.getStatus() == TaskStatus.RETRY_WAIT || task.getStatus() == TaskStatus.FAILED || task.getStatus() == TaskStatus.RETRYABLE_FAILED || task.getStatus() == TaskStatus.FINAL_FAILED || task.getStatus() == TaskStatus.SUBMISSION_UNKNOWN)) {
             throw new ApiException(HttpStatus.CONFLICT, "TASK_NOT_RETRYABLE", "Only terminal or unknown submissions can be retried");
         }
         int number = task.nextAttemptNumber();
@@ -80,6 +84,9 @@ public class TranscriptionTaskService {
         if (record.getResourceId() != null) return pipeline.ownedView(ownerId, record.getResourceId());
         if (stage == PipelineStage.KNOWLEDGE_INDEX) {
             knowledgeDocuments.retryForTask(ownerId, taskId);
+        } else if (stage == PipelineStage.DOCUMENT_ORGANIZATION) {
+            pipeline.retryStage(ownerId, taskId, stage);
+            organizedDocuments.retryForTask(ownerId, taskId);
         } else if (stage == PipelineStage.ASR_SUBMIT) {
             retry(ownerId, key + ":asr", taskId);
             pipeline.retryStage(ownerId, taskId, stage);
@@ -89,6 +96,17 @@ public class TranscriptionTaskService {
         PipelineProgressService.TaskProgressView response = pipeline.ownedView(ownerId, taskId);
         try { idempotency.complete(record, taskId, mapper.writeValueAsString(response)); }
         catch (Exception exception) { throw new IllegalStateException("Cannot persist idempotent retry response", exception); }
+        return response;
+    }
+
+    @Transactional
+    public PipelineProgressService.TaskProgressView cancel(String ownerId, String key, String taskId) {
+        IdempotencyRecord record = idempotency.reserve(ownerId, CANCEL_OPERATION, key, Hashing.sha256(taskId));
+        if (record.getResourceId() != null) return pipeline.ownedView(ownerId, record.getResourceId());
+        pipeline.cancel(ownerId, taskId);
+        PipelineProgressService.TaskProgressView response = pipeline.ownedView(ownerId, taskId);
+        try { idempotency.complete(record, taskId, mapper.writeValueAsString(response)); }
+        catch (Exception exception) { throw new IllegalStateException("Cannot persist idempotent cancel response", exception); }
         return response;
     }
 
@@ -110,8 +128,8 @@ public class TranscriptionTaskService {
 
     public record CreateTaskCommand(String audioBlobId, AsrConfig asrConfig) { }
     public record AsrConfig(List<String> languageHints, boolean diarizationEnabled, Integer speakerCount) {
-        public static AsrConfig defaultConfig() { return new AsrConfig(List.of("zh", "en"), false, null); }
-        public AsrConfig normalized() { return new AsrConfig(languageHints == null || languageHints.isEmpty() ? List.of("zh", "en") : languageHints.stream().sorted().toList(), diarizationEnabled, diarizationEnabled ? speakerCount : null); }
+        public static AsrConfig defaultConfig() { return new AsrConfig(List.of("zh", "en"), true, null); }
+        public AsrConfig normalized() { return new AsrConfig(languageHints == null || languageHints.isEmpty() ? List.of("zh", "en") : languageHints.stream().sorted().toList(), true, speakerCount); }
     }
     public record TaskView(String id, TaskStatus status, int currentAttemptNumber, int transcriptVersion, String failureCode, String failureMessage) {
         public static TaskView from(TranscriptionTask task) { return new TaskView(task.getId(), task.getStatus(), task.getCurrentAttemptNumber(), task.getTranscriptVersion(), task.getFailureCode(), task.getFailureMessage()); }

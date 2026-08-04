@@ -24,6 +24,7 @@ public class KnowledgeAgentService {
     private final AppProperties properties;
     private final ProgressEventPublisher progressEvents;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public KnowledgeAgentService(KnowledgeRunRepository runs, KnowledgeRunEvidenceRepository evidence, IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, AppProperties properties, ProgressEventPublisher progressEvents) {
         this.runs = runs; this.evidence = evidence; this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper; this.properties = properties; this.progressEvents = progressEvents;
     }

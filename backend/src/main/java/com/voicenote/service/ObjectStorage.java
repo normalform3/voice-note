@@ -42,6 +42,11 @@ public class ObjectStorage {
                 classify(exception).category(), minioErrorCode(exception), exception.getClass().getSimpleName()); }
     }
 
+    public void remove(String objectKey) {
+        try { minio.removeObject(RemoveObjectArgs.builder().bucket(properties.getStorage().getBucket()).object(objectKey).build()); }
+        catch (Exception exception) { throw storageFailure("delete", exception); }
+    }
+
     private void ensureBucket() throws Exception {
         String bucket = properties.getStorage().getBucket();
         if (!minio.bucketExists(BucketExistsArgs.builder().bucket(bucket).build())) {

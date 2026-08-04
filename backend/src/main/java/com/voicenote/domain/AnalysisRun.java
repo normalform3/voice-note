@@ -11,6 +11,7 @@ public class AnalysisRun {
     @Version private long version;
     @Column(name = "owner_id", nullable = false, columnDefinition = "CHAR(36)") private String ownerId;
     @Column(name = "transcription_task_id", nullable = false, columnDefinition = "CHAR(36)") private String transcriptionTaskId;
+    @Column(name = "organized_document_id", columnDefinition = "CHAR(36)") private String organizedDocumentId;
     @Column(name = "transcript_snapshot_hash", nullable = false, columnDefinition = "CHAR(64)") private String transcriptSnapshotHash;
     @Column(name = "analysis_mode", nullable = false) private String analysisMode;
     @Column(name = "custom_goal", nullable = false, columnDefinition = "TEXT") private String customGoal;
@@ -35,6 +36,7 @@ public class AnalysisRun {
     public String getId() { return id; }
     public String getOwnerId() { return ownerId; }
     public String getTranscriptionTaskId() { return transcriptionTaskId; }
+    public String getOrganizedDocumentId() { return organizedDocumentId; }
     public String getTranscriptSnapshotHash() { return transcriptSnapshotHash; }
     public String getAnalysisMode() { return analysisMode; }
     public String getCustomGoal() { return customGoal; }
@@ -45,6 +47,7 @@ public class AnalysisRun {
     public int getCallsUsed() { return callsUsed; }
     public int getMaxCalls() { return maxCalls; }
     public boolean start() { if (status != AnalysisRunStatus.QUEUED) return false; status = AnalysisRunStatus.RUNNING; updatedAt = Instant.now(); return true; }
+    public void useOrganizedDocument(String documentId) { organizedDocumentId = documentId; updatedAt = Instant.now(); }
     public boolean consumeCall() { if (callsUsed >= maxCalls) { status = AnalysisRunStatus.BUDGET_EXHAUSTED; updatedAt = Instant.now(); return false; } callsUsed++; updatedAt = Instant.now(); return true; }
     public void succeed(String result, String qualityStatus) { this.status = AnalysisRunStatus.SUCCEEDED; this.resultDocument = result; this.qualityStatus = qualityStatus; this.updatedAt = Instant.now(); }
     public void fail(String message) { this.status = AnalysisRunStatus.FAILED; this.failureMessage = message; this.updatedAt = Instant.now(); }

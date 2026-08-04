@@ -42,10 +42,10 @@ public class AsrWorker {
     public static class AsrAttemptState {
         private final TaskAttemptRepository attempts; private final TranscriptionTaskRepository tasks; private final AudioBlobRepository blobs;
         private final ProviderInvocationRepository invocations; private final TranscriptSegmentRepository segments;
-        private final KnowledgeDocumentService knowledgeDocuments;
+        private final DocumentOrganizationService organizedDocuments;
         private final PipelineProgressService pipeline;
-        public AsrAttemptState(TaskAttemptRepository attempts, TranscriptionTaskRepository tasks, AudioBlobRepository blobs, ProviderInvocationRepository invocations, TranscriptSegmentRepository segments, KnowledgeDocumentService knowledgeDocuments, PipelineProgressService pipeline) {
-            this.attempts = attempts; this.tasks = tasks; this.blobs = blobs; this.invocations = invocations; this.segments = segments; this.knowledgeDocuments = knowledgeDocuments; this.pipeline = pipeline;
+        public AsrAttemptState(TaskAttemptRepository attempts, TranscriptionTaskRepository tasks, AudioBlobRepository blobs, ProviderInvocationRepository invocations, TranscriptSegmentRepository segments, DocumentOrganizationService organizedDocuments, PipelineProgressService pipeline) {
+            this.attempts = attempts; this.tasks = tasks; this.blobs = blobs; this.invocations = invocations; this.segments = segments; this.organizedDocuments = organizedDocuments; this.pipeline = pipeline;
         }
         @Transactional(readOnly = true) public List<String> queuedAttempts() { return attempts.findTop20ByStatusOrderByCreatedAtAsc(AttemptStatus.QUEUED).stream().map(TaskAttempt::getId).toList(); }
         @Transactional(readOnly = true) public List<String> duePolls() { return attempts.findTop20ByStatusAndNextPollAtBeforeOrderByNextPollAtAsc(AttemptStatus.PROVIDER_RUNNING, Instant.now()).stream().map(TaskAttempt::getId).toList(); }
@@ -53,7 +53,7 @@ public class AsrWorker {
         public SubmissionWork claimSubmission(String attemptId) {
             TaskAttempt attempt = attempts.findById(attemptId).orElse(null); if (attempt == null) return null;
             if (!pipeline.begin(attempt.getTranscriptionTaskId(), PipelineStage.ASR_SUBMIT) || !attempt.claimSubmission()) return null;
-            TranscriptionTask task = tasks.findById(attempt.getTranscriptionTaskId()).orElseThrow(); task.mark(TaskStatus.SUBMITTING);
+            TranscriptionTask task = tasks.findById(attempt.getTranscriptionTaskId()).orElseThrow(); task.mark(TaskStatus.RUNNING);
             ProviderInvocation invocation = invocations.findByTaskAttemptIdAndInvocationType(attempt.getId(), "ASR_SUBMIT")
                     .orElseGet(() -> new ProviderInvocation(attempt.getId(), "ASR_SUBMIT", Hashing.sha256(task.getId() + ":" + attempt.getAttemptNumber())));
             if (invocation.getStatus() != InvocationStatus.READY) return null;
@@ -63,7 +63,8 @@ public class AsrWorker {
         @Transactional
         public void recordSubmission(String attemptId, AsrProvider.AsrSubmission submission) {
             TaskAttempt attempt = attempts.findById(attemptId).orElseThrow(); TranscriptionTask task = tasks.findById(attempt.getTranscriptionTaskId()).orElseThrow();
-            attempt.submitted(submission.providerTaskId(), submission.providerInputUrl()); task.mark(TaskStatus.PROVIDER_RUNNING);
+            if (task.isCancelled()) return;
+            attempt.submitted(submission.providerTaskId(), submission.providerInputUrl()); task.mark(TaskStatus.RUNNING);
             invocations.findByTaskAttemptIdAndInvocationType(attemptId, "ASR_SUBMIT").ifPresent(value -> { value.markSucceeded("{\"providerTaskId\":\"" + submission.providerTaskId() + "\"}"); invocations.save(value); });
             attempts.save(attempt); tasks.save(task);
             pipeline.succeeded(task.getId(), PipelineStage.ASR_SUBMIT, "{\"submitted\":true}", PipelineStage.ASR_POLL);
@@ -80,6 +81,7 @@ public class AsrWorker {
         @Transactional
         public void recordPoll(String attemptId, AsrProvider.AsrPollResult result) {
             TaskAttempt attempt = attempts.findById(attemptId).orElseThrow(); TranscriptionTask task = tasks.findById(attempt.getTranscriptionTaskId()).orElseThrow();
+            if (task.isCancelled()) return;
             if (result.status() == AsrProvider.AsrPollResult.Status.RUNNING) { attempt.reschedulePoll(); attempts.save(attempt); return; }
             if (result.status() == AsrProvider.AsrPollResult.Status.FAILED) { attempt.fail(AttemptStatus.FINAL_FAILED, result.errorCode(), result.errorMessage()); task.fail(TaskStatus.FINAL_FAILED, result.errorCode(), result.errorMessage()); attempts.save(attempt); tasks.save(task); pipeline.failed(task.getId(), PipelineStage.ASR_POLL, result.errorCode(), result.errorMessage(), false); return; }
             pipeline.succeeded(task.getId(), PipelineStage.ASR_POLL, "{\"completed\":true,\"segmentCount\":" + result.segments().size() + "}", PipelineStage.TRANSCRIPT_PERSIST);
@@ -87,14 +89,14 @@ public class AsrWorker {
             int version = task.nextTranscriptVersion(); List<TranscriptSegment> created = new java.util.ArrayList<>();
             for (int index = 0; index < result.segments().size(); index++) { AsrProvider.AsrSegment segment = result.segments().get(index); created.add(segments.save(new TranscriptSegment(task.getId(), version, index, segment.speakerLabel(), segment.startMs(), segment.endMs(), segment.text()))); }
             attempt.succeed(); attempts.save(attempt); tasks.save(task);
-            pipeline.succeeded(task.getId(), PipelineStage.TRANSCRIPT_PERSIST, "{\"transcriptVersion\":" + version + ",\"segmentCount\":" + created.size() + "}", PipelineStage.KNOWLEDGE_PREPARE);
-            if (!pipeline.begin(task.getId(), PipelineStage.KNOWLEDGE_PREPARE)) return;
-            knowledgeDocuments.createForTranscript(task, blobs.findById(task.getAudioBlobId()).orElseThrow(), created);
-            pipeline.succeeded(task.getId(), PipelineStage.KNOWLEDGE_PREPARE, "{\"prepared\":true}", PipelineStage.KNOWLEDGE_INDEX);
+            pipeline.succeeded(task.getId(), PipelineStage.TRANSCRIPT_PERSIST, "{\"transcriptVersion\":" + version + ",\"segmentCount\":" + created.size() + "}", PipelineStage.DOCUMENT_ORGANIZATION);
+            if (task.isCancelled()) return;
+            organizedDocuments.createForTranscript(task, blobs.findById(task.getAudioBlobId()).orElseThrow());
         }
         @Transactional
         public void recordFailure(String attemptId, PipelineStage stage, ProviderException exception) {
             TaskAttempt attempt = attempts.findById(attemptId).orElseThrow(); TranscriptionTask task = tasks.findById(attempt.getTranscriptionTaskId()).orElseThrow();
+            if (task.isCancelled()) return;
             if (exception.getKind() == ProviderException.Kind.RETRYABLE_REJECTION) {
                 int retryNumber = pipeline.ownedView(task.getOwnerId(), task.getId()).stages().stream().filter(value -> value.stage() == stage).reduce((first, second) -> second).map(value -> value.attemptNumber()).orElse(1);
                 pipeline.retryLater(task.getId(), stage, exception.getCode(), exception.getMessage(), retryNumber);
@@ -109,6 +111,7 @@ public class AsrWorker {
         @Transactional
         public void activateDueRetries() {
             for (PipelineProgressService.RetryWork retry : pipeline.dueRetries()) {
+                if (retry.stage() != PipelineStage.ASR_SUBMIT && retry.stage() != PipelineStage.ASR_POLL) continue;
                 if (!pipeline.activateRetry(retry.stageAttemptId())) continue;
                 TaskAttempt attempt = attempts.findTopByTranscriptionTaskIdOrderByAttemptNumberDesc(retry.taskId()).orElse(null);
                 if (attempt == null) continue;

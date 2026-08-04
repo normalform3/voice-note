@@ -20,11 +20,16 @@ import java.util.*;
 public class AnalysisService {
     private static final String CREATE_OPERATION = "CREATE_ANALYSIS_RUN";
     private final AnalysisRunRepository runs; private final TranscriptionTaskRepository tasks; private final TranscriptSegmentRepository segments;
+    private final OrganizedDocumentRepository organizedDocuments; private final OrganizedDocumentBlockRepository organizedBlocks;
     private final AnalysisInvocationRepository invocations; private final AnalysisEvidenceRepository evidence;
     private final IdempotencyService idempotency; private final OutboxService outbox; private final ObjectMapper mapper; private final AppProperties properties;
     private final ProgressEventPublisher progressEvents;
-    public AnalysisService(AnalysisRunRepository runs, TranscriptionTaskRepository tasks, TranscriptSegmentRepository segments, AnalysisInvocationRepository invocations, AnalysisEvidenceRepository evidence, IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, AppProperties properties, ProgressEventPublisher progressEvents) {
-        this.runs = runs; this.tasks = tasks; this.segments = segments; this.invocations = invocations; this.evidence = evidence; this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper; this.properties = properties; this.progressEvents = progressEvents;
+    public AnalysisService(AnalysisRunRepository runs, TranscriptionTaskRepository tasks, TranscriptSegmentRepository segments,
+                           OrganizedDocumentRepository organizedDocuments, OrganizedDocumentBlockRepository organizedBlocks,
+                           AnalysisInvocationRepository invocations, AnalysisEvidenceRepository evidence, IdempotencyService idempotency,
+                           OutboxService outbox, ObjectMapper mapper, AppProperties properties, ProgressEventPublisher progressEvents) {
+        this.runs = runs; this.tasks = tasks; this.segments = segments; this.organizedDocuments = organizedDocuments; this.organizedBlocks = organizedBlocks;
+        this.invocations = invocations; this.evidence = evidence; this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper; this.properties = properties; this.progressEvents = progressEvents;
     }
     @Transactional
     public AnalysisRun create(String ownerId, String key, CreateAnalysisCommand command) {
@@ -45,6 +50,30 @@ public class AnalysisService {
         catch (Exception exception) { throw new IllegalStateException("Cannot persist idempotent analysis response", exception); }
         return run;
     }
+    @Transactional
+    public AnalysisRun createSummary(String ownerId, String key, String organizedDocumentId) {
+        OrganizedDocument document = organizedDocuments.findById(organizedDocumentId).filter(value -> value.getOwnerId().equals(ownerId))
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORGANIZED_DOCUMENT_NOT_FOUND", "Organized document was not found"));
+        if (document.getStatus() != OrganizedDocumentStatus.READY) throw new ApiException(HttpStatus.CONFLICT, "ORGANIZED_DOCUMENT_NOT_READY", "Summary requires a completed organized document");
+        TranscriptionTask task = tasks.findById(document.getTranscriptionTaskId()).orElseThrow();
+        List<OrganizedDocumentBlock> source = organizedBlocks.findByOrganizedDocumentIdOrderByBlockIndex(document.getId());
+        String snapshotHash = Hashing.canonicalJsonHash(source.stream().map(block -> Map.of("id", block.getId(), "source", block.getSourceSegmentIds(), "text", block.getTextContent())).toList());
+        String goal = "Summarize the organized document faithfully. Include concise findings and cite the source segmentIds for every finding.";
+        String semanticHash = Hashing.canonicalJsonHash(Map.of("snapshot", snapshotHash, "mode", "summary", "goal", goal, "template", "organized-summary-v1", "model", properties.getDashscope().getChatModel()));
+        IdempotencyRecord record = idempotency.reserve(ownerId, CREATE_OPERATION, key, Hashing.canonicalJsonHash(Map.of("organizedDocumentId", organizedDocumentId, "mode", "summary")));
+        if (record.getResourceId() != null) return runs.findById(record.getResourceId()).orElseThrow();
+        List<String> chunks = chunkOrganized(source);
+        AnalysisRun run = runs.findByOwnerIdAndTranscriptionTaskIdAndSemanticHash(ownerId, task.getId(), semanticHash)
+                .orElseGet(() -> {
+                    AnalysisRun created = new AnalysisRun(ownerId, task.getId(), snapshotHash, "summary", goal, "organized-summary-v1", properties.getDashscope().getChatModel(), semanticHash, chunks.size() + 3);
+                    created.useOrganizedDocument(document.getId()); created = runs.save(created);
+                    outbox.enqueue("analysis_run", created.getId(), EventType.ANALYSIS_REQUESTED);
+                    return created;
+                });
+        try { idempotency.complete(record, run.getId(), mapper.writeValueAsString(AnalysisView.from(run))); }
+        catch (Exception exception) { throw new IllegalStateException("Cannot persist idempotent summary response", exception); }
+        return run;
+    }
     @Transactional public void markQueued(String runId) { runs.findById(runId).orElseThrow(); }
     @Transactional(readOnly = true) public AnalysisRun ownedRun(String ownerId, String runId) { return runs.findById(runId).filter(value -> value.getOwnerId().equals(ownerId)).orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ANALYSIS_NOT_FOUND", "Analysis run was not found")); }
     @Transactional(readOnly = true) public List<AnalysisRun> ownedRuns(String ownerId) { return runs.findByOwnerIdOrderByCreatedAtDesc(ownerId); }
@@ -52,7 +81,10 @@ public class AnalysisService {
     @Transactional public RunWork claim(String runId) {
         AnalysisRun run = runs.findById(runId).orElse(null); if (run == null || !run.start()) return null;
         TranscriptionTask task = tasks.findById(run.getTranscriptionTaskId()).orElseThrow();
-        return new RunWork(run.getId(), run.getAnalysisMode(), run.getCustomGoal(), chunk(segments.findByTranscriptionTaskIdAndTranscriptVersionOrderBySegmentIndex(task.getId(), task.getTranscriptVersion())));
+        List<String> chunks = run.getOrganizedDocumentId() == null
+                ? chunk(segments.findByTranscriptionTaskIdAndTranscriptVersionOrderBySegmentIndex(task.getId(), task.getTranscriptVersion()))
+                : chunkOrganized(organizedBlocks.findByOrganizedDocumentIdOrderByBlockIndex(run.getOrganizedDocumentId()));
+        return new RunWork(run.getId(), run.getAnalysisMode(), run.getCustomGoal(), chunks);
     }
     @Transactional public StageAction prepareStage(String runId, String stage, int chunkIndex, String prompt) {
         AnalysisRun run = runs.findById(runId).orElseThrow();
@@ -113,6 +145,15 @@ public class AnalysisService {
     static List<String> chunk(List<TranscriptSegment> source) {
         List<String> output = new ArrayList<>(); StringBuilder current = new StringBuilder();
         for (TranscriptSegment segment : source) { String line = "[" + segment.getId() + "] " + segment.getStartMs() + "-" + segment.getEndMs() + "ms: " + segment.getTextContent() + "\n"; if (current.length() > 0 && current.length() + line.length() > 8000) { output.add(current.toString()); current = new StringBuilder(); } current.append(line); }
+        if (!current.isEmpty()) output.add(current.toString()); return output;
+    }
+    private List<String> chunkOrganized(List<OrganizedDocumentBlock> source) {
+        List<String> output = new ArrayList<>(); StringBuilder current = new StringBuilder();
+        for (OrganizedDocumentBlock block : source) {
+            String line = "[source=" + block.getSourceSegmentIds() + "] " + (block.getTopicTitle() == null ? "整理片段" : block.getTopicTitle()) + "\n" + block.getTextContent() + "\n";
+            if (!current.isEmpty() && current.length() + line.length() > 8000) { output.add(current.toString()); current = new StringBuilder(); }
+            current.append(line);
+        }
         if (!current.isEmpty()) output.add(current.toString()); return output;
     }
 }

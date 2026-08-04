@@ -53,9 +53,17 @@ The embedding model is required when `VOICENOTE_KNOWLEDGE_ENABLED=true`; the ASR
 
 ### Knowledge base
 
-When `VOICENOTE_KNOWLEDGE_ENABLED=true`, each successfully transcribed recording creates a private knowledge document. Its transcript chunks are indexed in Qdrant with a DashScope Dense embedding and Qdrant BM25 sparse representation; the backend fuses both rankings and always filters by the authenticated owner. Use a Qdrant release that supports server-side `qdrant/bm25` documents and hybrid Query API. Qdrant must remain reachable only from the backend, never directly from the browser.
+When `VOICENOTE_KNOWLEDGE_ENABLED=true`, each successfully organized recording creates a private knowledge document. Its topic-aware chunks are indexed in Qdrant with a DashScope Dense embedding and Qdrant BM25 sparse representation; the backend fuses both rankings and always filters by the authenticated owner. Use a Qdrant release that supports server-side `qdrant/bm25` documents and hybrid Query API. Qdrant must remain reachable only from the backend, never directly from the browser.
 
 The Agent creates a one-off, evidence-backed knowledge task. It can search the owner's collection and read returned document chunks, with four tool calls maximum. Every factual finding must cite transcript segments; citations in the workbench seek the source audio to the original timestamp.
+
+### Three-phase audio pipeline
+
+After the client has uploaded and verified audio bytes, it calls `POST /api/uploads/intents/{blobId}/complete` with an idempotency key. The response is `202 Accepted` and contains the task ID; it never waits for ASR, document organization, or vector indexing.
+
+The durable pipeline is `TRANSCRIPTION` (speaker-labelled, timestamped raw segments), `DOCUMENT_ORGANIZATION` (cleaned turns and evidence-preserving topic sections), then `KNOWLEDGE_BUILD` (topic-aware chunks, embeddings, and Qdrant upserts). MySQL records task and phase attempts; RocketMQ dispatches transcription, document, and knowledge events through the transactional outbox. The recovery coordinator repairs expired leases and due retries after a restart.
+
+`POST /api/transcription-tasks/{taskId}/cancel` performs cooperative cancellation. A provider request already in flight may finish, but its result is discarded and cannot trigger a downstream phase. A failed phase can be retried without re-running completed phases. Once document organization is ready, `POST /api/organized-documents/{documentId}/summary` creates an evidence-backed summary run on that organized-document snapshot.
 
 ### `Communications link failure` on startup
 

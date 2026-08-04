@@ -11,6 +11,7 @@ public class OutboxEvent {
     @Column(name = "aggregate_type", nullable = false) private String aggregateType;
     @Column(name = "aggregate_id", nullable = false, columnDefinition = "CHAR(36)") private String aggregateId;
     @Enumerated(EnumType.STRING) @Column(name = "event_type", nullable = false) private EventType eventType;
+    @Column(name = "deduplication_key") private String deduplicationKey;
     @Column(nullable = false, columnDefinition = "json") private String payload;
     @Enumerated(EnumType.STRING) @Column(nullable = false) private OutboxStatus status;
     @Column(nullable = false) private int attempts;
@@ -18,14 +19,16 @@ public class OutboxEvent {
     @Column(name = "published_at") private Instant publishedAt;
     @Column(name = "created_at", nullable = false) private Instant createdAt;
     protected OutboxEvent() { }
-    public OutboxEvent(String aggregateType, String aggregateId, EventType eventType, String payload) {
+    public OutboxEvent(String aggregateType, String aggregateId, EventType eventType, String payload, String deduplicationKey) {
         this.id = UUID.randomUUID().toString(); this.aggregateType = aggregateType; this.aggregateId = aggregateId; this.eventType = eventType; this.payload = payload;
+        this.deduplicationKey = deduplicationKey;
         this.status = OutboxStatus.READY; this.availableAt = Instant.now(); this.createdAt = Instant.now();
     }
     public String getId() { return id; }
     public String getAggregateType() { return aggregateType; }
     public String getAggregateId() { return aggregateId; }
     public EventType getEventType() { return eventType; }
+    public String getDeduplicationKey() { return deduplicationKey; }
     public String getPayload() { return payload; }
     public OutboxStatus getStatus() { return status; }
     public void markPublished() { status = OutboxStatus.PUBLISHED; publishedAt = Instant.now(); attempts++; }

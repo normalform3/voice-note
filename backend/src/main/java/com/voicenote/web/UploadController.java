@@ -2,6 +2,7 @@ package com.voicenote.web;
 
 import com.voicenote.security.UserPrincipal;
 import com.voicenote.service.UploadService;
+import com.voicenote.service.TranscriptionTaskService;
 import jakarta.servlet.http.HttpServletRequest;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.Min;
@@ -29,6 +30,17 @@ public class UploadController {
         uploads.uploadContent(CurrentUser.require(authentication).id(), blobId, request.getInputStream());
         return ResponseEntity.noContent().build();
     }
+    @PostMapping("/intents/{blobId}/complete")
+    ResponseEntity<com.voicenote.service.PipelineProgressService.TaskProgressView> complete(@PathVariable String blobId,
+                                                                                              @RequestHeader("Idempotency-Key") String key,
+                                                                                              @RequestBody(required = false) CompleteUploadRequest request,
+                                                                                              Authentication authentication) {
+        UserPrincipal user = CurrentUser.require(authentication);
+        var view = uploads.complete(user.id(), key, blobId,
+                request == null ? null : request.asrConfig());
+        return ResponseEntity.status(HttpStatus.ACCEPTED).body(view);
+    }
     @GetMapping("/intents/{blobId}") UploadService.UploadIntent get(@PathVariable String blobId, Authentication authentication) { return uploads.byId(CurrentUser.require(authentication).id(), blobId); }
     public record UploadIntentRequest(@NotBlank @Pattern(regexp = "[a-fA-F0-9]{64}") String sha256, @Min(1) long contentLength, @NotBlank String contentType, @NotBlank String originalFilename) { }
+    public record CompleteUploadRequest(TranscriptionTaskService.AsrConfig asrConfig) { }
 }

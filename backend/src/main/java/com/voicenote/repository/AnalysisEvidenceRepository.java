@@ -6,4 +6,5 @@ import java.util.List;
 
 public interface AnalysisEvidenceRepository extends JpaRepository<AnalysisEvidence, String> {
     List<AnalysisEvidence> findByAnalysisRunId(String runId);
+    void deleteByAnalysisRunId(String runId);
 }

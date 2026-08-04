@@ -7,17 +7,20 @@ api.interceptors.request.use((config) => {
   return config
 })
 
-export type PipelineStage = 'UPLOAD_COMPLETED' | 'ASR_SUBMIT' | 'ASR_POLL' | 'TRANSCRIPT_PERSIST' | 'KNOWLEDGE_PREPARE' | 'KNOWLEDGE_INDEX' | 'COMPLETED'
+export type PipelineStage = 'UPLOAD_COMPLETED' | 'ASR_SUBMIT' | 'ASR_POLL' | 'TRANSCRIPT_PERSIST' | 'DOCUMENT_ORGANIZATION' | 'KNOWLEDGE_PREPARE' | 'KNOWLEDGE_INDEX' | 'COMPLETED'
+export type PipelinePhase = 'TRANSCRIPTION' | 'DOCUMENT_ORGANIZATION' | 'KNOWLEDGE_BUILD' | 'COMPLETED'
 export type StageAttempt = { stage: PipelineStage; status: string; attemptNumber: number; queuedAt: string; startedAt?: string; completedAt?: string; waitDurationMs?: number; totalWaitDurationMs: number; nextRetryAt?: string; errorCode?: string; errorMessage?: string }
 export type Task = {
-  id: string; audioBlobId: string; status: string; currentStage?: PipelineStage; progressPercent?: number; transcriptReady?: boolean
+  id: string; audioBlobId: string; status: string; currentPhase?: PipelinePhase; currentStage?: PipelineStage; progressPercent?: number; transcriptReady?: boolean
   currentAttemptNumber: number; transcriptVersion: number; failureCode?: string; failureMessage?: string; failedStage?: PipelineStage
-  retryableStages?: PipelineStage[]; stages?: StageAttempt[]; knowledgeDocument?: { id: string; title: string; status: string; failureMessage?: string }
+  retryableStages?: PipelineStage[]; stages?: StageAttempt[]; knowledgeDocument?: { id: string; title: string; status: string; failureMessage?: string }; organizedDocument?: { id: string; title: string; status: string; failureMessage?: string }
 }
 export type Segment = { id: string; index: number; speaker?: string; startMs: number; endMs: number; text: string }
+export type OrganizedBlock = { id: string; index: number; type: string; speaker?: string; topic?: string; startMs: number; endMs: number; sourceSegmentIds: string; text: string }
+export type OrganizedDocumentDetail = { document: { id: string; taskId: string; title: string; status: string; structureDocument?: string; plainText?: string; failureMessage?: string }; blocks: OrganizedBlock[] }
 export type KnowledgeDocument = { id: string; transcriptionTaskId: string; title: string; status: string; failureMessage?: string; updatedAt: string }
 export type KnowledgeRun = { id: string; status: string; toolCallsUsed: number; maxToolCalls: number; resultDocument?: string; failureMessage?: string }
-export type KnowledgeEvidence = { resultPath: string; documentId: string; chunkId: string; transcriptionTaskId?: string; segmentId: string }
+export type KnowledgeEvidence = { resultPath: string; documentId: string; chunkId: string; transcriptionTaskId?: string; segmentId: string; startMs?: number; endMs?: number }
 export type KnowledgeRunDetail = { run: KnowledgeRun; evidence: KnowledgeEvidence[] }
 export type AnalysisRun = { id: string; transcriptionTaskId: string; status: string; callsUsed: number; maxCalls: number; resultDocument?: string; failureMessage?: string }
 export type AnalysisEvidence = { resultPath: string; segmentId: string; startOffset?: number; endOffset?: number }
@@ -71,13 +74,13 @@ export const timecode = (milliseconds: number) => {
 }
 export const statusText = (status: string) => ({
   PENDING: '等待调度', QUEUED: '等待处理', INDEXING: '建立索引', READY: '已收录', FAILED: '处理失败',
-  SUCCEEDED: '已完成', RUNNING: '处理中', PROVIDER_RUNNING: '转写中', SUBMITTING: '提交中',
+  SUCCEEDED: '已完成', RUNNING: '处理中', PROVIDER_RUNNING: '转写中', SUBMITTING: '提交中', ORGANIZING: '整理中', CANCELLED: '已取消',
   FINAL_FAILED: '转写失败', RETRYABLE_FAILED: '自动重试中', SUBMISSION_UNKNOWN: '状态未知', BUDGET_EXHAUSTED: '额度已用尽',
   RETRY_WAIT: '等待重试', UNKNOWN: '状态未知', RETRIED: '已重试'
 }[status] || status)
 export const stageText = (stage?: PipelineStage) => {
   const labels: Record<PipelineStage, string> = {
-  UPLOAD_COMPLETED: '音频上传', ASR_SUBMIT: '提交转写', ASR_POLL: '等待转写结果', TRANSCRIPT_PERSIST: '保存听记',
+  UPLOAD_COMPLETED: '音频上传', ASR_SUBMIT: '提交转写', ASR_POLL: '等待转写结果', TRANSCRIPT_PERSIST: '保存听记', DOCUMENT_ORGANIZATION: '整理文档',
   KNOWLEDGE_PREPARE: '准备知识文档', KNOWLEDGE_INDEX: '建立知识索引', COMPLETED: '处理完成'
   }
   return stage ? labels[stage] : '等待处理'

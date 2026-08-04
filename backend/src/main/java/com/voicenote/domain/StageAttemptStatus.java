@@ -7,5 +7,6 @@ public enum StageAttemptStatus {
     RETRY_WAIT,
     RETRIED,
     FAILED,
-    UNKNOWN
+    UNKNOWN,
+    CANCELLED
 }

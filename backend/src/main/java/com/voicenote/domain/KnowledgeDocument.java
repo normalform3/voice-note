@@ -11,7 +11,9 @@ public class KnowledgeDocument {
     @Version private long version;
     @Column(name = "owner_id", nullable = false, columnDefinition = "CHAR(36)") private String ownerId;
     @Column(name = "transcription_task_id", nullable = false, columnDefinition = "CHAR(36)") private String transcriptionTaskId;
+    @Column(name = "organized_document_id", columnDefinition = "CHAR(36)") private String organizedDocumentId;
     @Column(name = "transcript_version", nullable = false) private int transcriptVersion;
+    @Column(name = "organized_document_version") private Integer organizedDocumentVersion;
     @Column(nullable = false) private String title;
     @Enumerated(EnumType.STRING) @Column(nullable = false) private KnowledgeDocumentStatus status;
     @Column(name = "failure_message") private String failureMessage;
@@ -24,10 +26,16 @@ public class KnowledgeDocument {
         this.transcriptVersion = transcriptVersion; this.title = title; this.status = KnowledgeDocumentStatus.PENDING;
         this.createdAt = Instant.now(); this.updatedAt = createdAt;
     }
+    public KnowledgeDocument(String ownerId, String transcriptionTaskId, int transcriptVersion, String title, String organizedDocumentId, int organizedDocumentVersion) {
+        this(ownerId, transcriptionTaskId, transcriptVersion, title);
+        this.organizedDocumentId = organizedDocumentId; this.organizedDocumentVersion = organizedDocumentVersion;
+    }
     public String getId() { return id; }
     public String getOwnerId() { return ownerId; }
     public String getTranscriptionTaskId() { return transcriptionTaskId; }
+    public String getOrganizedDocumentId() { return organizedDocumentId; }
     public int getTranscriptVersion() { return transcriptVersion; }
+    public Integer getOrganizedDocumentVersion() { return organizedDocumentVersion; }
     public String getTitle() { return title; }
     public KnowledgeDocumentStatus getStatus() { return status; }
     public String getFailureMessage() { return failureMessage; }
@@ -38,4 +46,5 @@ public class KnowledgeDocument {
     public void ready() { status = KnowledgeDocumentStatus.READY; failureMessage = null; updatedAt = Instant.now(); }
     public void fail(String message) { status = KnowledgeDocumentStatus.FAILED; failureMessage = message; updatedAt = Instant.now(); }
     public boolean retry() { if (status != KnowledgeDocumentStatus.FAILED) return false; status = KnowledgeDocumentStatus.PENDING; failureMessage = null; updatedAt = Instant.now(); return true; }
+    public boolean recover() { if (status != KnowledgeDocumentStatus.INDEXING) return false; status = KnowledgeDocumentStatus.QUEUED; updatedAt = Instant.now(); return true; }
 }

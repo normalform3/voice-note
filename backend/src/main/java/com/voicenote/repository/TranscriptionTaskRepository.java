@@ -8,4 +8,5 @@ import java.util.List;
 public interface TranscriptionTaskRepository extends JpaRepository<TranscriptionTask, String> {
     Optional<TranscriptionTask> findByOwnerIdAndAudioBlobIdAndAsrConfigHashAndPipelineVersion(String ownerId, String audioBlobId, String asrConfigHash, String pipelineVersion);
     List<TranscriptionTask> findByOwnerIdOrderByUpdatedAtDesc(String ownerId);
+    long countByAudioBlobId(String audioBlobId);
 }

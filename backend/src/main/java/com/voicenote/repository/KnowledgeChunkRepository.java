@@ -6,4 +6,5 @@ import java.util.List;
 
 public interface KnowledgeChunkRepository extends JpaRepository<KnowledgeChunk, String> {
     List<KnowledgeChunk> findByKnowledgeDocumentIdOrderByChunkIndex(String documentId);
+    void deleteByKnowledgeDocumentId(String documentId);
 }

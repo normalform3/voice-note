@@ -10,4 +10,6 @@ public interface AnalysisRunRepository extends JpaRepository<AnalysisRun, String
     Optional<AnalysisRun> findByOwnerIdAndTranscriptionTaskIdAndSemanticHash(String ownerId, String taskId, String semanticHash);
     List<AnalysisRun> findTop10ByStatusOrderByCreatedAtAsc(AnalysisRunStatus status);
     List<AnalysisRun> findByOwnerIdOrderByCreatedAtDesc(String ownerId);
+    List<AnalysisRun> findByTranscriptionTaskId(String taskId);
+    void deleteByTranscriptionTaskId(String taskId);
 }
