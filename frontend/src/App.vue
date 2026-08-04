@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { api, hashFile, key, stageText, statusText, timecode, uploadErrorMessage, type AnalysisEvidence, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeEvidence, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PipelineStage, type Segment, type Task, type WorkspaceSnapshot } from './api'
+import { api, hashFile, key, stageText, statusText, timecode, uploadErrorMessage, type AnalysisEvidence, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeEvidence, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PipelineStage, type Segment, type Speaker, type Task, type WorkspaceSnapshot } from './api'
 
 type AgentScope = 'CURRENT_DOCUMENT' | 'CROSS_DOCUMENT'
 type WorkspaceView = 'library' | 'document'
@@ -18,6 +18,7 @@ const runs = ref<KnowledgeRun[]>([])
 const analysisRuns = ref<AnalysisRun[]>([])
 const selected = ref<Task | null>(null)
 const segments = ref<Segment[]>([])
+const speakers = ref<Speaker[]>([])
 const organized = ref<OrganizedDocumentDetail | null>(null)
 const audioUrl = ref('')
 const file = ref<File | null>(null)
@@ -42,6 +43,7 @@ let reconnectDelay = 1000
 const isDocumentView = computed(() => workspaceView.value === 'document')
 const scope = computed<AgentScope>(() => isDocumentView.value ? 'CURRENT_DOCUMENT' : 'CROSS_DOCUMENT')
 const selectedDocument = computed(() => documents.value.find(document => document.transcriptionTaskId === selected.value?.id))
+const organizedTopics = computed(() => organized.value?.blocks.filter(block => block.type === 'TOPIC') || [])
 const selectedTitle = computed(() => selected.value ? taskTitle(selected.value) : '从资料库选择一份听记')
 const canAnalyzeCurrent = computed(() => Boolean(selected.value?.transcriptReady))
 const canCancelTask = computed(() => Boolean(selected.value && !['SUCCEEDED', 'CANCELLED'].includes(selected.value.status)))
@@ -114,17 +116,33 @@ async function choose(task: Task) {
   detailTab.value = 'transcript'
   mobileAgentOpen.value = false
   segments.value = []
+  speakers.value = []
   organized.value = null
   if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
   audioUrl.value = ''
-  const [transcript, audioResponse, organizedResponse] = await Promise.all([
+  const [transcript, speakerResponse, audioResponse, organizedResponse] = await Promise.all([
     api.get<Segment[]>(`/transcription-tasks/${task.id}/segments`),
+    api.get<Speaker[]>(`/transcription-tasks/${task.id}/speakers`),
     api.get(`/audio/${task.id}/content`, { responseType: 'blob' }),
     task.organizedDocument ? api.get<OrganizedDocumentDetail>(`/organized-documents/${task.organizedDocument.id}`) : Promise.resolve(null)
   ])
   segments.value = transcript.data
+  speakers.value = speakerResponse.data
   organized.value = organizedResponse?.data || null
   audioUrl.value = URL.createObjectURL(audioResponse.data)
+}
+function topicChildren(topicId: string) { return organized.value?.blocks.filter(block => block.parentBlockId === topicId) || [] }
+async function confirmSpeaker(speaker: Speaker, role: string) {
+  if (!selected.value) return
+  const { data } = await api.put<Speaker>(`/transcription-tasks/${selected.value.id}/speakers/${speaker.speakerId}`, { role })
+  speakers.value = speakers.value.map(value => value.speakerId === data.speakerId ? data : value)
+  const { data: transcript } = await api.get<Segment[]>(`/transcription-tasks/${selected.value.id}/segments`)
+  segments.value = transcript
+}
+function evidenceLabel(citation: { chunkId?: string; segmentId: string }) {
+  const evidence = (activeEvidence.value as KnowledgeEvidence[]).find(item => item.chunkId === citation.chunkId && item.segmentId === citation.segmentId)
+  if (!evidence) return '原文证据 ↗'
+  return `${evidence.topic || '原文'} · ${evidence.speaker || evidence.speakerId || '说话人'} · ${timecode(evidence.startMs || 0)} ↗`
 }
 function chooseFile(event: Event) {
   file.value = (event.target as HTMLInputElement).files?.[0] || null
@@ -276,6 +294,7 @@ async function deleteTask() {
     if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
     selected.value = null
     segments.value = []
+    speakers.value = []
     organized.value = null
     analysis.value = null
     knowledge.value = null
@@ -310,6 +329,7 @@ function applySnapshot(snapshot: WorkspaceSnapshot) {
     else {
       selected.value = null
       segments.value = []
+      speakers.value = []
       organized.value = null
       audioUrl.value = ''
       showLibrary()
@@ -482,6 +502,7 @@ onBeforeUnmount(stopProgressEvents)
           </nav>
 
           <section v-if="detailTab === 'transcript'" class="detail-content transcript" role="tabpanel">
+            <div v-if="speakers.length" class="speaker-roster"><span>说话人角色</span><label v-for="speaker in speakers" :key="speaker.speakerId"><b>{{ speaker.displayName || speaker.speakerId }}</b><select :value="speaker.confirmedRole || speaker.resolvedRole" @change="confirmSpeaker(speaker, ($event.target as HTMLSelectElement).value)"><option value="UNKNOWN">未确认</option><option value="INTERVIEWER">面试官</option><option value="CANDIDATE">候选人</option><option value="PARTICIPANT">参会者</option></select></label></div>
             <button v-for="segment in segments" :key="segment.id" :id="`segment-${segment.id}`" class="segment" type="button" @click="seekToSegment(segment)"><time>{{ timecode(segment.startMs) }}</time><span><b>{{ segment.speaker || '说话人' }}</b><p>{{ segment.text }}</p></span><i aria-hidden="true">↗</i></button>
             <div v-if="!segments.length" class="content-empty"><span aria-hidden="true">…</span><b>{{ selected.currentStage === 'KNOWLEDGE_INDEX' ? '听记已保存，正在建立可跨文档检索的知识索引。' : '转写尚未准备好。' }}</b><p>完成后会显示带说话人和时间戳的可回跳听记。</p></div>
           </section>
@@ -498,7 +519,7 @@ onBeforeUnmount(stopProgressEvents)
           </section>
 
           <section v-else class="detail-content organized-content" role="tabpanel">
-            <template v-if="organized?.document.status === 'READY'"><article v-for="block in organized.blocks" :key="block.id" class="organized-block"><button class="topic-link" @click="seekToTime(block.startMs, true)">{{ block.topic || '整理片段' }} <span>{{ timecode(block.startMs) }}</span></button><p>{{ block.text }}</p></article></template>
+            <template v-if="organized?.document.status === 'READY'"><div v-if="organized.document.summary" class="organized-summary"><b>文档摘要</b><p>{{ organized.document.summary }}</p></div><article v-for="topic in organizedTopics" :key="topic.id" class="organized-block"><button class="topic-link" @click="seekToTime(topic.startMs, true)">{{ topic.topic || '整理片段' }} <span>{{ timecode(topic.startMs) }}</span></button><p v-if="topic.summary" class="topic-summary">{{ topic.summary }}</p><article v-for="item in topicChildren(topic.id)" :key="item.id" class="organized-unit"><small>{{ item.type === 'QA_PAIR' ? '问答' : '对话' }}</small><p>{{ item.text }}</p></article></article></template>
             <div v-else class="content-empty"><span aria-hidden="true">◎</span><b>整理内容尚未准备好。</b><p>系统会在转写完成后按主题整理内容，方便快速回顾。</p></div>
           </section>
         </template>
@@ -514,7 +535,7 @@ onBeforeUnmount(stopProgressEvents)
 
       <section v-if="activeRun" class="result-card">
         <div class="result-head"><span>{{ scope === 'CURRENT_DOCUMENT' ? '文档分析' : '知识任务' }}</span><small>{{ statusText(activeRun.status) }} · {{ activeRunUsage }}</small></div>
-        <template v-if="parsedAnswer"><p class="answer">{{ parsedAnswer.answer }}</p><article v-for="(finding, index) in parsedAnswer.findings" :key="index" class="finding"><b>{{ finding.title || `发现 ${index + 1}` }}</b><p>{{ finding.content }}</p><button v-for="citation in finding.evidence" :key="`${citation.chunkId || 'local'}-${citation.segmentId}`" class="citation" @click="openEvidence(citation)">原文证据 ↗</button></article></template>
+        <template v-if="parsedAnswer"><p class="answer">{{ parsedAnswer.answer }}</p><article v-for="(finding, index) in parsedAnswer.findings" :key="index" class="finding"><b>{{ finding.title || `发现 ${index + 1}` }}</b><p>{{ finding.content }}</p><button v-for="citation in finding.evidence" :key="`${citation.chunkId || 'local'}-${citation.segmentId}`" class="citation" @click="openEvidence(citation)">{{ evidenceLabel(citation) }}</button></article></template>
         <p v-else-if="activeRun.failureMessage" class="error">{{ activeRun.failureMessage }}</p>
         <p v-else class="waiting">{{ scope === 'CURRENT_DOCUMENT' ? '正在阅读当前听记并整理证据…' : '正在检索、读取原文并整理证据…' }}</p>
       </section>

@@ -42,10 +42,10 @@ public class OrganizedDocumentController {
     }
 
     public record DocumentDetail(DocumentView document, List<BlockView> blocks) { }
-    public record DocumentView(String id, String taskId, String title, String status, String structureDocument, String plainText, String failureMessage) {
-        static DocumentView from(OrganizedDocument value) { return new DocumentView(value.getId(), value.getTranscriptionTaskId(), value.getTitle(), value.getStatus().name(), value.getStructureDocument(), value.getPlainText(), value.getFailureMessage()); }
+    public record DocumentView(String id, String taskId, String title, String summary, String organizationMode, String status, String structureDocument, String plainText, String failureMessage) {
+        static DocumentView from(OrganizedDocument value) { return new DocumentView(value.getId(), value.getTranscriptionTaskId(), value.getTitle(), value.getSummaryText(), value.getOrganizationMode(), value.getStatus().name(), value.getStructureDocument(), value.getPlainText(), value.getFailureMessage()); }
     }
-    public record BlockView(String id, int index, String type, String speaker, String topic, long startMs, long endMs, String sourceSegmentIds, String text) {
-        static BlockView from(OrganizedDocumentBlock value) { return new BlockView(value.getId(), value.getBlockIndex(), value.getBlockType().name(), value.getSpeakerLabel(), value.getTopicTitle(), value.getStartMs(), value.getEndMs(), value.getSourceSegmentIds(), value.getTextContent()); }
+    public record BlockView(String id, int index, String type, String parentBlockId, String speaker, String speakerIds, String topic, String summary, long startMs, long endMs, String sourceSegmentIds, String sourceFragments, String text) {
+        static BlockView from(OrganizedDocumentBlock value) { return new BlockView(value.getId(), value.getBlockIndex(), value.getBlockType().name(), value.getParentBlockId(), value.getSpeakerLabel(), value.getSpeakerIds(), value.getTopicTitle(), value.getSummaryText(), value.getStartMs(), value.getEndMs(), value.getSourceSegmentIds(), value.getSourceFragments(), value.getTextContent()); }
     }
 }

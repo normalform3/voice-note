@@ -46,10 +46,18 @@ public class KnowledgeSearchService {
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "CHUNK_NOT_FOUND", "Knowledge chunk was not found"));
         try {
             List<String> segmentIds = mapper.readValue(chunk.getSegmentIds(), new TypeReference<>() { });
-            return new ReadableChunk(document.getId(), document.getTranscriptionTaskId(), document.getTitle(), chunk.getId(), chunk.getStartMs(), chunk.getEndMs(), segmentIds, chunk.getTextContent());
+            List<String> speakerIds = chunk.getSpeakerIds() == null ? List.of() : mapper.readValue(chunk.getSpeakerIds(), new TypeReference<>() { });
+            List<SourceFragment> fragments = chunk.getSourceFragments() == null ? List.of() : mapper.readValue(chunk.getSourceFragments(), new TypeReference<>() { });
+            return new ReadableChunk(document.getId(), document.getTranscriptionTaskId(), document.getTitle(), chunk.getId(), chunk.getTopicTitle(), chunk.getStartMs(), chunk.getEndMs(), segmentIds, speakerIds, fragments, chunk.getTextContent());
         } catch (Exception exception) { throw new IllegalStateException("Knowledge chunk contains invalid segment references", exception); }
     }
 
     public record SearchHit(String documentId, String transcriptionTaskId, String documentTitle, String chunkId, long startMs, long endMs, double score) { }
-    public record ReadableChunk(String documentId, String transcriptionTaskId, String documentTitle, String chunkId, long startMs, long endMs, List<String> segmentIds, String content) { }
+    public record SourceFragment(String segmentId, String speakerId, long startMs, long endMs, String text) { }
+    public record ReadableChunk(String documentId, String transcriptionTaskId, String documentTitle, String chunkId, String topicTitle, long startMs, long endMs,
+                                List<String> segmentIds, List<String> speakerIds, List<SourceFragment> sourceFragments, String content) {
+        public ReadableChunk(String documentId, String transcriptionTaskId, String documentTitle, String chunkId, long startMs, long endMs, List<String> segmentIds, String content) {
+            this(documentId, transcriptionTaskId, documentTitle, chunkId, null, startMs, endMs, segmentIds, List.of(), List.of(), content);
+        }
+    }
 }

@@ -12,6 +12,7 @@ public class TranscriptionTask {
     @Column(name = "owner_id", nullable = false, columnDefinition = "CHAR(36)") private String ownerId;
     @Column(name = "audio_blob_id", nullable = false, columnDefinition = "CHAR(36)") private String audioBlobId;
     @Column(name = "asr_config_hash", nullable = false, columnDefinition = "CHAR(64)") private String asrConfigHash;
+    @Column(name = "asr_config", columnDefinition = "json") private String asrConfig;
     @Column(name = "pipeline_version", nullable = false) private String pipelineVersion;
     @Enumerated(EnumType.STRING) @Column(nullable = false) private TaskStatus status;
     @Enumerated(EnumType.STRING) @Column(name = "current_stage") private PipelineStage currentStage;
@@ -29,8 +30,11 @@ public class TranscriptionTask {
 
     protected TranscriptionTask() { }
     public TranscriptionTask(String ownerId, String audioBlobId, String asrConfigHash, String pipelineVersion) {
+        this(ownerId, audioBlobId, asrConfigHash, null, pipelineVersion);
+    }
+    public TranscriptionTask(String ownerId, String audioBlobId, String asrConfigHash, String asrConfig, String pipelineVersion) {
         this.id = UUID.randomUUID().toString(); this.ownerId = ownerId; this.audioBlobId = audioBlobId;
-        this.asrConfigHash = asrConfigHash; this.pipelineVersion = pipelineVersion; this.status = TaskStatus.QUEUED;
+        this.asrConfigHash = asrConfigHash; this.asrConfig = asrConfig; this.pipelineVersion = pipelineVersion; this.status = TaskStatus.QUEUED;
         this.currentStage = PipelineStage.ASR_SUBMIT; this.currentPhase = PipelinePhase.TRANSCRIPTION;
         this.createdAt = Instant.now(); this.updatedAt = createdAt;
     }
@@ -38,6 +42,7 @@ public class TranscriptionTask {
     public String getOwnerId() { return ownerId; }
     public String getAudioBlobId() { return audioBlobId; }
     public String getAsrConfigHash() { return asrConfigHash; }
+    public String getAsrConfig() { return asrConfig; }
     public TaskStatus getStatus() { return status; }
     public PipelineStage getCurrentStage() { return currentStage; }
     public PipelinePhase getCurrentPhase() { return currentPhase; }

@@ -1,101 +1,177 @@
 # voicenote
 
-voicenote 是面向会议、面试、访谈等音频场景的 AI 听记与私人知识库平台。它保存原始音频、异步进行说话人转写，并将成功听记自动沉淀为可跨文档检索、可回跳原声的知识文档。
+> 开发中 · 面向会议、面试与访谈的 AI 听记和个人知识库
 
-## What is implemented
+voicenote 将上传的音频保存为带时间轴的听记记录，并把完成的转写整理为可检索的知识文档。它面向“录了很多、回看很难”的场景：既能回到具体音频片段核对原文，也能在自己的资料库中提出开放问题。
 
-- 账号密码登录：账号区分大小写、不能含空白字符；密码无格式限制且安全哈希保存。
-- JWT authentication and user-scoped audio ownership.
-- Content-addressed uploads: the client declares SHA-256 and the server verifies it while streaming to MinIO.
-- Task creation idempotency, MySQL transactional outbox, and RocketMQ consumer deduplication.
-- DashScope-compatible ASR and chat-model adapters, disabled safely until credentials are configured.
-- Time-stamped transcript segments, manual analysis runs, evidence links, retries, and a Vue workbench.
-- 自动知识文档、Qdrant Dense + BM25 混合检索，以及带原文证据的跨文档 Agent 任务。
-- 音频流水线阶段追踪：每次阶段尝试与排队等待时间会持久化；工作台通过认证 SSE 接收阶段完成、索引完成和 Agent 完成通知，不轮询任务状态。
+当前版本的主链路是：上传音频 → 说话人转写 → 文档整理 → 知识切片与索引 → 证据可回跳的跨文档问答。项目正在持续开发，外部 ASR、向量检索和模型能力需要按环境单独启用；本文只描述仓库中已落地的行为，不包含效果指标或上线承诺。
 
-## Local development
+![voicenote 声音资料库与跨文档问答工作台](docs/images/voice-library-workbench.png)
 
-The application needs MySQL and MinIO to be reachable through local ports. RocketMQ is only required after `ROCKETMQ_ENABLED=true`; Redis is not part of the MVP correctness path. Qdrant is required only when knowledge indexing is enabled. Connection and credential configuration is loaded automatically from `backend/.env`; process environment variables take precedence. There are no local fallback credentials. Do not commit infrastructure endpoints or credentials.
+*声音资料库工作台：左侧导入与管理音频，右侧提交跨文档问题。截图展示的是空资料库状态。*
+
+## 当前能力
+
+| 能力 | 已实现的行为 |
+| --- | --- |
+| 音频导入 | 创建上传意图时按用户和音频 SHA-256 复用内容记录；流式上传时重新计算 SHA-256，校验通过后才允许创建听记任务。 |
+| 异步听记 | 任务创建立即返回，不等待 ASR 完成。转写、文档整理、知识构建由持久化任务和消息事件驱动；每个阶段的状态、尝试次数与失败信息可查询。 |
+| 说话人和时间轴 | 转写段保存时间范围、段序号与说话人信息；界面可根据证据定位到对应的音频时间。 |
+| 文档沉淀 | 听记完成后创建整理文档及其区块，保留其来源转写段，供摘要和知识构建使用。 |
+| 私有知识库 | 在启用知识库集成时，为用户的整理文档生成带主题、说话人、时间戳与来源片段的知识块，并写入 Qdrant。 |
+| 跨文档问答 | Agent 以一次性知识任务运行，能够检索并读取已召回片段；答案中的每条证据都会校验为它实际读取过的转写段。 |
+| 实时进度 | 工作台通过认证后的 SSE 接收阶段完成、索引完成和知识任务完成通知。 |
+
+> **当前边界：**账号密码登录与 JWT 用户隔离已经实现；这不是一个具备组织、角色或权限管理的多租户后台。启用 `DASHSCOPE_ENABLED` 后才会调用 ASR、Embedding 和对话模型；启用 `VOICENOTE_KNOWLEDGE_ENABLED` 后才会执行向量知识构建。
+
+## 架构概览
+
+```mermaid
+flowchart LR
+    Browser["Vue 工作台"] -->|"HTTP / SSE"| Api["Spring Boot API"]
+    Api --> Auth["JWT 与用户归属校验"]
+    Api --> Mysql["MySQL：音频元数据、任务、阶段、Outbox / Inbox"]
+    Api --> Storage["MinIO：原始音频"]
+
+    Mysql --> Outbox["事务 Outbox"]
+    Outbox -->|"生产环境可选"| Mq["RocketMQ"]
+    Outbox -->|"本地可选"| Workers["流水线 Worker"]
+    Mq --> Workers
+
+    Workers --> Asr["DashScope ASR（可选）"]
+    Workers --> Organizer["文档整理"]
+    Organizer --> Mysql
+    Workers --> Indexer["知识切片 / 索引（可选）"]
+    Indexer --> Embed["DashScope Embedding（可选）"]
+    Indexer --> Qdrant["Qdrant：Dense + BM25"]
+
+    Api --> Agent["知识任务 Agent"]
+    Agent --> Qdrant
+    Agent --> Chat["DashScope Chat（可选）"]
+    Api -->|"任务与进度通知"| Browser
+```
+
+任务的权威状态在 MySQL；RocketMQ 按至少一次投递处理，而不是作为状态来源。RocketMQ 未启用时，应用仍可使用进程内消息发布器驱动开发环境的 Worker。
+
+## 典型使用流程
+
+1. 登录后选择音频，客户端计算内容 SHA-256 并创建上传意图。
+2. 上传完成后创建听记任务。页面会展示 ASR、文档整理和知识索引阶段的进度；失败阶段可按阶段重试。
+3. 在音频详情页阅读逐段转写、整理文档或摘要；点击引用可跳至关联音频时间。
+4. 当知识构建完成后，在右侧输入跨文档问题。Agent 会从当前用户的资料中检索、读取片段并返回带证据的结果。
+
+ASR 默认使用 `paraformer-v2` 并开启说话人分离。系统保存句子级 Speaker ID、毫秒时间戳和原文片段；“面试官、候选人、参会者”等角色只是可确认的独立元数据，不会改写原始转写。文档整理失败时会保留规则整理的可追溯兜底文档；知识库按主题、问答和说话人轮次构建 Chunk，并以嵌入接口实际返回的 Token 数控制大小。
+
+## 本地启动
+
+### 前置条件
+
+- JDK 17、Maven 与 Node.js
+- 可访问的 MySQL 与 MinIO
+- 可选：RocketMQ（异步消息）、Qdrant（知识检索）、DashScope 凭据（ASR、Embedding、对话模型）
+
+后端从 `backend/.env` 读取本地配置，进程环境变量优先级更高。复制示例文件后，将其中的占位值替换为本地环境值；不要提交真实凭据、私有地址或对象存储信息。
 
 ```bash
-cp .tunnel.env.example .tunnel.env
-# Set SSH_TUNNEL_TARGET in .tunnel.env, then keep this terminal open.
-./scripts/start-ssh-tunnels.sh
-
-# In another terminal:
 cd backend
 cp .env.example .env
-# Edit .env with the local ports and credentials exposed by your SSH tunnel.
-
-# Optional: start the local vector index used by the knowledge base.
-docker run --rm -p 6333:6333 -p 6334:6334 qdrant/qdrant
-# Then set DASHSCOPE_ENABLED=true and VOICENOTE_KNOWLEDGE_ENABLED=true in backend/.env.
+# 编辑 .env：至少配置 MySQL、MinIO 与 VOICENOTE_JWT_SECRET
 mvn spring-boot:run
+```
 
-cd ../frontend
+默认后端端口为 `8080`。另开一个终端启动前端：
+
+```bash
+cd frontend
 npm install
 npm run dev
 ```
 
-See `backend/src/main/resources/application.yml` for the required variables. Project-owned connection variables use the `VOICENOTE_` prefix (for example, `VOICENOTE_DB_URL`) to avoid collisions with generic shell variables. With external provider integrations disabled, the application starts without contacting DashScope or RocketMQ.
+### 按需启用外部能力
 
-### DashScope models
+| 目标 | 配置 |
+| --- | --- |
+| 启用异步 MQ 消费 | `ROCKETMQ_ENABLED=true`，并配置 `VOICENOTE_ROCKETMQ_NAMESRV`。 |
+| 启用 ASR、问答与向量 Embedding | `DASHSCOPE_ENABLED=true`，设置 `DASHSCOPE_API_KEY`，必要时调整模型名。 |
+| 启用知识文档索引 | `VOICENOTE_KNOWLEDGE_ENABLED=true`，并配置可访问的 `VOICENOTE_QDRANT_URL`。 |
 
-ASR, Agent inference, and Dense vector embeddings share one DashScope switch and API key. To enable any of them, set `DASHSCOPE_ENABLED=true` and provide `DASHSCOPE_API_KEY` in the ignored `backend/.env` file. The model variables below are explicit so they can be changed without editing source code:
+`backend/.env.example` 列出了完整的变量、默认模型名和本地端口示例。外部能力关闭时，应用不会主动连接 DashScope 或 RocketMQ；知识构建需要 Qdrant 与 Embedding 同时可用。
 
-```dotenv
-DASHSCOPE_ASR_MODEL=paraformer-v2
-DASHSCOPE_CHAT_MODEL=qwen-plus
-DASHSCOPE_EMBEDDING_MODEL=text-embedding-v4
+## 关键设计
+
+### 三层幂等，避免重复转写
+
+同一用户上传相同内容时，`audio_blobs` 的 `(owner_id, sha256)` 唯一约束会复用音频记录；上传过程还会对实际字节流再做一次 SHA-256 校验。创建任务时，`Idempotency-Key` 与请求哈希一起保存，任务本身还以音频、ASR 配置和流水线版本形成语义唯一键。这样可同时处理重复点击、并发建单和重放请求，避免不必要地再次提交 ASR。
+
+相关实现：
+
+- [UploadService](backend/src/main/java/com/voicenote/service/UploadService.java)：创建或复用上传意图，并对上传字节流校验摘要。
+- [TranscriptionTaskService](backend/src/main/java/com/voicenote/service/TranscriptionTaskService.java)：以请求幂等记录和语义键创建任务。
+- [V1 初始表结构](backend/src/main/resources/db/migration/V1__initial_schema.sql)：声明音频、请求幂等记录与听记任务的唯一约束。
+
+### 持久化阶段状态与可靠投递
+
+任务创建和 Outbox 事件写入同一事务。Dispatcher 将待投递事件送往 RocketMQ；消费者使用 Inbox 的 `(consumer_name, message_id)` 唯一约束去重。每个处理阶段都有独立尝试记录，Worker 重启后会恢复仍在排队或应重试的工作；未知的 ASR 提交结果不会自动再次提交，避免外部模型调用不确定时产生重复成本。
+
+相关实现：
+
+- [OutboxService](backend/src/main/java/com/voicenote/service/OutboxService.java)：创建带去重键的 Outbox 事件。
+- [TaskMessageHandler](backend/src/main/java/com/voicenote/messaging/TaskMessageHandler.java)：在消费端登记 Inbox 并分派任务事件。
+- [PipelineProgressService](backend/src/main/java/com/voicenote/service/PipelineProgressService.java)：维护阶段状态、进度和阶段级重试。
+- [PipelineRecoveryCoordinator](backend/src/main/java/com/voicenote/service/PipelineRecoveryCoordinator.java)：定期恢复可继续执行的任务。
+
+### 保留语义边界的知识切片
+
+知识块从整理文档的主题、问答对和叙述区块中生成，而非按固定字符数机械截断。每块保存主题、起止时间、来源转写段、说话人和前文上下文；当主题切换或达到模型返回的 Token 上限时切分，过大的原子单元再下钻到来源片段。这使检索结果能够回到具体的说话人和原文时间范围。
+
+相关实现：
+
+- [KnowledgeChunker](backend/src/main/java/com/voicenote/service/KnowledgeChunker.java)：按主题与模型 Token 用量生成带来源片段的知识块。
+- [KnowledgeIndexWorker](backend/src/main/java/com/voicenote/service/KnowledgeIndexWorker.java)：在整理文档就绪后构建并写入知识索引。
+- [QdrantKnowledgeVectorStore](backend/src/main/java/com/voicenote/service/QdrantKnowledgeVectorStore.java)：维护 Dense 与 BM25 的混合检索请求。
+
+### Agent 只在开放任务中使用工具
+
+转写、文档整理、切片与索引是由阶段流水线编排的固定流程；开放式问答才创建独立的 Agent 任务。Agent 具有最多四次工具调用额度，读取到的知识块会进入允许引用的集合；服务端拒绝引用未读片段或没有证据的结果。这个边界将核心处理链路的可恢复性与问答任务的灵活性分开。
+
+相关实现：
+
+- [KnowledgeAgentWorker](backend/src/main/java/com/voicenote/service/KnowledgeAgentWorker.java)：执行检索与阅读工具循环。
+- [KnowledgeAgentService](backend/src/main/java/com/voicenote/service/KnowledgeAgentService.java)：限制工具预算并校验证据。
+- [KnowledgeSearchService](backend/src/main/java/com/voicenote/service/KnowledgeSearchService.java)：按当前用户筛选检索命中并还原可读知识块。
+
+## 项目结构
+
+```text
+.
+├── backend/
+│   ├── src/main/java/com/voicenote/  # API、领域模型、Worker、消息与外部 Provider
+│   ├── src/main/resources/db/        # Flyway 迁移
+│   └── .env.example                  # 本地配置模板
+├── frontend/
+│   └── src/                          # Vue 工作台与 API 客户端
+├── docs/images/                      # README 展示图
+└── scripts/                          # 本地开发辅助脚本
 ```
 
-The embedding model is required when `VOICENOTE_KNOWLEDGE_ENABLED=true`; the ASR and chat model are respectively used for transcription and evidence-backed Agent answers. Never commit a real API key or a private provider endpoint.
+## 验证
 
-### Knowledge base
-
-When `VOICENOTE_KNOWLEDGE_ENABLED=true`, each successfully organized recording creates a private knowledge document. Its topic-aware chunks are indexed in Qdrant with a DashScope Dense embedding and Qdrant BM25 sparse representation; the backend fuses both rankings and always filters by the authenticated owner. Use a Qdrant release that supports server-side `qdrant/bm25` documents and hybrid Query API. Qdrant must remain reachable only from the backend, never directly from the browser.
-
-The Agent creates a one-off, evidence-backed knowledge task. It can search the owner's collection and read returned document chunks, with four tool calls maximum. Every factual finding must cite transcript segments; citations in the workbench seek the source audio to the original timestamp.
-
-### Three-phase audio pipeline
-
-After the client has uploaded and verified audio bytes, it calls `POST /api/uploads/intents/{blobId}/complete` with an idempotency key. The response is `202 Accepted` and contains the task ID; it never waits for ASR, document organization, or vector indexing.
-
-The durable pipeline is `TRANSCRIPTION` (speaker-labelled, timestamped raw segments), `DOCUMENT_ORGANIZATION` (cleaned turns and evidence-preserving topic sections), then `KNOWLEDGE_BUILD` (topic-aware chunks, embeddings, and Qdrant upserts). MySQL records task and phase attempts; RocketMQ dispatches transcription, document, and knowledge events through the transactional outbox. The recovery coordinator repairs expired leases and due retries after a restart.
-
-`POST /api/transcription-tasks/{taskId}/cancel` performs cooperative cancellation. A provider request already in flight may finish, but its result is discarded and cannot trigger a downstream phase. A failed phase can be retried without re-running completed phases. Once document organization is ready, `POST /api/organized-documents/{documentId}/summary` creates an evidence-backed summary run on that organized-document snapshot.
-
-### `Communications link failure` on startup
-
-This error means the configured MySQL address cannot be reached. The default is `127.0.0.1:3306`, so first verify that the SSH tunnel (or local MySQL) is running and that `VOICENOTE_DB_URL`, `VOICENOTE_DB_USERNAME`, and `VOICENOTE_DB_PASSWORD` in `backend/.env` match it:
+后端包含状态机、幂等、上传、对象存储、知识切片和 Agent 证据校验等单元测试；前端构建同时执行 Vue 类型检查。
 
 ```bash
-nc -z 127.0.0.1 3306
+cd backend
+mvn test
+
+cd ../frontend
+npm run build
 ```
 
-Do not disable Flyway or switch `ddl-auto` to bypass this error: the application requires the database migration to complete before it can start safely.
+## 开发边界与后续工作
 
-### `OBJECT_STORAGE_*` while uploading audio
+- 本项目仍处于开发阶段，必须在真实音频集与目标问题集上再评估转写、检索和问答质量；README 不声明未在仓库中复现的 Hit@5 或其他指标。
+- 外部服务由开发环境单独提供，仓库未包含 Docker Compose 或生产部署配置。
+- 角色管理、多租户协作、生产可观测性与端到端效果评测尚不在当前 README 所描述的实现范围内。
 
-The backend now logs a safe MinIO failure category and returns a matching error code without writing endpoints, object keys, or credentials to logs. Use the code to narrow the fix:
+## 安全说明
 
-- `OBJECT_STORAGE_UNREACHABLE`: start `./scripts/start-ssh-tunnels.sh` and keep it open; the MinIO API tunnel is `127.0.0.1:9000` (not the console port).
-- `OBJECT_STORAGE_CREDENTIALS_REJECTED`: replace `VOICENOTE_MINIO_ACCESS_KEY` and `VOICENOTE_MINIO_SECRET_KEY`, or grant that identity permission to list/create the bucket and write objects.
-- `OBJECT_STORAGE_BUCKET_UNAVAILABLE` or `OBJECT_STORAGE_CONFIGURATION_INVALID`: set `VOICENOTE_MINIO_BUCKET` to a valid, lowercase S3 bucket name (3–63 characters; letters, digits, `-`, and `.` only). The application creates a missing bucket when the configured identity has permission.
-
-Keep the actual endpoint, bucket name, and credentials in the ignored `backend/.env`; do not add them to this document.
-
-### SSH tunnel ports
-
-`scripts/start-ssh-tunnels.sh` forwards MySQL (3306), Redis (6379), MinIO API (9000), RocketMQ NameServer (9876), and RocketMQ Broker (10911). It reads optional overrides from the ignored `.tunnel.env` file and exits if any local forward cannot be opened.
-
-If the server rejects authentication with `Permission denied (publickey)`, set `SSH_IDENTITY_FILE` in `.tunnel.env` to the absolute path of the private key whose public counterpart was installed for that server. If you already use an SSH config alias, set `SSH_TUNNEL_TARGET` to that alias instead. Keep private keys and the copied `.tunnel.env` out of Git.
-
-For RocketMQ, the Broker must advertise an address reachable from the local machine. If it advertises a server-only container address, configure the Broker's advertised address on the server; forwarding the NameServer port alone is not sufficient.
-
-## Correctness boundary
-
-MySQL owns idempotency. Redis is intentionally not used as a distributed lock. RocketMQ is treated as at-least-once: duplicated messages become no-ops through the inbox table and conditional task-state claims. If an external ASR submission times out after it may have reached the provider, the attempt becomes `SUBMISSION_UNKNOWN`; it is never automatically resent.
-
-An audio pipeline is accepted only when `VOICENOTE_KNOWLEDGE_ENABLED=true`, because “complete” means that the transcript has been saved and its knowledge document is searchable. Transient stage failures retry after 5, 15, and 45 seconds. A submission with an unknown ASR outcome is deliberately not retried automatically; users must explicitly restart that stage after confirming the risk of a second provider submission.
-# voice-note
+音频、知识文档和检索结果按已认证用户隔离。将数据库、对象存储、模型服务和消息服务的真实地址及凭据只保留在忽略的 `backend/.env` 或部署环境变量中，切勿提交到仓库。

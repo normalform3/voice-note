@@ -2,6 +2,7 @@ package com.voicenote.service;
 
 import com.voicenote.config.AppProperties;
 import com.voicenote.domain.PipelineStage;
+import com.voicenote.provider.AnalysisModelClient;
 import com.voicenote.provider.ProviderException;
 import org.springframework.stereotype.Component;
 
@@ -11,9 +12,10 @@ public class OrganizedDocumentWorker {
     private final DocumentOrganizationService documents;
     private final KnowledgeDocumentService knowledge;
     private final PipelineProgressService pipeline;
+    private final AnalysisModelClient model;
 
-    public OrganizedDocumentWorker(AppProperties properties, DocumentOrganizationService documents, KnowledgeDocumentService knowledge, PipelineProgressService pipeline) {
-        this.properties = properties; this.documents = documents; this.knowledge = knowledge; this.pipeline = pipeline;
+    public OrganizedDocumentWorker(AppProperties properties, DocumentOrganizationService documents, KnowledgeDocumentService knowledge, PipelineProgressService pipeline, AnalysisModelClient model) {
+        this.properties = properties; this.documents = documents; this.knowledge = knowledge; this.pipeline = pipeline; this.model = model;
     }
 
     /** Invoked after the RocketMQ consumer commits the durable QUEUED transition. */
@@ -25,9 +27,15 @@ public class OrganizedDocumentWorker {
         DocumentOrganizationService.OrganizationWork work = documents.claim(documentId);
         if (work == null || !pipeline.begin(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION)) return;
         try {
-            DocumentOrganizationService.OrganizationResult result = DocumentOrganizationService.organize(work.segments());
-            var blocks = documents.complete(documentId, result);
+            DocumentOrganizationService.OrganizationResult result = organize(work);
+            var blocks = documents.complete(documentId, result, work.segments());
             if (blocks.isEmpty()) return;
+            if (!properties.getKnowledge().isEnabled()) {
+                pipeline.succeeded(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION,
+                        "{\"documentId\":\"" + documentId + "\",\"turnCount\":" + result.turns().size() + ",\"topicCount\":" + result.topics().size() + ",\"knowledgeIndexing\":false}", null);
+                pipeline.completeWithoutKnowledge(work.document().getTranscriptionTaskId());
+                return;
+            }
             pipeline.succeeded(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION,
                     "{\"documentId\":\"" + documentId + "\",\"turnCount\":" + result.turns().size() + ",\"topicCount\":" + result.topics().size() + "}", PipelineStage.KNOWLEDGE_PREPARE);
             if (!pipeline.begin(work.document().getTranscriptionTaskId(), PipelineStage.KNOWLEDGE_PREPARE)) return;
@@ -40,6 +48,20 @@ public class OrganizedDocumentWorker {
         } catch (RuntimeException exception) {
             documents.fail(documentId, "DOCUMENT_ORGANIZATION_FAILED: " + exception.getMessage());
             pipeline.failed(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION, "DOCUMENT_ORGANIZATION_FAILED", exception.getMessage(), false);
+        }
+    }
+
+    private DocumentOrganizationService.OrganizationResult organize(DocumentOrganizationService.OrganizationWork work) {
+        try {
+            DocumentOrganizationService.ModelAction action = documents.prepareSemantic(work);
+            String response = action.cached() ? action.value() : model.complete(action.value());
+            if (!action.cached()) documents.completeSemantic(work.document().getId(), response);
+            return documents.organizeSemantic(work, response);
+        } catch (ProviderException exception) {
+            if (exception.getKind() == ProviderException.Kind.AMBIGUOUS_SUBMISSION) documents.markSemanticUnknown(work.document().getId());
+            return DocumentOrganizationService.fallbackFor(work);
+        } catch (RuntimeException exception) {
+            return DocumentOrganizationService.fallbackFor(work);
         }
     }
 }

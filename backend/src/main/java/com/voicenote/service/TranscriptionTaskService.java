@@ -5,7 +5,6 @@ import com.voicenote.repository.AudioBlobRepository;
 import com.voicenote.repository.TaskAttemptRepository;
 import com.voicenote.repository.TranscriptionTaskRepository;
 import com.voicenote.web.ApiException;
-import com.voicenote.config.AppProperties;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -25,22 +24,18 @@ public class TranscriptionTaskService {
     private final OutboxService outbox;
     private final ObjectMapper mapper;
     private final PipelineProgressService pipeline;
-    private final AppProperties properties;
     private final KnowledgeDocumentService knowledgeDocuments;
     private final DocumentOrganizationService organizedDocuments;
 
     public TranscriptionTaskService(TranscriptionTaskRepository tasks, TaskAttemptRepository attempts, AudioBlobRepository blobs,
                                     IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, PipelineProgressService pipeline,
-                                    AppProperties properties, KnowledgeDocumentService knowledgeDocuments, DocumentOrganizationService organizedDocuments) {
+                                    KnowledgeDocumentService knowledgeDocuments, DocumentOrganizationService organizedDocuments) {
         this.tasks = tasks; this.attempts = attempts; this.blobs = blobs; this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper;
-        this.pipeline = pipeline; this.properties = properties; this.knowledgeDocuments = knowledgeDocuments; this.organizedDocuments = organizedDocuments;
+        this.pipeline = pipeline; this.knowledgeDocuments = knowledgeDocuments; this.organizedDocuments = organizedDocuments;
     }
 
     @Transactional
     public TranscriptionTask create(String ownerId, String key, CreateTaskCommand command) {
-        if (!properties.getKnowledge().isEnabled()) {
-            throw new ApiException(HttpStatus.CONFLICT, "KNOWLEDGE_INDEX_DISABLED", "Knowledge indexing must be enabled before creating an audio pipeline task");
-        }
         AsrConfig config = command.asrConfig() == null ? AsrConfig.defaultConfig() : command.asrConfig().normalized();
         String requestHash = Hashing.canonicalJsonHash(new CreateTaskCommand(command.audioBlobId(), config));
         IdempotencyRecord record = idempotency.reserve(ownerId, CREATE_OPERATION, key, requestHash);
@@ -49,9 +44,12 @@ public class TranscriptionTaskService {
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "AUDIO_NOT_FOUND", "Audio was not found"));
         if (blob.getStatus() != BlobStatus.READY) throw new ApiException(HttpStatus.CONFLICT, "AUDIO_NOT_READY", "Wait for the upload to finish before creating a task");
         String configHash = Hashing.canonicalJsonHash(config);
+        String configDocument;
+        try { configDocument = mapper.writeValueAsString(config); }
+        catch (Exception exception) { throw new IllegalStateException("Cannot serialize ASR configuration", exception); }
         TranscriptionTask task = tasks.findByOwnerIdAndAudioBlobIdAndAsrConfigHashAndPipelineVersion(ownerId, blob.getId(), configHash, PIPELINE_VERSION)
                 .orElseGet(() -> {
-                    TranscriptionTask created = tasks.save(new TranscriptionTask(ownerId, blob.getId(), configHash, PIPELINE_VERSION));
+                    TranscriptionTask created = tasks.save(new TranscriptionTask(ownerId, blob.getId(), configHash, configDocument, PIPELINE_VERSION));
                     pipeline.initialize(created);
                     outbox.enqueue("transcription_task", created.getId(), EventType.TRANSCRIPTION_REQUESTED);
                     return created;

@@ -34,8 +34,11 @@ public class DashscopeAsrProvider implements AsrProvider {
     }
 
     @Override
-    public AsrSubmission submit(AudioBlob audio) {
+    public AsrSubmission submit(AudioBlob audio, AsrOptions options) {
         try {
+            if (!"paraformer-v2".equals(properties.getDashscope().getAsrModel())) {
+                throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ASR_MODEL_UNSUPPORTED", "VoiceNote requires paraformer-v2 for speaker-aware transcription");
+            }
             JsonNode policy = client.get().uri(uri -> uri.path("uploads").queryParam("action", "getPolicy").queryParam("model", properties.getDashscope().getAsrModel()).build())
                     .retrieve().body(JsonNode.class);
             if (policy == null || policy.path("data").isMissingNode()) throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "DASHSCOPE_UPLOAD_POLICY", "DashScope did not return an upload policy");
@@ -46,7 +49,12 @@ public class DashscopeAsrProvider implements AsrProvider {
             var bodyNode = mapper.createObjectNode();
             bodyNode.put("model", properties.getDashscope().getAsrModel());
             bodyNode.set("input", mapper.createObjectNode().set("file_urls", mapper.createArrayNode().add(inputUrl)));
-            bodyNode.set("parameters", mapper.createObjectNode().put("diarization_enabled", true));
+            var parameters = mapper.createObjectNode().put("diarization_enabled", true);
+            if (options != null && options.languageHints() != null && !options.languageHints().isEmpty()) {
+                parameters.set("language_hints", mapper.valueToTree(options.languageHints()));
+            }
+            if (options != null && options.speakerCount() != null) parameters.put("speaker_count", options.speakerCount());
+            bodyNode.set("parameters", parameters);
             String body = mapper.writeValueAsString(bodyNode);
             JsonNode response = client.post().uri("services/audio/asr/transcription")
                     .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
@@ -73,7 +81,8 @@ public class DashscopeAsrProvider implements AsrProvider {
             String transcriptionUrl = results.isArray() && !results.isEmpty() ? results.get(0).path("transcription_url").asText(null) : null;
             if (transcriptionUrl == null) return new AsrPollResult(AsrPollResult.Status.FAILED, "ASR_RESULT_MISSING", "ASR completed without a transcript URL", List.of());
             JsonNode transcript = RestClient.create().get().uri(transcriptionUrl).retrieve().body(JsonNode.class);
-            return new AsrPollResult(AsrPollResult.Status.SUCCEEDED, null, null, parseSegments(transcript));
+            ParsedTranscript parsed = parseTranscript(transcript);
+            return new AsrPollResult(AsrPollResult.Status.SUCCEEDED, null, null, parsed.segments(), parsed.metadata());
         } catch (RestClientResponseException exception) { throw classifyHttp(exception.getStatusCode().value(), exception.getResponseBodyAsString()); }
         catch (RuntimeException exception) { throw new ProviderException(ProviderException.Kind.RETRYABLE_REJECTION, "DASHSCOPE_POLL_FAILED", "Could not poll the ASR task"); }
     }
@@ -107,16 +116,22 @@ public class DashscopeAsrProvider implements AsrProvider {
         if (status >= 500) return new ProviderException(ProviderException.Kind.AMBIGUOUS_SUBMISSION, "DASHSCOPE_SERVER_ERROR", "DashScope may have received the submission");
         return new ProviderException(ProviderException.Kind.FINAL_REJECTION, "DASHSCOPE_REQUEST_REJECTED", body == null || body.isBlank() ? "DashScope rejected the request" : body);
     }
-    private static List<AsrSegment> parseSegments(JsonNode transcript) {
+    private static ParsedTranscript parseTranscript(JsonNode transcript) {
         List<AsrSegment> output = new ArrayList<>();
         JsonNode transcripts = transcript.path("transcripts");
-        if (!transcripts.isArray()) return output;
+        if (!transcripts.isArray()) return new ParsedTranscript(List.of(), new AsrAudioMetadata(null, null));
         for (JsonNode channel : transcripts) for (JsonNode sentence : channel.path("sentences")) {
             JsonNode speaker = sentence.path("speaker_id");
-            String speakerLabel = speaker.isMissingNode() || speaker.isNull() || speaker.asText().isBlank() ? "SPEAKER_UNKNOWN" : "Speaker " + speaker.asText();
-            output.add(new AsrSegment(speakerLabel,
+            String speakerId = speaker.isMissingNode() || speaker.isNull() || speaker.asText().isBlank() ? null : "SPEAKER_" + speaker.asText();
+            output.add(new AsrSegment(speakerId,
                     sentence.path("begin_time").asLong(), sentence.path("end_time").asLong(), sentence.path("text").asText()));
         }
-        return output;
+        JsonNode properties = transcript.path("properties");
+        JsonNode channels = properties.path("channels");
+        Integer channelCount = channels.isArray() ? channels.size() : null;
+        long duration = properties.has("original_duration_in_milliseconds") ? properties.path("original_duration_in_milliseconds").asLong(-1)
+                : properties.path("original_duration").asLong(-1);
+        return new ParsedTranscript(List.copyOf(output), new AsrAudioMetadata(channelCount, duration < 0 ? null : duration));
     }
+    private record ParsedTranscript(List<AsrSegment> segments, AsrAudioMetadata metadata) { }
 }

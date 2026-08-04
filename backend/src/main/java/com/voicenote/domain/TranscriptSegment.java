@@ -12,6 +12,7 @@ public class TranscriptSegment {
     @Column(name = "transcript_version", nullable = false) private int transcriptVersion;
     @Column(name = "segment_index", nullable = false) private int segmentIndex;
     @Column(name = "speaker_label") private String speakerLabel;
+    @Column(name = "asr_speaker_id") private String asrSpeakerId;
     @Column(name = "start_ms", nullable = false) private long startMs;
     @Column(name = "end_ms", nullable = false) private long endMs;
     @Column(name = "text_content", nullable = false, columnDefinition = "TEXT") private String textContent;
@@ -19,13 +20,15 @@ public class TranscriptSegment {
     protected TranscriptSegment() { }
     public TranscriptSegment(String taskId, int version, int index, String speaker, long startMs, long endMs, String text) {
         this.id = UUID.randomUUID().toString(); this.transcriptionTaskId = taskId; this.transcriptVersion = version; this.segmentIndex = index;
-        this.speakerLabel = speaker; this.startMs = startMs; this.endMs = endMs; this.textContent = text; this.createdAt = Instant.now();
+        this.asrSpeakerId = speaker == null || speaker.isBlank() ? "SPEAKER_UNKNOWN" : speaker;
+        this.speakerLabel = this.asrSpeakerId; this.startMs = startMs; this.endMs = endMs; this.textContent = text; this.createdAt = Instant.now();
     }
     public String getId() { return id; }
     public String getTranscriptionTaskId() { return transcriptionTaskId; }
     public int getTranscriptVersion() { return transcriptVersion; }
     public int getSegmentIndex() { return segmentIndex; }
     public String getSpeakerLabel() { return speakerLabel; }
+    public String getAsrSpeakerId() { return asrSpeakerId == null || asrSpeakerId.isBlank() ? speakerLabel : asrSpeakerId; }
     public long getStartMs() { return startMs; }
     public long getEndMs() { return endMs; }
     public String getTextContent() { return textContent; }

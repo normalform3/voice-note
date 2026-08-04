@@ -98,6 +98,8 @@ public class AppProperties {
         private String qdrantUrl;
         private String collection = "voicenote_knowledge";
         private int chunkCharacters = 2000;
+        private int chunkTargetTokens = 800;
+        private int chunkMaxTokens = 1200;
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
         public String getQdrantUrl() { return qdrantUrl; }
@@ -106,5 +108,9 @@ public class AppProperties {
         public void setCollection(String collection) { this.collection = collection; }
         public int getChunkCharacters() { return chunkCharacters; }
         public void setChunkCharacters(int chunkCharacters) { this.chunkCharacters = chunkCharacters; }
+        public int getChunkTargetTokens() { return chunkTargetTokens; }
+        public void setChunkTargetTokens(int chunkTargetTokens) { this.chunkTargetTokens = chunkTargetTokens; }
+        public int getChunkMaxTokens() { return chunkMaxTokens; }
+        public void setChunkMaxTokens(int chunkMaxTokens) { this.chunkMaxTokens = chunkMaxTokens; }
     }
 }

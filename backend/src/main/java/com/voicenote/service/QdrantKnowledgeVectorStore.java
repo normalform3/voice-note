@@ -43,6 +43,8 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
         try {
             List<String> segmentIds = mapper.readValue(chunk.getSegmentIds(), new TypeReference<>() { });
             List<String> blockIds = chunk.getOrganizedDocumentBlockIds() == null ? List.of() : mapper.readValue(chunk.getOrganizedDocumentBlockIds(), new TypeReference<>() { });
+            List<String> speakerIds = chunk.getSpeakerIds() == null ? List.of() : mapper.readValue(chunk.getSpeakerIds(), new TypeReference<>() { });
+            List<String> contextSegmentIds = chunk.getContextSegmentIds() == null ? List.of() : mapper.readValue(chunk.getContextSegmentIds(), new TypeReference<>() { });
             Map<String, Object> bm25 = new LinkedHashMap<>();
             bm25.put("text", chunk.getTextContent()); bm25.put("model", "qdrant/bm25");
             bm25.put("options", Map.of("language", "none", "tokenizer", "multilingual"));
@@ -50,6 +52,8 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
             payload.put("ownerId", document.getOwnerId()); payload.put("documentId", document.getId()); payload.put("taskId", document.getTranscriptionTaskId());
             payload.put("chunkId", chunk.getId()); payload.put("segmentIds", segmentIds); payload.put("organizedDocumentBlockIds", blockIds);
             payload.put("startMs", chunk.getStartMs()); payload.put("endMs", chunk.getEndMs());
+            payload.put("topic", chunk.getTopicTitle()); payload.put("speakerIds", speakerIds); payload.put("contextSegmentIds", contextSegmentIds);
+            payload.put("tokenCount", chunk.getTokenCount()); payload.put("oversized", chunk.isOversized());
             Map<String, Object> point = Map.of(
                     "id", chunk.getId(),
                     "vector", Map.of(DENSE, denseVector, BM25, bm25),

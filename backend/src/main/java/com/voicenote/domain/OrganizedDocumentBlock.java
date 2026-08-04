@@ -11,11 +11,15 @@ public class OrganizedDocumentBlock {
     @Column(name = "organized_document_id", nullable = false, columnDefinition = "CHAR(36)") private String organizedDocumentId;
     @Column(name = "block_index", nullable = false) private int blockIndex;
     @Enumerated(EnumType.STRING) @Column(name = "block_type", nullable = false) private OrganizedBlockType blockType;
+    @Column(name = "parent_block_id", columnDefinition = "CHAR(36)") private String parentBlockId;
     @Column(name = "speaker_label") private String speakerLabel;
+    @Column(name = "speaker_ids", columnDefinition = "json") private String speakerIds;
     @Column(name = "topic_title") private String topicTitle;
+    @Column(name = "summary_text", columnDefinition = "TEXT") private String summaryText;
     @Column(name = "start_ms", nullable = false) private long startMs;
     @Column(name = "end_ms", nullable = false) private long endMs;
     @Column(name = "source_segment_ids", nullable = false, columnDefinition = "json") private String sourceSegmentIds;
+    @Column(name = "source_fragments", columnDefinition = "json") private String sourceFragments;
     @Column(name = "text_content", nullable = false, columnDefinition = "TEXT") private String textContent;
     @Column(name = "created_at", nullable = false) private Instant createdAt;
 
@@ -25,14 +29,23 @@ public class OrganizedDocumentBlock {
         this.speakerLabel = speaker; this.topicTitle = topic; this.startMs = startMs; this.endMs = endMs;
         this.sourceSegmentIds = sourceSegmentIds; this.textContent = text; this.createdAt = Instant.now();
     }
+    public OrganizedDocumentBlock(String documentId, int index, OrganizedBlockType type, String parentBlockId, String topic, String summary,
+                                 String speakerIds, long startMs, long endMs, String sourceSegmentIds, String sourceFragments, String text) {
+        this(documentId, index, type, null, topic, startMs, endMs, sourceSegmentIds, text);
+        this.parentBlockId = parentBlockId; this.summaryText = summary; this.speakerIds = speakerIds; this.sourceFragments = sourceFragments;
+    }
     public String getId() { return id; }
     public String getOrganizedDocumentId() { return organizedDocumentId; }
     public int getBlockIndex() { return blockIndex; }
     public OrganizedBlockType getBlockType() { return blockType; }
+    public String getParentBlockId() { return parentBlockId; }
     public String getSpeakerLabel() { return speakerLabel; }
+    public String getSpeakerIds() { return speakerIds; }
     public String getTopicTitle() { return topicTitle; }
+    public String getSummaryText() { return summaryText; }
     public long getStartMs() { return startMs; }
     public long getEndMs() { return endMs; }
     public String getSourceSegmentIds() { return sourceSegmentIds; }
+    public String getSourceFragments() { return sourceFragments; }
     public String getTextContent() { return textContent; }
 }

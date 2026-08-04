@@ -167,6 +167,11 @@ input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px
 .detail-tabs small { color: var(--faint); font-size: 10px; }
 .detail-content { min-height: 290px; margin-top: 20px; }
 .transcript { display: grid; }
+.speaker-roster { display: flex; flex-wrap: wrap; align-items: center; gap: 8px 12px; margin: 0 0 12px; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; background: var(--surface-soft); }
+.speaker-roster > span { color: var(--faint); font-family: 'DM Mono', monospace; font-size: 10px; }
+.speaker-roster label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
+.speaker-roster b { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.speaker-roster select { width: auto; min-height: 0; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; color: var(--accent-deep); background: #fff; font-size: 10px; }
 .segment { display: grid; grid-template-columns: 68px minmax(0, 1fr) 20px; align-items: start; gap: 16px; border: 0; border-top: 1px solid var(--line); padding: 18px 8px; color: inherit; background: transparent; text-align: left; transition: background .18s ease, padding .18s ease; }
 .segment:hover { padding-right: 14px; padding-left: 14px; background: var(--surface-soft); }
 .segment time { padding-top: 3px; color: var(--accent); font-family: 'DM Mono', monospace; font-size: 11px; }
@@ -176,12 +181,18 @@ input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px
 .segment > i { padding-top: 6px; color: transparent; font-family: 'DM Mono', monospace; font-style: normal; transition: color .18s ease, transform .18s ease; }
 .segment:hover > i { color: var(--accent); transform: translate(2px, -2px); }
 .organized-content { padding: 2px 4px; }
+.organized-summary { margin: 0 0 18px; border-radius: 10px; padding: 13px 15px; background: var(--accent-wash); }
+.organized-summary b, .organized-unit small { color: var(--accent-deep); font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: .05em; }
+.organized-summary p { margin: 7px 0 0; color: #3c4651; font-size: 13px; line-height: 1.8; }
 .organized-block { padding: 18px 0; border-top: 1px solid var(--line); }
 .organized-block:first-child { border-top: 0; }
 .topic-link { border: 0; padding: 0; color: var(--accent-deep); background: transparent; font-size: 12px; font-weight: 600; }
 .topic-link span { margin-left: 8px; color: var(--faint); font-family: 'DM Mono', monospace; font-size: 10px; }
 .topic-link:hover { text-decoration: underline; text-underline-offset: 3px; }
 .organized-block p { margin: 8px 0 0; color: #3c4651; font-size: 14px; line-height: 1.95; white-space: pre-line; }
+.topic-summary { color: var(--muted) !important; font-size: 13px !important; }
+.organized-unit { margin-top: 12px; border-left: 2px solid #dbe0f3; padding: 4px 0 4px 12px; }
+.organized-unit p { margin-top: 4px; }
 .summary-content { padding: 6px 3px; }
 .summary-label, .result-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: var(--accent); font-family: 'DM Mono', monospace; font-size: 10px; letter-spacing: .06em; }
 .summary-label small, .result-head small { color: var(--faint); font-size: 10px; letter-spacing: 0; text-align: right; }

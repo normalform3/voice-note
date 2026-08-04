@@ -13,6 +13,8 @@ public class OrganizedDocument {
     @Column(name = "transcription_task_id", nullable = false, columnDefinition = "CHAR(36)") private String transcriptionTaskId;
     @Column(name = "transcript_version", nullable = false) private int transcriptVersion;
     @Column(nullable = false) private String title;
+    @Column(name = "summary_text", columnDefinition = "TEXT") private String summaryText;
+    @Column(name = "organization_mode", nullable = false) private String organizationMode = "RULES";
     @Enumerated(EnumType.STRING) @Column(nullable = false) private OrganizedDocumentStatus status;
     @Column(name = "structure_document", columnDefinition = "json") private String structureDocument;
     @Column(name = "plain_text", columnDefinition = "MEDIUMTEXT") private String plainText;
@@ -32,6 +34,8 @@ public class OrganizedDocument {
     public String getTranscriptionTaskId() { return transcriptionTaskId; }
     public int getTranscriptVersion() { return transcriptVersion; }
     public String getTitle() { return title; }
+    public String getSummaryText() { return summaryText; }
+    public String getOrganizationMode() { return organizationMode; }
     public OrganizedDocumentStatus getStatus() { return status; }
     public String getStructureDocument() { return structureDocument; }
     public String getPlainText() { return plainText; }
@@ -40,6 +44,9 @@ public class OrganizedDocument {
     public void queue() { if (status == OrganizedDocumentStatus.PENDING || status == OrganizedDocumentStatus.FAILED) { status = OrganizedDocumentStatus.QUEUED; failureMessage = null; updatedAt = Instant.now(); } }
     public boolean begin() { if (status != OrganizedDocumentStatus.QUEUED) return false; status = OrganizedDocumentStatus.ORGANIZING; updatedAt = Instant.now(); return true; }
     public void ready(String structure, String text) { status = OrganizedDocumentStatus.READY; structureDocument = structure; plainText = text; failureMessage = null; updatedAt = Instant.now(); }
+    public void ready(String title, String summary, String mode, String structure, String text) {
+        this.title = title; this.summaryText = summary; this.organizationMode = mode; ready(structure, text);
+    }
     public void fail(String message) { status = OrganizedDocumentStatus.FAILED; failureMessage = message; updatedAt = Instant.now(); }
     public boolean recover() { if (status != OrganizedDocumentStatus.ORGANIZING) return false; status = OrganizedDocumentStatus.QUEUED; updatedAt = Instant.now(); return true; }
 }

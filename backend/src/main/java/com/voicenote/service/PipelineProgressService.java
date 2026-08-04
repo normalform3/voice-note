@@ -69,6 +69,14 @@ public class PipelineProgressService {
     }
 
     @Transactional
+    public void completeWithoutKnowledge(String taskId) {
+        TranscriptionTask task = tasks.findById(taskId).orElseThrow();
+        if (task.isCancelled()) return;
+        task.completePipeline();
+        tasks.save(task); notifyTask(task);
+    }
+
+    @Transactional
     public void retryLater(String taskId, PipelineStage stage, String code, String message, int retryNumber) {
         TaskStageAttempt attempt = latest(taskId, stage);
         int seconds = switch (retryNumber) { case 1 -> 5; case 2 -> 15; default -> 45; };

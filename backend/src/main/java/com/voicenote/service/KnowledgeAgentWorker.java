@@ -50,7 +50,7 @@ public class KnowledgeAgentWorker {
         StringBuilder context = new StringBuilder();
         for (KnowledgeSearchService.ReadableChunk source : sources) {
             context.append("CHUNK ").append(source.chunkId()).append(" / ").append(source.documentTitle()).append(" / ")
-                    .append(source.startMs()).append("-").append(source.endMs()).append("ms\n").append(source.content()).append("\n");
+                    .append(source.topicTitle()).append(" / ").append(source.startMs()).append("-").append(source.endMs()).append("ms\n").append(source.content()).append("\n");
         }
         return "You are voicenote, an evidence-first audio knowledge assistant. Answer only from the supplied transcript chunks. " +
                 "If the sources do not support an answer, say so plainly. Return JSON only: {\"answer\":string,\"findings\":[{\"title\":string,\"content\":string,\"evidence\":[{\"chunkId\":string,\"segmentId\":string}]}]}. " +

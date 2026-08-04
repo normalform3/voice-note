@@ -15,12 +15,13 @@ export type Task = {
   currentAttemptNumber: number; transcriptVersion: number; failureCode?: string; failureMessage?: string; failedStage?: PipelineStage
   retryableStages?: PipelineStage[]; stages?: StageAttempt[]; knowledgeDocument?: { id: string; title: string; status: string; failureMessage?: string }; organizedDocument?: { id: string; title: string; status: string; failureMessage?: string }
 }
-export type Segment = { id: string; index: number; speaker?: string; startMs: number; endMs: number; text: string }
-export type OrganizedBlock = { id: string; index: number; type: string; speaker?: string; topic?: string; startMs: number; endMs: number; sourceSegmentIds: string; text: string }
-export type OrganizedDocumentDetail = { document: { id: string; taskId: string; title: string; status: string; structureDocument?: string; plainText?: string; failureMessage?: string }; blocks: OrganizedBlock[] }
+export type Segment = { id: string; index: number; speakerId?: string; speaker?: string; role?: string; startMs: number; endMs: number; text: string }
+export type Speaker = { speakerId: string; suggestedRole: string; suggestedConfidence?: number; confirmedRole?: string; resolvedRole: string; displayName?: string }
+export type OrganizedBlock = { id: string; index: number; type: string; parentBlockId?: string; speaker?: string; speakerIds?: string; topic?: string; summary?: string; startMs: number; endMs: number; sourceSegmentIds: string; sourceFragments?: string; text: string }
+export type OrganizedDocumentDetail = { document: { id: string; taskId: string; title: string; summary?: string; organizationMode?: string; status: string; structureDocument?: string; plainText?: string; failureMessage?: string }; blocks: OrganizedBlock[] }
 export type KnowledgeDocument = { id: string; transcriptionTaskId: string; title: string; status: string; failureMessage?: string; updatedAt: string }
 export type KnowledgeRun = { id: string; status: string; toolCallsUsed: number; maxToolCalls: number; resultDocument?: string; failureMessage?: string }
-export type KnowledgeEvidence = { resultPath: string; documentId: string; chunkId: string; transcriptionTaskId?: string; segmentId: string; startMs?: number; endMs?: number }
+export type KnowledgeEvidence = { resultPath: string; documentId: string; chunkId: string; transcriptionTaskId?: string; segmentId: string; topic?: string; speakerId?: string; role?: string; speaker?: string; startMs?: number; endMs?: number; text?: string }
 export type KnowledgeRunDetail = { run: KnowledgeRun; evidence: KnowledgeEvidence[] }
 export type AnalysisRun = { id: string; transcriptionTaskId: string; status: string; callsUsed: number; maxCalls: number; resultDocument?: string; failureMessage?: string }
 export type AnalysisEvidence = { resultPath: string; segmentId: string; startOffset?: number; endOffset?: number }

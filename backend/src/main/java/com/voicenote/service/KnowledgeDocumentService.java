@@ -6,6 +6,7 @@ import com.voicenote.domain.*;
 import com.voicenote.repository.KnowledgeChunkRepository;
 import com.voicenote.repository.KnowledgeDocumentRepository;
 import com.voicenote.repository.TranscriptionTaskRepository;
+import com.voicenote.repository.OrganizedDocumentBlockRepository;
 import com.voicenote.web.ApiException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -22,11 +23,13 @@ public class KnowledgeDocumentService {
     private final AppProperties properties;
     private final PipelineProgressService pipeline;
     private final TranscriptionTaskRepository tasks;
+    private final OrganizedDocumentBlockRepository organizedBlocks;
 
     public KnowledgeDocumentService(KnowledgeDocumentRepository documents, KnowledgeChunkRepository chunks, OutboxService outbox, ObjectMapper mapper,
-                                    AppProperties properties, PipelineProgressService pipeline, TranscriptionTaskRepository tasks) {
+                                    AppProperties properties, PipelineProgressService pipeline, TranscriptionTaskRepository tasks,
+                                    OrganizedDocumentBlockRepository organizedBlocks) {
         this.documents = documents; this.chunks = chunks; this.outbox = outbox; this.mapper = mapper; this.properties = properties;
-        this.pipeline = pipeline; this.tasks = tasks;
+        this.pipeline = pipeline; this.tasks = tasks; this.organizedBlocks = organizedBlocks;
     }
 
     @Transactional
@@ -52,14 +55,6 @@ public class KnowledgeDocumentService {
                 .orElseGet(() -> {
                     KnowledgeDocument document = documents.save(new KnowledgeDocument(source.getOwnerId(), source.getTranscriptionTaskId(), source.getTranscriptVersion(),
                             source.getTitle(), source.getId(), Math.toIntExact(source.getVersion())));
-                    List<OrganizedChunkDraft> drafts = chunkOrganized(blocks, properties.getKnowledge().getChunkCharacters());
-                    for (int index = 0; index < drafts.size(); index++) {
-                        OrganizedChunkDraft draft = drafts.get(index);
-                        try {
-                            chunks.save(new KnowledgeChunk(document.getId(), index, draft.startMs(), draft.endMs(), mapper.writeValueAsString(draft.segmentIds()),
-                                    mapper.writeValueAsString(draft.blockIds()), draft.content(), Hashing.sha256(draft.content())));
-                        } catch (Exception exception) { throw new IllegalStateException("Cannot persist organized knowledge chunk", exception); }
-                    }
                     outbox.enqueue("knowledge_document", document.getId(), EventType.KNOWLEDGE_INDEX_REQUESTED,
                             "{\"taskId\":\"" + source.getTranscriptionTaskId() + "\",\"stage\":\"KNOWLEDGE_BUILD\",\"documentId\":\"" + document.getId() + "\"}",
                             "task:" + source.getTranscriptionTaskId() + ":knowledge:" + document.getId());
@@ -76,7 +71,9 @@ public class KnowledgeDocumentService {
     @Transactional public IndexWork claim(String documentId) {
         KnowledgeDocument document = documents.findById(documentId).orElse(null);
         if (document == null || !document.beginIndexing()) return null;
-        return new IndexWork(document, chunks.findByKnowledgeDocumentIdOrderByChunkIndex(documentId));
+        List<OrganizedDocumentBlock> source = document.getOrganizedDocumentId() == null ? List.of()
+                : organizedBlocks.findByOrganizedDocumentIdOrderByBlockIndex(document.getOrganizedDocumentId());
+        return new IndexWork(document, chunks.findByKnowledgeDocumentIdOrderByChunkIndex(documentId), source);
     }
     @Transactional public boolean complete(String documentId) {
         KnowledgeDocument document = documents.findById(documentId).orElseThrow();
@@ -84,6 +81,21 @@ public class KnowledgeDocumentService {
         document.ready(); documents.save(document); return true;
     }
     @Transactional public void fail(String documentId, String message) { KnowledgeDocument document = documents.findById(documentId).orElseThrow(); document.fail(message); documents.save(document); }
+    @Transactional
+    public List<KnowledgeChunk> replaceOrganizedChunks(String documentId, List<KnowledgeChunker.EmbeddedChunk> drafts) {
+        chunks.deleteByKnowledgeDocumentId(documentId);
+        List<KnowledgeChunk> stored = new ArrayList<>();
+        try {
+            for (int index = 0; index < drafts.size(); index++) {
+                KnowledgeChunker.EmbeddedChunk draft = drafts.get(index);
+                String content = draft.content();
+                stored.add(chunks.save(new KnowledgeChunk(documentId, index, draft.startMs(), draft.endMs(), mapper.writeValueAsString(draft.segmentIds()),
+                        mapper.writeValueAsString(draft.blockIds()), draft.topicTitle(), mapper.writeValueAsString(draft.speakerIds()),
+                        mapper.writeValueAsString(draft.sourceFragments()), mapper.writeValueAsString(draft.contextSegmentIds()), draft.tokenCount(), draft.oversized(), content, Hashing.sha256(content))));
+            }
+            return stored;
+        } catch (Exception exception) { throw new IllegalStateException("Cannot persist semantic knowledge chunks", exception); }
+    }
     @Transactional public void retry(String ownerId, String documentId) {
         KnowledgeDocument document = ownedDocument(ownerId, documentId);
         if (!document.retry()) throw new ApiException(HttpStatus.CONFLICT, "DOCUMENT_NOT_RETRYABLE", "Only failed knowledge documents can be retried");
@@ -145,7 +157,7 @@ public class KnowledgeDocumentService {
         return extension > 0 ? filename.substring(0, extension) : filename;
     }
 
-    public record IndexWork(KnowledgeDocument document, List<KnowledgeChunk> chunks) { }
+    public record IndexWork(KnowledgeDocument document, List<KnowledgeChunk> chunks, List<OrganizedDocumentBlock> organizedBlocks) { }
     record ChunkDraft(long startMs, long endMs, List<String> segmentIds, String content) { }
     record OrganizedChunkDraft(long startMs, long endMs, List<String> blockIds, List<String> segmentIds, String content) { }
 }

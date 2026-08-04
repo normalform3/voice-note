@@ -68,3 +68,5 @@ app:
     qdrant-url: ${VOICENOTE_QDRANT_URL:http://127.0.0.1:6333}
     collection: ${VOICENOTE_QDRANT_COLLECTION:voicenote_knowledge}
     chunk-characters: ${VOICENOTE_KNOWLEDGE_CHUNK_CHARACTERS:2000}
+    chunk-target-tokens: ${VOICENOTE_KNOWLEDGE_CHUNK_TARGET_TOKENS:800}
+    chunk-max-tokens: ${VOICENOTE_KNOWLEDGE_CHUNK_MAX_TOKENS:1200}

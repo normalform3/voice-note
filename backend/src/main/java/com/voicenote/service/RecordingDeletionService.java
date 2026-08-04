@@ -21,6 +21,7 @@ public class RecordingDeletionService {
     private final ProviderInvocationRepository providerInvocations;
     private final TaskStageAttemptRepository stages;
     private final TranscriptSegmentRepository segments;
+    private final TranscriptSpeakerRepository transcriptSpeakers;
     private final OrganizedDocumentRepository organizedDocuments;
     private final OrganizedDocumentBlockRepository organizedBlocks;
     private final KnowledgeDocumentRepository knowledgeDocuments;
@@ -30,6 +31,7 @@ public class RecordingDeletionService {
     private final AnalysisRunRepository analysisRuns;
     private final AnalysisEvidenceRepository analysisEvidence;
     private final AnalysisInvocationRepository analysisInvocations;
+    private final OrganizationInvocationRepository organizationInvocations;
     private final OutboxEventRepository outbox;
     private final IdempotencyRecordRepository idempotencyRecords;
     private final IdempotencyService idempotency;
@@ -39,19 +41,19 @@ public class RecordingDeletionService {
 
     public RecordingDeletionService(TranscriptionTaskRepository tasks, AudioBlobRepository blobs, TaskAttemptRepository attempts,
                                     ProviderInvocationRepository providerInvocations, TaskStageAttemptRepository stages,
-                                    TranscriptSegmentRepository segments, OrganizedDocumentRepository organizedDocuments,
+                                    TranscriptSegmentRepository segments, TranscriptSpeakerRepository transcriptSpeakers, OrganizedDocumentRepository organizedDocuments,
                                     OrganizedDocumentBlockRepository organizedBlocks, KnowledgeDocumentRepository knowledgeDocuments,
                                     KnowledgeChunkRepository knowledgeChunks, KnowledgeRunEvidenceRepository knowledgeEvidence,
                                     KnowledgeRunRepository knowledgeRuns, AnalysisRunRepository analysisRuns,
-                                    AnalysisEvidenceRepository analysisEvidence, AnalysisInvocationRepository analysisInvocations,
+                                    AnalysisEvidenceRepository analysisEvidence, AnalysisInvocationRepository analysisInvocations, OrganizationInvocationRepository organizationInvocations,
                                     OutboxEventRepository outbox, IdempotencyRecordRepository idempotencyRecords,
                                     IdempotencyService idempotency, KnowledgeVectorStore vectors, ObjectStorage storage,
                                     PlatformTransactionManager transactionManager) {
         this.tasks = tasks; this.blobs = blobs; this.attempts = attempts; this.providerInvocations = providerInvocations; this.stages = stages;
-        this.segments = segments; this.organizedDocuments = organizedDocuments; this.organizedBlocks = organizedBlocks;
+        this.segments = segments; this.transcriptSpeakers = transcriptSpeakers; this.organizedDocuments = organizedDocuments; this.organizedBlocks = organizedBlocks;
         this.knowledgeDocuments = knowledgeDocuments; this.knowledgeChunks = knowledgeChunks; this.knowledgeEvidence = knowledgeEvidence;
         this.knowledgeRuns = knowledgeRuns; this.analysisRuns = analysisRuns; this.analysisEvidence = analysisEvidence;
-        this.analysisInvocations = analysisInvocations; this.outbox = outbox; this.idempotencyRecords = idempotencyRecords;
+        this.analysisInvocations = analysisInvocations; this.organizationInvocations = organizationInvocations; this.outbox = outbox; this.idempotencyRecords = idempotencyRecords;
         this.idempotency = idempotency; this.vectors = vectors; this.storage = storage;
         this.transactions = new TransactionTemplate(transactionManager);
         this.transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
@@ -109,6 +111,7 @@ public class RecordingDeletionService {
 
         for (OrganizedDocument document : organizedDocuments.findByTranscriptionTaskId(taskId)) {
             organizedBlocks.deleteByOrganizedDocumentId(document.getId());
+            organizationInvocations.deleteByOrganizedDocumentId(document.getId());
             outbox.deleteByAggregateTypeAndAggregateId("organized_document", document.getId());
         }
         organizedDocuments.deleteByTranscriptionTaskId(taskId);
@@ -117,6 +120,7 @@ public class RecordingDeletionService {
         attempts.deleteByTranscriptionTaskId(taskId);
         stages.deleteByTranscriptionTaskId(taskId);
         segments.deleteByTranscriptionTaskId(taskId);
+        transcriptSpeakers.deleteByTranscriptionTaskId(taskId);
         outbox.deleteByAggregateTypeAndAggregateId("transcription_task", taskId);
         idempotencyRecords.deleteByOwnerIdAndResourceId(ownerId, taskId);
 
