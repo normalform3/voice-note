@@ -9,6 +9,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import java.time.Instant;
 import java.util.List;
 
 @Service
@@ -36,6 +37,11 @@ public class TranscriptionTaskService {
 
     @Transactional
     public TranscriptionTask create(String ownerId, String key, CreateTaskCommand command) {
+        return create(ownerId, key, command, null);
+    }
+
+    @Transactional
+    public TranscriptionTask create(String ownerId, String key, CreateTaskCommand command, Instant uploadStartedAt) {
         AsrConfig config = command.asrConfig() == null ? AsrConfig.defaultConfig() : command.asrConfig().normalized();
         String requestHash = Hashing.canonicalJsonHash(new CreateTaskCommand(command.audioBlobId(), config));
         IdempotencyRecord record = idempotency.reserve(ownerId, CREATE_OPERATION, key, requestHash);
@@ -50,7 +56,7 @@ public class TranscriptionTaskService {
         TranscriptionTask task = tasks.findByOwnerIdAndAudioBlobIdAndAsrConfigHashAndPipelineVersion(ownerId, blob.getId(), configHash, PIPELINE_VERSION)
                 .orElseGet(() -> {
                     TranscriptionTask created = tasks.save(new TranscriptionTask(ownerId, blob.getId(), configHash, configDocument, PIPELINE_VERSION));
-                    pipeline.initialize(created);
+                    pipeline.initialize(created, uploadStartedAt == null ? Instant.now() : uploadStartedAt);
                     outbox.enqueue("transcription_task", created.getId(), EventType.TRANSCRIPTION_REQUESTED);
                     return created;
                 });
@@ -64,12 +70,14 @@ public class TranscriptionTaskService {
         IdempotencyRecord record = idempotency.reserve(ownerId, RETRY_OPERATION, key, Hashing.sha256(taskId));
         if (record.getResourceId() != null) return ownedTask(ownerId, record.getResourceId());
         TranscriptionTask task = ownedTask(ownerId, taskId);
-        if (!(task.getStatus() == TaskStatus.RETRY_WAIT || task.getStatus() == TaskStatus.FAILED || task.getStatus() == TaskStatus.RETRYABLE_FAILED || task.getStatus() == TaskStatus.FINAL_FAILED || task.getStatus() == TaskStatus.SUBMISSION_UNKNOWN)) {
+        boolean cancelled = task.getStatus() == TaskStatus.CANCELLED;
+        if (!(cancelled || task.getStatus() == TaskStatus.RETRY_WAIT || task.getStatus() == TaskStatus.FAILED || task.getStatus() == TaskStatus.RETRYABLE_FAILED || task.getStatus() == TaskStatus.FINAL_FAILED || task.getStatus() == TaskStatus.SUBMISSION_UNKNOWN)) {
             throw new ApiException(HttpStatus.CONFLICT, "TASK_NOT_RETRYABLE", "Only terminal or unknown submissions can be retried");
         }
         int number = task.nextAttemptNumber();
         attempts.save(new TaskAttempt(task.getId(), number));
-        task.mark(TaskStatus.QUEUED);
+        if (cancelled) pipeline.restartCancelledTask(ownerId, taskId);
+        else task.mark(TaskStatus.QUEUED);
         outbox.enqueue("transcription_task", task.getId(), EventType.TRANSCRIPTION_REQUESTED);
         try { idempotency.complete(record, task.getId(), mapper.writeValueAsString(TaskView.from(task))); }
         catch (Exception exception) { throw new IllegalStateException("Cannot persist idempotent retry response", exception); }
@@ -88,8 +96,17 @@ public class TranscriptionTaskService {
         } else if (stage == PipelineStage.ASR_SUBMIT) {
             retry(ownerId, key + ":asr", taskId);
             pipeline.retryStage(ownerId, taskId, stage);
+        } else if (stage == PipelineStage.ASR_POLL) {
+            TaskAttempt attempt = attempts.findTopByTranscriptionTaskIdOrderByAttemptNumberDesc(taskId)
+                    .orElseThrow(() -> new ApiException(HttpStatus.CONFLICT, "ASR_ATTEMPT_MISSING", "No ASR attempt exists for this task"));
+            if (attempt.getProviderTaskId() == null || attempt.getProviderTaskId().isBlank()) {
+                throw new ApiException(HttpStatus.CONFLICT, "ASR_TASK_ID_MISSING", "This task has not been accepted by DashScope yet");
+            }
+            pipeline.retryStage(ownerId, taskId, stage);
+            attempt.retryPollNow();
+            attempts.save(attempt);
         } else {
-            throw new ApiException(HttpStatus.CONFLICT, "STAGE_RETRY_UNSUPPORTED", "This stage is recovered automatically; only ASR submission and knowledge indexing can be restarted manually");
+            throw new ApiException(HttpStatus.CONFLICT, "STAGE_RETRY_UNSUPPORTED", "Only ASR submission, ASR polling, document organization, and knowledge indexing can be restarted manually");
         }
         PipelineProgressService.TaskProgressView response = pipeline.ownedView(ownerId, taskId);
         try { idempotency.complete(record, taskId, mapper.writeValueAsString(response)); }
@@ -111,6 +128,7 @@ public class TranscriptionTaskService {
     @Transactional
     public void ensureFirstAttempt(String taskId) {
         TranscriptionTask task = tasks.findById(taskId).orElseThrow();
+        if (task.getStatus() == TaskStatus.FAILED || task.getStatus() == TaskStatus.CANCELLED || task.getStatus() == TaskStatus.SUCCEEDED) return;
         if (task.getCurrentAttemptNumber() == 0) {
             int number = task.nextAttemptNumber();
             attempts.save(new TaskAttempt(task.getId(), number));
@@ -125,9 +143,15 @@ public class TranscriptionTaskService {
     }
 
     public record CreateTaskCommand(String audioBlobId, AsrConfig asrConfig) { }
-    public record AsrConfig(List<String> languageHints, boolean diarizationEnabled, Integer speakerCount) {
+    public record AsrConfig(List<String> languageHints, Boolean diarizationEnabled, Integer speakerCount) {
         public static AsrConfig defaultConfig() { return new AsrConfig(List.of("zh", "en"), true, null); }
-        public AsrConfig normalized() { return new AsrConfig(languageHints == null || languageHints.isEmpty() ? List.of("zh", "en") : languageHints.stream().sorted().toList(), true, speakerCount); }
+        public AsrConfig normalized() {
+            boolean normalizedDiarization = diarizationEnabled == null || diarizationEnabled;
+            if (speakerCount != null && (speakerCount < 2 || speakerCount > 100)) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_SPEAKER_COUNT", "speakerCount must be between 2 and 100");
+            }
+            return new AsrConfig(languageHints == null || languageHints.isEmpty() ? List.of("zh", "en") : languageHints.stream().sorted().toList(), normalizedDiarization, speakerCount);
+        }
     }
     public record TaskView(String id, TaskStatus status, int currentAttemptNumber, int transcriptVersion, String failureCode, String failureMessage) {
         public static TaskView from(TranscriptionTask task) { return new TaskView(task.getId(), task.getStatus(), task.getCurrentAttemptNumber(), task.getTranscriptVersion(), task.getFailureCode(), task.getFailureMessage()); }

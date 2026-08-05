@@ -32,5 +32,5 @@ public class OutboxEvent {
     public String getPayload() { return payload; }
     public OutboxStatus getStatus() { return status; }
     public void markPublished() { status = OutboxStatus.PUBLISHED; publishedAt = Instant.now(); attempts++; }
-    public void defer() { attempts++; availableAt = Instant.now().plusSeconds(Math.min(60, attempts * 5L)); }
+    public void markFailed() { status = OutboxStatus.FAILED; attempts++; }
 }

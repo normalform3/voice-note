@@ -81,8 +81,13 @@ export const statusText = (status: string) => ({
 }[status] || status)
 export const stageText = (stage?: PipelineStage) => {
   const labels: Record<PipelineStage, string> = {
-  UPLOAD_COMPLETED: '音频上传', ASR_SUBMIT: '提交转写', ASR_POLL: '等待转写结果', TRANSCRIPT_PERSIST: '保存听记', DOCUMENT_ORGANIZATION: '整理文档',
+  UPLOAD_COMPLETED: '音频已存入 MinIO', ASR_SUBMIT: '提交至转写服务', ASR_POLL: '异步转写任务已启动', TRANSCRIPT_PERSIST: '保存听记', DOCUMENT_ORGANIZATION: '整理文档',
   KNOWLEDGE_PREPARE: '准备知识文档', KNOWLEDGE_INDEX: '建立知识索引', COMPLETED: '处理完成'
   }
   return stage ? labels[stage] : '等待处理'
+}
+export const stageStatusText = (stage: StageAttempt) => {
+  if (stage.stage === 'ASR_SUBMIT' && stage.status === 'RUNNING') return '正在从 MinIO 上传并提交给 DashScope'
+  if (stage.stage === 'ASR_POLL' && (stage.status === 'QUEUED' || stage.status === 'RUNNING')) return '模型已受理，正在异步转写'
+  return statusText(stage.status)
 }

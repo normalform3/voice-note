@@ -6,6 +6,8 @@ import com.voicenote.domain.*;
 import com.voicenote.provider.AsrProvider;
 import com.voicenote.provider.ProviderException;
 import com.voicenote.repository.*;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 import org.springframework.stereotype.Service;
@@ -16,6 +18,7 @@ import java.util.List;
 
 @Component
 public class AsrWorker {
+    private static final Logger log = LoggerFactory.getLogger(AsrWorker.class);
     private final AppProperties properties;
     private final AsrAttemptState state;
     private final AsrProvider provider;
@@ -31,13 +34,27 @@ public class AsrWorker {
         AsrAttemptState.SubmissionWork work = state.claimSubmission(attemptId);
         if (work == null) return;
         try { state.recordSubmission(work.attemptId(), provider.submit(work.audio(), work.options())); }
-        catch (ProviderException exception) { state.recordFailure(work.attemptId(), PipelineStage.ASR_SUBMIT, exception); }
+        catch (ProviderException exception) {
+            log.warn("ASR submission failed: attemptId={}, code={}, kind={}", work.attemptId(), exception.getCode(), exception.getKind());
+            state.recordFailure(work.attemptId(), PipelineStage.ASR_SUBMIT, exception);
+        }
+        catch (RuntimeException exception) {
+            log.error("ASR submission crashed: attemptId={}", work.attemptId(), exception);
+            state.recordUnexpectedFailure(work.attemptId(), PipelineStage.ASR_SUBMIT, exception);
+        }
     }
     private void poll(String attemptId) {
         AsrAttemptState.PollWork work = state.claimPoll(attemptId);
         if (work == null) return;
         try { state.recordPoll(work.attemptId(), provider.poll(work.providerTaskId())); }
-        catch (ProviderException exception) { state.recordFailure(work.attemptId(), PipelineStage.ASR_POLL, exception); }
+        catch (ProviderException exception) {
+            log.warn("ASR polling failed: attemptId={}, code={}, kind={}", work.attemptId(), exception.getCode(), exception.getKind());
+            state.recordFailure(work.attemptId(), PipelineStage.ASR_POLL, exception);
+        }
+        catch (RuntimeException exception) {
+            log.error("ASR polling crashed: attemptId={}", work.attemptId(), exception);
+            state.recordUnexpectedFailure(work.attemptId(), PipelineStage.ASR_POLL, exception);
+        }
     }
 
     @Service
@@ -91,12 +108,13 @@ public class AsrWorker {
             if (task.isCancelled()) return;
             if (result.status() == AsrProvider.AsrPollResult.Status.RUNNING) { attempt.reschedulePoll(); attempts.save(attempt); return; }
             if (result.status() == AsrProvider.AsrPollResult.Status.FAILED) { attempt.fail(AttemptStatus.FINAL_FAILED, result.errorCode(), result.errorMessage()); task.fail(TaskStatus.FINAL_FAILED, result.errorCode(), result.errorMessage()); attempts.save(attempt); tasks.save(task); pipeline.failed(task.getId(), PipelineStage.ASR_POLL, result.errorCode(), result.errorMessage(), false); return; }
-            validateDiarizedTranscript(result);
+            validateTranscript(result, asrConfig(task).diarizationEnabled());
             pipeline.succeeded(task.getId(), PipelineStage.ASR_POLL, "{\"completed\":true,\"segmentCount\":" + result.segments().size() + "}", PipelineStage.TRANSCRIPT_PERSIST);
             if (!pipeline.begin(task.getId(), PipelineStage.TRANSCRIPT_PERSIST)) return;
             int version = task.nextTranscriptVersion(); List<TranscriptSegment> created = new java.util.ArrayList<>();
             for (int index = 0; index < result.segments().size(); index++) { AsrProvider.AsrSegment segment = result.segments().get(index); created.add(segments.save(new TranscriptSegment(task.getId(), version, index, segment.speakerId(), segment.startMs(), segment.endMs(), segment.text()))); }
-            for (String speakerId : created.stream().map(TranscriptSegment::getAsrSpeakerId).collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new))) {
+            for (String speakerId : created.stream().map(TranscriptSegment::getAsrSpeakerId).filter(java.util.Objects::nonNull)
+                    .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new))) {
                 speakers.findByTranscriptionTaskIdAndTranscriptVersionAndAsrSpeakerId(task.getId(), version, speakerId)
                         .orElseGet(() -> speakers.save(new TranscriptSpeaker(task.getId(), version, speakerId)));
             }
@@ -121,6 +139,13 @@ public class AsrWorker {
             pipeline.failed(task.getId(), stage, exception.getCode(), exception.getMessage(), attemptStatus == AttemptStatus.SUBMISSION_UNKNOWN);
         }
         @Transactional
+        public void recordUnexpectedFailure(String attemptId, PipelineStage stage, RuntimeException exception) {
+            String detail = exception.getMessage();
+            String message = detail == null || detail.isBlank() ? exception.getClass().getSimpleName() : detail;
+            recordFailure(attemptId, stage, new ProviderException(ProviderException.Kind.FINAL_REJECTION,
+                    "ASR_STAGE_FAILED", "转写处理发生异常：" + message));
+        }
+        @Transactional
         public void activateDueRetries() {
             for (PipelineProgressService.RetryWork retry : pipeline.dueRetries()) {
                 if (retry.stage() != PipelineStage.ASR_SUBMIT && retry.stage() != PipelineStage.ASR_POLL) continue;
@@ -136,28 +161,34 @@ public class AsrWorker {
             }
         }
         private AsrProvider.AsrOptions asrOptions(TranscriptionTask task) {
+            TranscriptionTaskService.AsrConfig config = asrConfig(task);
+            return new AsrProvider.AsrOptions(config.languageHints(), config.diarizationEnabled(), config.speakerCount());
+        }
+        private TranscriptionTaskService.AsrConfig asrConfig(TranscriptionTask task) {
             try {
                 TranscriptionTaskService.AsrConfig config = task.getAsrConfig() == null
                         ? TranscriptionTaskService.AsrConfig.defaultConfig()
                         : mapper.readValue(task.getAsrConfig(), TranscriptionTaskService.AsrConfig.class);
-                return new AsrProvider.AsrOptions(config.languageHints(), config.speakerCount());
+                return config.normalized();
             } catch (Exception exception) {
                 throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ASR_CONFIG_INVALID", "Stored ASR configuration is invalid");
             }
         }
-        private static void validateDiarizedTranscript(AsrProvider.AsrPollResult result) {
+        private static void validateTranscript(AsrProvider.AsrPollResult result, boolean diarizationEnabled) {
             AsrProvider.AsrAudioMetadata metadata = result.audioMetadata();
-            if (metadata == null || metadata.channelCount() == null || metadata.channelCount() != 1) {
-                throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ASR_DIARIZATION_REQUIRES_MONO", "Speaker diarization requires a mono audio track");
-            }
-            if (metadata.durationMs() != null && metadata.durationMs() > 7_200_000L) {
-                throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ASR_DIARIZATION_DURATION_EXCEEDED", "Speaker diarization supports recordings up to two hours");
+            if (diarizationEnabled) {
+                if (metadata == null || metadata.channelCount() == null || metadata.channelCount() != 1) {
+                    throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ASR_DIARIZATION_REQUIRES_MONO", "Speaker diarization requires a mono audio track");
+                }
+                if (metadata.durationMs() != null && metadata.durationMs() > 7_200_000L) {
+                    throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ASR_DIARIZATION_DURATION_EXCEEDED", "Speaker diarization supports recordings up to two hours");
+                }
             }
             long previousEnd = -1;
             for (AsrProvider.AsrSegment segment : result.segments()) {
-                if (segment.speakerId() == null || segment.speakerId().isBlank() || segment.text() == null || segment.text().isBlank()
+                if ((diarizationEnabled && (segment.speakerId() == null || segment.speakerId().isBlank())) || segment.text() == null || segment.text().isBlank()
                         || segment.startMs() < 0 || segment.endMs() < segment.startMs() || segment.startMs() < previousEnd) {
-                    throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ASR_DIARIZATION_RESULT_INVALID", "ASR did not return ordered, speaker-labelled sentence results");
+                    throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ASR_RESULT_INVALID", "ASR did not return ordered sentence results");
                 }
                 previousEnd = segment.endMs();
             }

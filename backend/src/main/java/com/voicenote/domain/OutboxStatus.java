@@ -1,3 +1,3 @@
 package com.voicenote.domain;
 
-public enum OutboxStatus { READY, PUBLISHED }
+public enum OutboxStatus { READY, PUBLISHED, FAILED }

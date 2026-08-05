@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.voicenote.domain.AudioBlob;
 import com.voicenote.domain.BlobStatus;
 import com.voicenote.domain.IdempotencyRecord;
+import com.voicenote.domain.TranscriptionTask;
 import com.voicenote.repository.AudioBlobRepository;
 import com.voicenote.web.ApiException;
 import org.junit.jupiter.api.Test;
@@ -11,6 +12,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.test.util.ReflectionTestUtils;
 
 import java.io.ByteArrayInputStream;
+import java.time.Instant;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -18,11 +20,13 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import org.mockito.ArgumentCaptor;
 
 class UploadServiceTest {
     private static final String OWNER_ID = "owner-a";
@@ -95,5 +99,29 @@ class UploadServiceTest {
 
         assertThat(intent.status()).isEqualTo(BlobStatus.WRITING);
         verify(blobs, never()).save(any(AudioBlob.class));
+    }
+
+    @Test
+    void passesTheClientImportStartTimeToThePipelineWhenCreatingTheTask() {
+        AudioBlobRepository blobs = mock(AudioBlobRepository.class);
+        IdempotencyService idempotency = mock(IdempotencyService.class);
+        TranscriptionTaskService tasks = mock(TranscriptionTaskService.class);
+        PipelineProgressService progress = mock(PipelineProgressService.class);
+        AudioBlob blob = new AudioBlob(OWNER_ID, SHA256, 3, "audio/mpeg", "meeting.mp3");
+        blob.claimWrite();
+        blob.markReady();
+        TranscriptionTask task = new TranscriptionTask(OWNER_ID, blob.getId(), SHA256, "pipeline");
+        UploadService service = new UploadService(blobs, idempotency, mock(ObjectStorage.class), new ObjectMapper(), tasks, progress);
+        Instant importStartedAt = Instant.now().minusSeconds(9);
+
+        when(blobs.findById(blob.getId())).thenReturn(Optional.of(blob));
+        when(tasks.create(eq(OWNER_ID), eq("complete-key"), any(TranscriptionTaskService.CreateTaskCommand.class), any(Instant.class))).thenReturn(task);
+
+        service.complete(OWNER_ID, "complete-key", blob.getId(), null, importStartedAt);
+
+        ArgumentCaptor<Instant> captured = ArgumentCaptor.forClass(Instant.class);
+        verify(tasks).create(eq(OWNER_ID), eq("complete-key"),
+                eq(new TranscriptionTaskService.CreateTaskCommand(blob.getId(), null)), captured.capture());
+        assertThat(captured.getValue()).isEqualTo(importStartedAt);
     }
 }

@@ -95,14 +95,16 @@ public class UploadService {
     }
 
     @Transactional
-    public PipelineProgressService.TaskProgressView complete(String ownerId, String idempotencyKey, String blobId, TranscriptionTaskService.AsrConfig asrConfig) {
+    public PipelineProgressService.TaskProgressView complete(String ownerId, String idempotencyKey, String blobId, TranscriptionTaskService.AsrConfig asrConfig,
+                                                              Instant clientImportStartedAt) {
         if (tasks == null || progress == null) throw new IllegalStateException("Pipeline task creation is not configured");
         AudioBlob blob = blobs.findById(blobId).filter(value -> value.getOwnerId().equals(ownerId))
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "AUDIO_NOT_FOUND", "Audio upload was not found"));
         if (blob.getStatus() != BlobStatus.READY) {
             throw new ApiException(HttpStatus.CONFLICT, "AUDIO_NOT_READY", "Wait for the upload to finish before creating a task");
         }
-        TranscriptionTask task = tasks.create(ownerId, idempotencyKey, new TranscriptionTaskService.CreateTaskCommand(blobId, asrConfig));
+        TranscriptionTask task = tasks.create(ownerId, idempotencyKey, new TranscriptionTaskService.CreateTaskCommand(blobId, asrConfig),
+                uploadStartedAt(blob, clientImportStartedAt));
         return progress.ownedView(ownerId, task.getId());
     }
 
@@ -119,6 +121,14 @@ public class UploadService {
     @Transactional protected void markFailed(String blobId, String reason) { blobs.findById(blobId).ifPresent(blob -> { blob.markFailed(reason); blobs.save(blob); }); }
 
     private static UploadIntent toIntent(AudioBlob blob) { return new UploadIntent(blob.getId(), blob.getStatus(), blob.getStatus() == BlobStatus.READY, blob.getFailureReason()); }
+    private static Instant uploadStartedAt(AudioBlob blob, Instant clientImportStartedAt) {
+        Instant now = Instant.now();
+        if (clientImportStartedAt != null && !clientImportStartedAt.isAfter(now) && clientImportStartedAt.isAfter(now.minus(Duration.ofHours(24)))) {
+            return clientImportStartedAt;
+        }
+        if (blob.getWriteStartedAt() != null) return blob.getWriteStartedAt();
+        return blob.getCreatedAt();
+    }
     private static void validate(CreateUploadIntent command) {
         if (command.contentLength() <= 0 || command.contentLength() > 1024L * 1024 * 1024) throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_FILE_SIZE", "Audio must be between 1 byte and 1GB");
         if (command.sha256() == null || !command.sha256().matches("[a-fA-F0-9]{64}")) throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_SHA256", "sha256 must be a lowercase or uppercase 64-character hex digest");

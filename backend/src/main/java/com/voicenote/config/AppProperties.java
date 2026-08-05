@@ -74,6 +74,21 @@ public class AppProperties {
         public void setApiKey(String apiKey) { this.apiKey = apiKey; }
         public String getBaseUrl() { return baseUrl; }
         public void setBaseUrl(String baseUrl) { this.baseUrl = baseUrl; }
+        /** ASR and embedding use DashScope's native API. */
+        public String getApiBaseUrl() { return baseUrlFor("/api/v1"); }
+        /** Chat completions use DashScope's OpenAI-compatible API. */
+        public String getCompatibleBaseUrl() { return baseUrlFor("/compatible-mode/v1"); }
+        private String baseUrlFor(String targetSuffix) {
+            if (baseUrl == null || baseUrl.isBlank()) throw new IllegalStateException("DASHSCOPE_BASE_URL must be configured");
+            String normalized = baseUrl.trim().replaceAll("/+$", "");
+            if (normalized.endsWith("/api/v1")) {
+                return normalized.substring(0, normalized.length() - "/api/v1".length()) + targetSuffix;
+            }
+            if (normalized.endsWith("/compatible-mode/v1")) {
+                return normalized.substring(0, normalized.length() - "/compatible-mode/v1".length()) + targetSuffix;
+            }
+            throw new IllegalStateException("DASHSCOPE_BASE_URL must end with /api/v1 or /compatible-mode/v1");
+        }
         public String getAsrModel() { return asrModel; }
         public void setAsrModel(String asrModel) { this.asrModel = asrModel; }
         public String getChatModel() { return chatModel; }

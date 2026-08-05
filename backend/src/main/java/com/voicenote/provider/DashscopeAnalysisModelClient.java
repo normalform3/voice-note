@@ -17,7 +17,7 @@ public class DashscopeAnalysisModelClient implements AnalysisModelClient {
     private final RestClient client;
     public DashscopeAnalysisModelClient(AppProperties properties) {
         this.properties = properties;
-        String base = properties.getDashscope().getBaseUrl().replace("/api/v1", "/compatible-mode/v1");
+        String base = properties.getDashscope().getCompatibleBaseUrl();
         this.client = RestClient.builder().baseUrl(base).defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + properties.getDashscope().getApiKey()).build();
     }
     @Override public String complete(String prompt) {

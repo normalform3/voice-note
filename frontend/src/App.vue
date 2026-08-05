@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { api, hashFile, key, stageText, statusText, timecode, uploadErrorMessage, type AnalysisEvidence, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeEvidence, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PipelineStage, type Segment, type Speaker, type Task, type WorkspaceSnapshot } from './api'
+import { api, hashFile, key, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AnalysisEvidence, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeEvidence, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PipelineStage, type Segment, type Speaker, type Task, type WorkspaceSnapshot } from './api'
 
 type AgentScope = 'CURRENT_DOCUMENT' | 'CROSS_DOCUMENT'
 type WorkspaceView = 'library' | 'document'
@@ -24,12 +24,19 @@ const audioUrl = ref('')
 const file = ref<File | null>(null)
 const uploading = ref(false)
 const progress = ref('')
+const importStartedAt = ref<number | null>(null)
+const clockNow = ref(Date.now())
+const retryingStage = ref<PipelineStage | null>(null)
+const stageRetryError = ref('')
+const resubmittingTask = ref(false)
+const taskActionError = ref('')
 const question = ref('请总结近期会议中的关键结论、风险和下一步行动。')
 const knowledge = ref<KnowledgeRunDetail | null>(null)
 const analysis = ref<AnalysisRunDetail | null>(null)
 const asking = ref(false)
 const audio = ref<HTMLAudioElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
+const speakerDiarization = ref(true)
 const workspaceView = ref<WorkspaceView>('library')
 const detailTab = ref<DetailTab>('transcript')
 const mobileAgentOpen = ref(false)
@@ -39,6 +46,7 @@ let streamController: AbortController | null = null
 let reconnectTimer: number | null = null
 let streamClosed = false
 let reconnectDelay = 1000
+let clockTimer: number | null = null
 
 const isDocumentView = computed(() => workspaceView.value === 'document')
 const scope = computed<AgentScope>(() => isDocumentView.value ? 'CURRENT_DOCUMENT' : 'CROSS_DOCUMENT')
@@ -47,6 +55,7 @@ const organizedTopics = computed(() => organized.value?.blocks.filter(block => b
 const selectedTitle = computed(() => selected.value ? taskTitle(selected.value) : '从资料库选择一份听记')
 const canAnalyzeCurrent = computed(() => Boolean(selected.value?.transcriptReady))
 const canCancelTask = computed(() => Boolean(selected.value && !['SUCCEEDED', 'CANCELLED'].includes(selected.value.status)))
+const canResubmitTask = computed(() => selected.value?.status === 'CANCELLED')
 const canSummarize = computed(() => selected.value?.organizedDocument?.status === 'READY')
 const activeRun = computed(() => scope.value === 'CURRENT_DOCUMENT' ? analysis.value?.run : knowledge.value?.run)
 const activeEvidence = computed(() => scope.value === 'CURRENT_DOCUMENT' ? analysis.value?.evidence || [] : knowledge.value?.evidence || [])
@@ -70,6 +79,7 @@ const agentPlaceholder = computed(() => scope.value === 'CURRENT_DOCUMENT'
 const agentSuggestions = computed(() => scope.value === 'CURRENT_DOCUMENT'
   ? ['提炼这份录音的重点内容', '有哪些明确的下一步行动？', '不同发言人的主要观点是什么？']
   : ['总结近期会议中的关键结论', '跨会议有哪些重复出现的风险？', '找出所有需要跟进的行动项'])
+const importElapsedMs = computed(() => importStartedAt.value == null ? 0 : Math.max(0, clockNow.value - importStartedAt.value))
 
 function parseResultDocument(raw?: string) {
   if (!raw) return null
@@ -151,6 +161,8 @@ function chooseFile(event: Event) {
 async function upload() {
   if (!file.value) return
   uploading.value = true
+  importStartedAt.value = Date.now()
+  const startedAt = importStartedAt.value
   let phase: 'intent' | 'content' | 'task' = 'intent'
   try {
     progress.value = '正在核验音频指纹…'
@@ -165,14 +177,17 @@ async function upload() {
       })
     }
     phase = 'task'; progress.value = '正在创建异步处理任务…'
-    const { data: task } = await api.post<Task>(`/uploads/intents/${intent.data.audioBlobId}/complete`, {}, { headers: { 'Idempotency-Key': key() } })
+    const { data: task } = await api.post<Task>(`/uploads/intents/${intent.data.audioBlobId}/complete`, {
+      asrConfig: { diarizationEnabled: speakerDiarization.value },
+      clientImportStartedAt: new Date(startedAt).toISOString()
+    }, { headers: { 'Idempotency-Key': key() } })
     file.value = null
     if (fileInput.value) fileInput.value.value = ''
     upsertTask(task)
     await choose(task)
-    progress.value = '已进入异步处理流程；后续阶段会自动更新。'
+    progress.value = `导入完成，用时 ${formatDuration(Date.now() - startedAt)}；后续阶段会自动更新。`
   } catch (error: unknown) { progress.value = uploadErrorMessage(error, phase) }
-  finally { uploading.value = false }
+  finally { uploading.value = false; importStartedAt.value = null }
 }
 async function askAgent() {
   if (!question.value.trim()) return
@@ -278,13 +293,34 @@ async function retryDocument(document: Pick<KnowledgeDocument, 'id'>) {
 }
 async function retryStage(stage: PipelineStage) {
   if (!selected.value) return
-  const { data } = await api.post<Task>(`/transcription-tasks/${selected.value.id}/stages/${stage}/retry`, undefined, { headers: { 'Idempotency-Key': key() } })
-  upsertTask(data)
+  retryingStage.value = stage
+  stageRetryError.value = ''
+  try {
+    const { data } = await api.post<Task>(`/transcription-tasks/${selected.value.id}/stages/${stage}/retry`, undefined, { headers: { 'Idempotency-Key': key() } })
+    upsertTask(data)
+  } catch (error: any) {
+    stageRetryError.value = error.response?.data?.message || '重新提交失败，请稍后再试。'
+  } finally {
+    retryingStage.value = null
+  }
 }
 async function cancelTask() {
   if (!selected.value || !canCancelTask.value) return
   const { data } = await api.post<Task>(`/transcription-tasks/${selected.value.id}/cancel`, undefined, { headers: { 'Idempotency-Key': key() } })
   upsertTask(data)
+}
+async function resubmitTask() {
+  if (!selected.value || !canResubmitTask.value) return
+  resubmittingTask.value = true
+  taskActionError.value = ''
+  try {
+    const { data } = await api.post<Task>(`/transcription-tasks/${selected.value.id}/retry`, undefined, { headers: { 'Idempotency-Key': key() } })
+    upsertTask(data)
+  } catch (error: any) {
+    taskActionError.value = error.response?.data?.message || '重新提交失败，请稍后再试。'
+  } finally {
+    resubmittingTask.value = false
+  }
 }
 async function deleteTask() {
   const task = selected.value
@@ -382,6 +418,24 @@ function formatDuration(milliseconds?: number) {
   if (milliseconds < 1000) return `${milliseconds}ms`
   return `${Math.round(milliseconds / 1000)} 秒`
 }
+function stageWaitDuration(stage: { status: string; queuedAt: string; totalWaitDurationMs: number }) {
+  if (stage.status !== 'QUEUED') return stage.totalWaitDurationMs
+  return stage.totalWaitDurationMs + Math.max(0, clockNow.value - new Date(stage.queuedAt).getTime())
+}
+function stageDurationText(stage: { stage: PipelineStage; status: string; queuedAt: string; totalWaitDurationMs: number }) {
+  const duration = formatDuration(stageWaitDuration(stage))
+  if (stage.stage === 'UPLOAD_COMPLETED') return `导入耗时 ${duration}`
+  return stage.status === 'QUEUED' ? `已等待 ${duration}` : `等待 ${duration}`
+}
+function canRetryStage(stage: PipelineStage) {
+  return (stage === 'ASR_SUBMIT' || stage === 'ASR_POLL' || stage === 'DOCUMENT_ORGANIZATION' || stage === 'KNOWLEDGE_INDEX')
+    && Boolean(selected.value?.retryableStages?.includes(stage))
+}
+function retryStageLabel(stage: PipelineStage) {
+  if (stage === 'ASR_SUBMIT') return '重新提交转写'
+  if (stage === 'ASR_POLL') return '重新查询结果'
+  return '从此阶段重试'
+}
 function logout() {
   stopProgressEvents()
   if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
@@ -397,8 +451,14 @@ function logout() {
   summaryByTaskId.value = {}
   workspaceView.value = 'library'
 }
-onMounted(() => { if (token.value) { void loadWorkspace(); void connectProgressEvents() } })
-onBeforeUnmount(stopProgressEvents)
+onMounted(() => {
+  clockTimer = window.setInterval(() => { clockNow.value = Date.now() }, 1000)
+  if (token.value) { void loadWorkspace(); void connectProgressEvents() }
+})
+onBeforeUnmount(() => {
+  stopProgressEvents()
+  if (clockTimer) window.clearInterval(clockTimer)
+})
 </script>
 
 <template>
@@ -453,7 +513,8 @@ onBeforeUnmount(stopProgressEvents)
 
         <section v-if="file || progress" class="upload-queue" aria-live="polite">
           <div v-if="file" class="picked-file"><span class="file-glyph" aria-hidden="true">♫</span><div><b>{{ file.name }}</b><small>{{ formatFileSize(file.size) }}</small></div></div>
-          <p v-if="progress">{{ progress }}</p>
+          <label v-if="file" class="diarization-option"><input v-model="speakerDiarization" type="checkbox"> 识别说话人 <small>仅单声道</small></label>
+          <p v-if="progress">{{ progress }}<b v-if="uploading" class="upload-timer"> · 导入用时 {{ formatDuration(importElapsedMs) }}</b></p>
           <button v-if="file" class="primary upload-start" :disabled="uploading" @click="upload">{{ uploading ? '正在导入' : '上传并转写' }} <span>→</span></button>
         </section>
 
@@ -476,10 +537,11 @@ onBeforeUnmount(stopProgressEvents)
         <nav class="breadcrumb" aria-label="当前位置"><button type="button" @click="showLibrary">音频资料库</button><span>/</span><b>{{ selectedTitle }}</b></nav>
         <header class="document-head">
           <div><p class="eyebrow">DOCUMENT LISTENING</p><h2>{{ selectedTitle }}</h2></div>
-          <div v-if="selected" class="document-actions"><span class="state-pill">{{ selected.progressPercent || 0 }}% · {{ stageText(selected.currentStage) }}</span><button v-if="canCancelTask" class="text-action" @click="cancelTask">取消任务</button><button class="text-action danger" @click="deleteTask">删除录音</button></div>
+          <div v-if="selected" class="document-actions"><span class="state-pill">{{ selected.progressPercent || 0 }}% · {{ stageText(selected.currentStage) }}</span><button v-if="canCancelTask" class="text-action" @click="cancelTask">取消任务</button><button v-if="canResubmitTask" class="stage-retry resubmit-task" :disabled="resubmittingTask" @click="resubmitTask">{{ resubmittingTask ? '正在重新提交…' : '重新提交转写' }}</button><button class="text-action danger" @click="deleteTask">删除录音</button><p v-if="taskActionError" class="task-action-error" role="alert">{{ taskActionError }}</p></div>
         </header>
 
         <section v-if="selected" class="player-surface" aria-label="音频播放">
+          <p v-if="selected.failureMessage" class="task-failure" role="alert"><b>{{ stageText(selected.failedStage || selected.currentStage) }}失败</b><span>{{ selected.failureMessage }}</span></p>
           <div class="player-caption"><span class="live-dot"></span><b>原始音频</b><small>{{ selectedDocument ? statusText(selectedDocument.status) : statusText(selected.status) }}</small></div>
           <audio v-if="audioUrl" ref="audio" :src="audioUrl" controls></audio>
         </section>
@@ -489,10 +551,11 @@ onBeforeUnmount(stopProgressEvents)
             <summary><span>处理进度</span><b>{{ stageText(selected.currentStage) }} · {{ selected.progressPercent || 0 }}%</b></summary>
             <ol class="pipeline-stages">
               <li v-for="stage in selected.stages" :key="`${stage.stage}-${stage.attemptNumber}`" :class="stage.status.toLowerCase()">
-                <i></i><div><b>{{ stageText(stage.stage) }}</b><small>{{ statusText(stage.status) }} · 等待 {{ formatDuration(stage.totalWaitDurationMs) }}</small><small v-if="stage.nextRetryAt">将在 {{ new Date(stage.nextRetryAt).toLocaleTimeString() }} 自动重试</small><small v-else-if="stage.errorMessage" class="error">{{ stage.errorMessage }}</small></div>
-                <button v-if="(stage.stage === 'ASR_SUBMIT' || stage.stage === 'DOCUMENT_ORGANIZATION' || stage.stage === 'KNOWLEDGE_INDEX') && selected.retryableStages?.includes(stage.stage)" class="text-action" @click="retryStage(stage.stage)">从此阶段重试</button>
+                <i></i><div><b>{{ stageText(stage.stage) }}</b><small><span class="stage-status">{{ stageStatusText(stage) }}</span> · {{ stageDurationText(stage) }}</small><small v-if="stage.nextRetryAt">将在 {{ new Date(stage.nextRetryAt).toLocaleTimeString() }} 自动重试</small><small v-else-if="stage.errorMessage" class="error">{{ stage.errorMessage }}</small></div>
+                <button v-if="canRetryStage(stage.stage)" class="stage-retry" :disabled="retryingStage === stage.stage" @click="retryStage(stage.stage)">{{ retryingStage === stage.stage ? '正在重新提交…' : retryStageLabel(stage.stage) }}</button>
               </li>
             </ol>
+            <p v-if="stageRetryError" class="retry-feedback" role="alert">{{ stageRetryError }}</p>
           </details>
 
           <nav class="detail-tabs" role="tablist" aria-label="文档内容">

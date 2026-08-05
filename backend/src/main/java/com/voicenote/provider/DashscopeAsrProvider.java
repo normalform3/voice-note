@@ -23,6 +23,10 @@ import java.util.UUID;
 @Component
 @ConditionalOnProperty(name = "app.dashscope.enabled", havingValue = "true")
 public class DashscopeAsrProvider implements AsrProvider {
+    private static final ObjectMapper ERROR_MAPPER = new ObjectMapper();
+    static final String UPLOADS_PATH = "/uploads";
+    static final String TRANSCRIPTION_PATH = "/services/audio/asr/transcription";
+    static final String TASK_PATH = "/tasks/{id}";
     private final AppProperties properties;
     private final ObjectStorage storage;
     private final ObjectMapper mapper;
@@ -30,7 +34,7 @@ public class DashscopeAsrProvider implements AsrProvider {
 
     public DashscopeAsrProvider(AppProperties properties, ObjectStorage storage, ObjectMapper mapper) {
         this.properties = properties; this.storage = storage; this.mapper = mapper;
-        this.client = RestClient.builder().baseUrl(properties.getDashscope().getBaseUrl()).defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + properties.getDashscope().getApiKey()).build();
+        this.client = RestClient.builder().baseUrl(properties.getDashscope().getApiBaseUrl()).defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + properties.getDashscope().getApiKey()).build();
     }
 
     @Override
@@ -39,7 +43,8 @@ public class DashscopeAsrProvider implements AsrProvider {
             if (!"paraformer-v2".equals(properties.getDashscope().getAsrModel())) {
                 throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ASR_MODEL_UNSUPPORTED", "VoiceNote requires paraformer-v2 for speaker-aware transcription");
             }
-            JsonNode policy = client.get().uri(uri -> uri.path("uploads").queryParam("action", "getPolicy").queryParam("model", properties.getDashscope().getAsrModel()).build())
+            JsonNode policy = client.get().uri(uri -> uri.path(UPLOADS_PATH).queryParam("action", "getPolicy").queryParam("model", properties.getDashscope().getAsrModel()).build())
+                    .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                     .retrieve().body(JsonNode.class);
             if (policy == null || policy.path("data").isMissingNode()) throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "DASHSCOPE_UPLOAD_POLICY", "DashScope did not return an upload policy");
             JsonNode data = policy.path("data");
@@ -49,14 +54,15 @@ public class DashscopeAsrProvider implements AsrProvider {
             var bodyNode = mapper.createObjectNode();
             bodyNode.put("model", properties.getDashscope().getAsrModel());
             bodyNode.set("input", mapper.createObjectNode().set("file_urls", mapper.createArrayNode().add(inputUrl)));
-            var parameters = mapper.createObjectNode().put("diarization_enabled", true);
+            boolean diarizationEnabled = options == null || options.diarizationEnabled();
+            var parameters = mapper.createObjectNode().put("diarization_enabled", diarizationEnabled);
             if (options != null && options.languageHints() != null && !options.languageHints().isEmpty()) {
                 parameters.set("language_hints", mapper.valueToTree(options.languageHints()));
             }
             if (options != null && options.speakerCount() != null) parameters.put("speaker_count", options.speakerCount());
             bodyNode.set("parameters", parameters);
             String body = mapper.writeValueAsString(bodyNode);
-            JsonNode response = client.post().uri("services/audio/asr/transcription")
+            JsonNode response = client.post().uri(TRANSCRIPTION_PATH)
                     .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
                     .header("X-DashScope-Async", "enable")
                     .header("X-DashScope-OssResourceResolve", "enable")
@@ -73,14 +79,27 @@ public class DashscopeAsrProvider implements AsrProvider {
     @Override
     public AsrPollResult poll(String providerTaskId) {
         try {
-            JsonNode response = client.get().uri("tasks/{id}", providerTaskId).header("X-DashScope-Async", "enable").retrieve().body(JsonNode.class);
+            JsonNode response = client.post().uri(TASK_PATH, providerTaskId).retrieve().body(JsonNode.class);
             String status = response.path("output").path("task_status").asText("PENDING");
             if ("PENDING".equals(status) || "RUNNING".equals(status)) return new AsrPollResult(AsrPollResult.Status.RUNNING, null, null, List.of());
             if (!"SUCCEEDED".equals(status)) return new AsrPollResult(AsrPollResult.Status.FAILED, response.path("code").asText("ASR_FAILED"), response.path("message").asText("ASR failed"), List.of());
             JsonNode results = response.path("output").path("results");
-            String transcriptionUrl = results.isArray() && !results.isEmpty() ? results.get(0).path("transcription_url").asText(null) : null;
+            if (!results.isArray() || results.isEmpty()) {
+                return new AsrPollResult(AsrPollResult.Status.FAILED, "ASR_RESULT_MISSING", "ASR completed without a subtask result", List.of());
+            }
+            JsonNode subtask = results.get(0);
+            String subtaskStatus = subtask.path("subtask_status").asText(null);
+            if (subtaskStatus != null && !"SUCCEEDED".equals(subtaskStatus)) {
+                String errorCode = subtask.path("code").asText(null);
+                String errorMessage = subtask.path("message").asText(null);
+                return new AsrPollResult(AsrPollResult.Status.FAILED,
+                        errorCode == null || errorCode.isBlank() ? "ASR_SUBTASK_FAILED" : errorCode,
+                        errorMessage == null || errorMessage.isBlank() ? "DashScope ASR subtask failed" : errorMessage,
+                        List.of());
+            }
+            String transcriptionUrl = subtask.path("transcription_url").asText(null);
             if (transcriptionUrl == null) return new AsrPollResult(AsrPollResult.Status.FAILED, "ASR_RESULT_MISSING", "ASR completed without a transcript URL", List.of());
-            JsonNode transcript = RestClient.create().get().uri(transcriptionUrl).retrieve().body(JsonNode.class);
+            JsonNode transcript = RestClient.create().get().uri(URI.create(transcriptionUrl)).retrieve().body(JsonNode.class);
             ParsedTranscript parsed = parseTranscript(transcript);
             return new AsrPollResult(AsrPollResult.Status.SUCCEEDED, null, null, parsed.segments(), parsed.metadata());
         } catch (RestClientResponseException exception) { throw classifyHttp(exception.getStatusCode().value(), exception.getResponseBodyAsString()); }
@@ -111,10 +130,28 @@ public class DashscopeAsrProvider implements AsrProvider {
         output.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + key + "\"\r\n\r\n" + value + "\r\n").getBytes(StandardCharsets.UTF_8));
     }
     private static String safeName(String input) { return input.replaceAll("[^A-Za-z0-9._-]", "_"); }
-    private static ProviderException classifyHttp(int status, String body) {
+    static ProviderException classifyHttp(int status, String body) {
+        String providerCode = providerCode(body);
+        if ("AllocationQuota.FreeTierOnly".equals(providerCode)) {
+            return new ProviderException(ProviderException.Kind.FINAL_REJECTION, "DASHSCOPE_QUOTA_EXHAUSTED",
+                    "DashScope 免费额度已耗尽。请在模型服务控制台充值，或关闭“仅使用免费额度”后重新提交转写。");
+        }
         if (status == 429) return new ProviderException(ProviderException.Kind.RETRYABLE_REJECTION, "DASHSCOPE_RATE_LIMIT", "DashScope rate limited the request");
         if (status >= 500) return new ProviderException(ProviderException.Kind.AMBIGUOUS_SUBMISSION, "DASHSCOPE_SERVER_ERROR", "DashScope may have received the submission");
-        return new ProviderException(ProviderException.Kind.FINAL_REJECTION, "DASHSCOPE_REQUEST_REJECTED", body == null || body.isBlank() ? "DashScope rejected the request" : body);
+        String detail = providerMessage(body);
+        String message = detail == null ? "DashScope rejected the request (HTTP " + status + ")" : "DashScope rejected the request: " + detail;
+        return new ProviderException(ProviderException.Kind.FINAL_REJECTION, "DASHSCOPE_REQUEST_REJECTED", message);
+    }
+    private static String providerCode(String body) { return providerErrorField(body, "code"); }
+    private static String providerMessage(String body) { return providerErrorField(body, "message"); }
+    private static String providerErrorField(String body, String field) {
+        if (body == null || body.isBlank()) return null;
+        try {
+            String value = ERROR_MAPPER.readTree(body).path(field).asText(null);
+            return value == null || value.isBlank() ? null : value;
+        } catch (Exception ignored) {
+            return null;
+        }
     }
     private static ParsedTranscript parseTranscript(JsonNode transcript) {
         List<AsrSegment> output = new ArrayList<>();

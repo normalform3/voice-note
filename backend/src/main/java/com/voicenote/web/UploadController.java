@@ -13,6 +13,7 @@ import org.springframework.http.ResponseEntity;
 import org.springframework.security.core.Authentication;
 import org.springframework.web.bind.annotation.*;
 import java.io.IOException;
+import java.time.Instant;
 
 @RestController
 @RequestMapping("/api/uploads")
@@ -37,10 +38,11 @@ public class UploadController {
                                                                                               Authentication authentication) {
         UserPrincipal user = CurrentUser.require(authentication);
         var view = uploads.complete(user.id(), key, blobId,
-                request == null ? null : request.asrConfig());
+                request == null ? null : request.asrConfig(),
+                request == null ? null : request.clientImportStartedAt());
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(view);
     }
     @GetMapping("/intents/{blobId}") UploadService.UploadIntent get(@PathVariable String blobId, Authentication authentication) { return uploads.byId(CurrentUser.require(authentication).id(), blobId); }
     public record UploadIntentRequest(@NotBlank @Pattern(regexp = "[a-fA-F0-9]{64}") String sha256, @Min(1) long contentLength, @NotBlank String contentType, @NotBlank String originalFilename) { }
-    public record CompleteUploadRequest(TranscriptionTaskService.AsrConfig asrConfig) { }
+    public record CompleteUploadRequest(TranscriptionTaskService.AsrConfig asrConfig, Instant clientImportStartedAt) { }
 }

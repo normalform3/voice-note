@@ -20,7 +20,7 @@ public class DashscopeTextEmbeddingClient implements TextEmbeddingClient {
 
     public DashscopeTextEmbeddingClient(AppProperties properties) {
         this.properties = properties;
-        this.client = RestClient.builder().baseUrl(properties.getDashscope().getBaseUrl())
+        this.client = RestClient.builder().baseUrl(properties.getDashscope().getApiBaseUrl())
                 .defaultHeader(HttpHeaders.AUTHORIZATION, "Bearer " + properties.getDashscope().getApiKey()).build();
     }
 

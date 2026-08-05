@@ -36,6 +36,9 @@ public class AudioBlob {
     public String getOriginalFilename() { return originalFilename; }
     public String getObjectKey() { return objectKey; }
     public BlobStatus getStatus() { return status; }
+    public Instant getWriteStartedAt() { return writeStartedAt; }
+    public Instant getCreatedAt() { return createdAt; }
+    public Instant getCompletedAt() { return completedAt; }
     public String getFailureReason() { return failureReason; }
     public boolean claimWrite() { if (status != BlobStatus.UPLOADING) return false; status = BlobStatus.WRITING; writeStartedAt = Instant.now(); return true; }
     public boolean reopenForUpload() { if (status != BlobStatus.FAILED) return false; return reopen(); }

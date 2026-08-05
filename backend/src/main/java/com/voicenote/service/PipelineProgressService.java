@@ -32,8 +32,13 @@ public class PipelineProgressService {
 
     @Transactional
     public void initialize(TranscriptionTask task) {
+        initialize(task, Instant.now());
+    }
+
+    @Transactional
+    public void initialize(TranscriptionTask task, Instant uploadStartedAt) {
         if (stages.findTopByTranscriptionTaskIdAndStageOrderByAttemptNumberDesc(task.getId(), PipelineStage.UPLOAD_COMPLETED).isEmpty()) {
-            TaskStageAttempt upload = new TaskStageAttempt(task.getId(), PipelineStage.UPLOAD_COMPLETED, 1);
+            TaskStageAttempt upload = new TaskStageAttempt(task.getId(), PipelineStage.UPLOAD_COMPLETED, 1, uploadStartedAt);
             upload.start(); upload.succeed("{\"contentReady\":true}"); stages.save(upload);
             stages.save(new TaskStageAttempt(task.getId(), PipelineStage.ASR_SUBMIT, 1));
             task.advance(PipelineStage.ASR_SUBMIT, 10); tasks.save(task);
@@ -43,17 +48,17 @@ public class PipelineProgressService {
     @Transactional
     public boolean begin(String taskId, PipelineStage stage) {
         TranscriptionTask task = tasks.findById(taskId).orElseThrow();
-        if (task.isCancelled()) return false;
+        if (isTerminal(task)) return false;
         TaskStageAttempt attempt = latestOrCreate(taskId, stage);
         if (!attempt.start()) return false;
         task.advance(stage, progressFor(stage)); task.mark(statusFor(stage));
-        stages.save(attempt); tasks.save(task); return true;
+        stages.save(attempt); tasks.save(task); notifyTask(task); return true;
     }
 
     @Transactional
     public void succeeded(String taskId, PipelineStage stage, String snapshot, PipelineStage next) {
         TranscriptionTask task = tasks.findById(taskId).orElseThrow();
-        if (task.isCancelled()) return;
+        if (isTerminal(task)) return;
         TaskStageAttempt attempt = latest(taskId, stage);
         if (attempt.getStatus() != StageAttemptStatus.SUCCEEDED) { attempt.succeed(snapshot); stages.save(attempt); }
         if (stage == PipelineStage.TRANSCRIPT_PERSIST) task.transcriptPersisted();
@@ -71,19 +76,19 @@ public class PipelineProgressService {
     @Transactional
     public void completeWithoutKnowledge(String taskId) {
         TranscriptionTask task = tasks.findById(taskId).orElseThrow();
-        if (task.isCancelled()) return;
+        if (isTerminal(task)) return;
         task.completePipeline();
         tasks.save(task); notifyTask(task);
     }
 
     @Transactional
     public void retryLater(String taskId, PipelineStage stage, String code, String message, int retryNumber) {
+        TranscriptionTask task = tasks.findById(taskId).orElseThrow();
+        if (isTerminal(task)) return;
         TaskStageAttempt attempt = latest(taskId, stage);
         int seconds = switch (retryNumber) { case 1 -> 5; case 2 -> 15; default -> 45; };
         if (retryNumber > 3) { failed(taskId, stage, code, message, false); return; }
         attempt.retry(code, message, Instant.now().plusSeconds(seconds)); stages.save(attempt);
-        TranscriptionTask task = tasks.findById(taskId).orElseThrow();
-        if (task.isCancelled()) return;
         task.fail(TaskStatus.RETRY_WAIT, code, message); tasks.save(task); notifyTask(task);
     }
 
@@ -93,6 +98,24 @@ public class PipelineProgressService {
         TranscriptionTask task = tasks.findById(taskId).orElseThrow();
         if (task.isCancelled()) return;
         task.advance(stage, progressFor(stage)); task.fail(TaskStatus.FAILED, code, message); tasks.save(task); notifyTask(task);
+    }
+
+    /** Settles audio-pipeline work when its durable dispatch to RocketMQ cannot be confirmed. */
+    @Transactional
+    public void failDelivery(OutboxEvent event, RuntimeException failure) {
+        String message = "无法投递处理任务到消息队列：" + failureMessage(failure);
+        switch (event.getEventType()) {
+            case TRANSCRIPTION_REQUESTED -> failed(event.getAggregateId(), PipelineStage.ASR_SUBMIT, "MESSAGE_DELIVERY_FAILED", message, false);
+            case DOCUMENT_ORGANIZATION_REQUESTED -> organizedDocuments.findById(event.getAggregateId()).ifPresent(document -> {
+                document.fail(message); organizedDocuments.save(document);
+                failed(document.getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION, "MESSAGE_DELIVERY_FAILED", message, false);
+            });
+            case KNOWLEDGE_INDEX_REQUESTED -> documents.findById(event.getAggregateId()).ifPresent(document -> {
+                document.fail(message); documents.save(document);
+                failed(document.getTranscriptionTaskId(), PipelineStage.KNOWLEDGE_INDEX, "MESSAGE_DELIVERY_FAILED", message, false);
+            });
+            default -> { }
+        }
     }
 
     @Transactional
@@ -114,6 +137,20 @@ public class PipelineProgressService {
         return requested;
     }
 
+    /** Starts a fresh ASR submission after cancellation without reviving cancelled stage attempts. */
+    @Transactional
+    public void restartCancelledTask(String ownerId, String taskId) {
+        TranscriptionTask task = tasks.findById(taskId).filter(value -> value.getOwnerId().equals(ownerId))
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "TASK_NOT_FOUND", "Transcription task was not found"));
+        if (!task.isCancelled()) throw new ApiException(HttpStatus.CONFLICT, "TASK_NOT_CANCELLED", "Only cancelled tasks can be submitted again");
+        int nextStageAttempt = stages.findTopByTranscriptionTaskIdAndStageOrderByAttemptNumberDesc(taskId, PipelineStage.ASR_SUBMIT)
+                .map(previous -> previous.getAttemptNumber() + 1).orElse(1);
+        stages.save(new TaskStageAttempt(taskId, PipelineStage.ASR_SUBMIT, nextStageAttempt));
+        task.advance(PipelineStage.ASR_SUBMIT, progressFor(PipelineStage.ASR_SUBMIT));
+        task.mark(TaskStatus.QUEUED);
+        tasks.save(task);
+    }
+
     @Transactional(readOnly = true)
     public List<RetryWork> dueRetries() {
         return stages.findTop50ByStatusAndNextRetryAtBeforeOrderByNextRetryAtAsc(StageAttemptStatus.RETRY_WAIT, Instant.now())
@@ -124,10 +161,10 @@ public class PipelineProgressService {
     public boolean activateRetry(String stageAttemptId) {
         TaskStageAttempt previous = stages.findById(stageAttemptId).orElse(null);
         if (previous == null || previous.getStatus() != StageAttemptStatus.RETRY_WAIT || previous.getNextRetryAt().isAfter(Instant.now())) return false;
+        TranscriptionTask task = tasks.findById(previous.getTranscriptionTaskId()).orElseThrow();
+        if (isTerminal(task)) return false;
         previous.retried(); stages.save(previous);
         stages.save(new TaskStageAttempt(previous.getTranscriptionTaskId(), previous.getStage(), previous.getAttemptNumber() + 1));
-        TranscriptionTask task = tasks.findById(previous.getTranscriptionTaskId()).orElseThrow();
-        if (task.isCancelled()) return false;
         task.advance(previous.getStage(), progressFor(previous.getStage())); task.mark(statusFor(previous.getStage())); tasks.save(task);
         return true;
     }
@@ -198,8 +235,15 @@ public class PipelineProgressService {
                 .orElseGet(() -> stages.save(new TaskStageAttempt(taskId, stage, 1)));
     }
     private void notifyTask(TranscriptionTask task) {
+        progressEvents.publish(new ProgressEventPublisher.ProgressNotification(task.getOwnerId(), "task-stage-settled", task.getId()));
         if (properties.getRocketmq().isEnabled()) outbox.enqueue("transcription_task", task.getId(), EventType.PROGRESS_CHANGED);
-        else progressEvents.publish(new ProgressEventPublisher.ProgressNotification(task.getOwnerId(), "task-stage-settled", task.getId()));
+    }
+    private static boolean isTerminal(TranscriptionTask task) {
+        return task.isCancelled() || task.getStatus() == TaskStatus.FAILED || task.getStatus() == TaskStatus.SUCCEEDED;
+    }
+    private static String failureMessage(RuntimeException failure) {
+        String message = failure.getMessage();
+        return message == null || message.isBlank() ? failure.getClass().getSimpleName() : message;
     }
     private static int progressFor(PipelineStage stage) { return switch (stage) { case UPLOAD_COMPLETED -> 5; case ASR_SUBMIT -> 10; case ASR_POLL -> 40; case TRANSCRIPT_PERSIST -> 60; case DOCUMENT_ORGANIZATION -> 70; case KNOWLEDGE_PREPARE -> 85; case KNOWLEDGE_INDEX -> 90; case COMPLETED -> 100; }; }
     private static TaskStatus statusFor(PipelineStage stage) { return stage == PipelineStage.UPLOAD_COMPLETED ? TaskStatus.QUEUED : TaskStatus.RUNNING; }

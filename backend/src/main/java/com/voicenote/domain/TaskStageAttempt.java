@@ -3,6 +3,7 @@ package com.voicenote.domain;
 import jakarta.persistence.*;
 import java.time.Duration;
 import java.time.Instant;
+import java.util.Objects;
 import java.util.UUID;
 
 @Entity
@@ -26,8 +27,11 @@ public class TaskStageAttempt {
 
     protected TaskStageAttempt() { }
     public TaskStageAttempt(String taskId, PipelineStage stage, int attemptNumber) {
+        this(taskId, stage, attemptNumber, Instant.now());
+    }
+    public TaskStageAttempt(String taskId, PipelineStage stage, int attemptNumber, Instant queuedAt) {
         this.id = UUID.randomUUID().toString(); this.transcriptionTaskId = taskId; this.stage = stage; this.attemptNumber = attemptNumber;
-        this.status = StageAttemptStatus.QUEUED; this.queuedAt = Instant.now();
+        this.status = StageAttemptStatus.QUEUED; this.queuedAt = Objects.requireNonNull(queuedAt, "queuedAt");
     }
 
     public String getId() { return id; }
