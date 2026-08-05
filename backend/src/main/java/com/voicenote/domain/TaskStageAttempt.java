@@ -23,6 +23,7 @@ public class TaskStageAttempt {
     @Column(name = "lease_until") private Instant leaseUntil;
     @Column(name = "error_code") private String errorCode;
     @Column(name = "error_message") private String errorMessage;
+    @Column(name = "model_id") private String modelId;
     @Column(name = "result_snapshot", columnDefinition = "json") private String resultSnapshot;
 
     protected TaskStageAttempt() { }
@@ -47,6 +48,7 @@ public class TaskStageAttempt {
     public Instant getLeaseUntil() { return leaseUntil; }
     public String getErrorCode() { return errorCode; }
     public String getErrorMessage() { return errorMessage; }
+    public String getModelId() { return modelId; }
     public String getResultSnapshot() { return resultSnapshot; }
     public boolean start() {
         if (status != StageAttemptStatus.QUEUED && status != StageAttemptStatus.RETRY_WAIT) return false;
@@ -54,6 +56,7 @@ public class TaskStageAttempt {
         waitDurationMs = Duration.between(queuedAt, now).toMillis(); nextRetryAt = null; return true;
     }
     public void succeed(String snapshot) { status = StageAttemptStatus.SUCCEEDED; completedAt = Instant.now(); leaseUntil = null; resultSnapshot = snapshot; errorCode = null; errorMessage = null; }
+    public void recordModelInvocation(String modelId) { this.modelId = modelId; }
     public void retry(String code, String message, Instant nextRetry) { status = StageAttemptStatus.RETRY_WAIT; errorCode = code; errorMessage = message; nextRetryAt = nextRetry; leaseUntil = null; completedAt = Instant.now(); }
     public void retried() { status = StageAttemptStatus.RETRIED; nextRetryAt = null; leaseUntil = null; }
     public void fail(String code, String message, boolean unknown) { status = unknown ? StageAttemptStatus.UNKNOWN : StageAttemptStatus.FAILED; errorCode = code; errorMessage = message; completedAt = Instant.now(); leaseUntil = null; }

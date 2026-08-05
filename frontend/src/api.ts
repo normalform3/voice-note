@@ -9,7 +9,7 @@ api.interceptors.request.use((config) => {
 
 export type PipelineStage = 'UPLOAD_COMPLETED' | 'ASR_SUBMIT' | 'ASR_POLL' | 'TRANSCRIPT_PERSIST' | 'RAW_DOCUMENT_READY' | 'DOCUMENT_ORGANIZATION' | 'FORMAL_DOCUMENT_READY' | 'KNOWLEDGE_PREPARE' | 'KNOWLEDGE_INDEX' | 'COMPLETED'
 export type PipelinePhase = 'TRANSCRIPTION' | 'RAW_DOCUMENT_REVIEW' | 'DOCUMENT_ORGANIZATION' | 'FORMAL_DOCUMENT_REVIEW' | 'KNOWLEDGE_BUILD' | 'COMPLETED'
-export type StageAttempt = { stage: PipelineStage; status: string; attemptNumber: number; queuedAt: string; startedAt?: string; completedAt?: string; waitDurationMs?: number; totalWaitDurationMs: number; nextRetryAt?: string; errorCode?: string; errorMessage?: string }
+export type StageAttempt = { stage: PipelineStage; status: string; attemptNumber: number; queuedAt: string; startedAt?: string; completedAt?: string; waitDurationMs?: number; totalWaitDurationMs: number; nextRetryAt?: string; errorCode?: string; errorMessage?: string; modelId?: string }
 export type Task = {
   id: string; audioBlobId: string; status: string; currentPhase?: PipelinePhase; currentStage?: PipelineStage; progressPercent?: number; transcriptReady?: boolean
   currentAttemptNumber: number; transcriptVersion: number; failureCode?: string; failureMessage?: string; failedStage?: PipelineStage
@@ -23,7 +23,7 @@ export type KnowledgeDocument = { id: string; transcriptionTaskId: string; title
 export type KnowledgeRun = { id: string; status: string; toolCallsUsed: number; maxToolCalls: number; resultDocument?: string; failureMessage?: string }
 export type KnowledgeEvidence = { resultPath: string; documentId: string; chunkId: string; transcriptionTaskId?: string; segmentId: string; topic?: string; speakerId?: string; role?: string; speaker?: string; startMs?: number; endMs?: number; text?: string }
 export type KnowledgeRunDetail = { run: KnowledgeRun; evidence: KnowledgeEvidence[] }
-export type AnalysisRun = { id: string; transcriptionTaskId: string; status: string; callsUsed: number; maxCalls: number; resultDocument?: string; failureMessage?: string }
+export type AnalysisRun = { id: string; transcriptionTaskId: string; organizedDocumentId?: string; analysisMode?: string; modelId?: string; status: string; callsUsed: number; maxCalls: number; resultDocument?: string; failureMessage?: string }
 export type AnalysisEvidence = { resultPath: string; segmentId: string; startOffset?: number; endOffset?: number }
 export type AnalysisRunDetail = { run: AnalysisRun; evidence: AnalysisEvidence[] }
 export type WorkspaceSnapshot = { tasks: Task[]; documents: KnowledgeDocument[]; analyses: AnalysisRun[]; knowledgeRuns: KnowledgeRun[] }

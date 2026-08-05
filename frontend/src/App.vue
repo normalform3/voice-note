@@ -21,6 +21,8 @@ const segments = ref<Segment[]>([])
 const speakers = ref<Speaker[]>([])
 const organized = ref<OrganizedDocumentDetail | null>(null)
 const audioUrl = ref('')
+const audioLoading = ref(false)
+const audioLoadError = ref('')
 const file = ref<File | null>(null)
 const uploading = ref(false)
 const progress = ref('')
@@ -72,7 +74,18 @@ const parsedAnswer = computed(() => parseResultDocument(activeRun.value?.resultD
 const visibleHistory = computed(() => scope.value === 'CURRENT_DOCUMENT'
   ? analysisRuns.value.filter(run => run.transcriptionTaskId === selected.value?.id)
   : runs.value)
-const summaryDetail = computed(() => selected.value ? summaryByTaskId.value[selected.value.id] : undefined)
+const summaryDetail = computed(() => {
+  const task = selected.value
+  const detail = task ? summaryByTaskId.value[task.id] : undefined
+  if (!detail || !task?.organizedDocument || detail.run.organizedDocumentId !== task.organizedDocument.id) return undefined
+  return detail
+})
+const existingSummaryRun = computed(() => {
+  const task = selected.value
+  const document = task?.organizedDocument
+  if (!task || !document) return undefined
+  return analysisRuns.value.find(run => run.transcriptionTaskId === task.id && run.analysisMode === 'summary' && run.organizedDocumentId === document.id)
+})
 const parsedSummary = computed(() => parseResultDocument(summaryDetail.value?.run.resultDocument))
 const summaryLoading = computed(() => summaryLoadingTaskId.value === selected.value?.id)
 const agentTitle = computed(() => scope.value === 'CURRENT_DOCUMENT' ? '当前文档问答' : '跨文档问答')
@@ -108,6 +121,11 @@ function showLibrary() {
 function toggleAgent() { mobileAgentOpen.value = !mobileAgentOpen.value }
 function triggerFilePicker() { fileInput.value?.click() }
 function useSuggestion(suggestion: string) { question.value = suggestion }
+function speakerColor(speakerId?: string) {
+  const palette = ['#637d72', '#9a6c77', '#92733d', '#647d98', '#7b6f99', '#8b745d']
+  const source = speakerId || 'speaker'
+  return palette[Array.from(source).reduce((total, character) => total + character.charCodeAt(0), 0) % palette.length]
+}
 
 async function authenticate() {
   authError.value = ''
@@ -136,16 +154,30 @@ async function choose(task: Task) {
   organized.value = null
   if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
   audioUrl.value = ''
-  const [transcript, speakerResponse, audioResponse, organizedResponse] = await Promise.all([
+  audioLoading.value = false
+  audioLoadError.value = ''
+  const [transcript, speakerResponse, organizedResponse] = await Promise.all([
     api.get<Segment[]>(`/transcription-tasks/${task.id}/segments`),
     api.get<Speaker[]>(`/transcription-tasks/${task.id}/speakers`),
-    api.get(`/audio/${task.id}/content`, { responseType: 'blob' }),
     task.organizedDocument ? api.get<OrganizedDocumentDetail>(`/organized-documents/${task.organizedDocument.id}`) : Promise.resolve(null)
   ])
+  if (selected.value?.id !== task.id) return
   segments.value = transcript.data
   speakers.value = speakerResponse.data
   organized.value = organizedResponse?.data || null
-  audioUrl.value = URL.createObjectURL(audioResponse.data)
+}
+async function refreshTranscript(taskId: string) {
+  const [transcript, speakerResponse] = await Promise.all([
+    api.get<Segment[]>(`/transcription-tasks/${taskId}/segments`),
+    api.get<Speaker[]>(`/transcription-tasks/${taskId}/speakers`)
+  ])
+  if (selected.value?.id !== taskId) return
+  segments.value = transcript.data
+  speakers.value = speakerResponse.data
+}
+async function refreshOrganizedDocument(taskId: string, documentId: string) {
+  const { data } = await api.get<OrganizedDocumentDetail>(`/organized-documents/${documentId}`)
+  if (selected.value?.id === taskId) organized.value = data
 }
 function topicChildren(topicId: string) { return organized.value?.blocks.filter(block => block.parentBlockId === topicId) || [] }
 async function saveSpeakerName(speaker: Speaker) {
@@ -162,6 +194,29 @@ function evidenceLabel(citation: { chunkId?: string; segmentId: string }) {
   const evidence = (activeEvidence.value as KnowledgeEvidence[]).find(item => item.chunkId === citation.chunkId && item.segmentId === citation.segmentId)
   if (!evidence) return '原文证据 ↗'
   return `${evidence.topic || '原文'} · ${evidence.speaker || evidence.speakerId || '说话人'} · ${timecode(evidence.startMs || 0)} ↗`
+}
+async function ensureAudio(startMs = 0, play = true) {
+  const task = selected.value
+  if (!task) return
+  const taskId = task.id
+  audioLoadError.value = ''
+  if (!audioUrl.value) {
+    audioLoading.value = true
+    try {
+      const { data } = await api.get(`/audio/${taskId}/content`, { responseType: 'blob' })
+      if (selected.value?.id !== taskId) return
+      audioUrl.value = URL.createObjectURL(data)
+      await nextTick()
+    } catch (error: any) {
+      if (selected.value?.id === taskId) audioLoadError.value = error.response?.data?.message || '原始音频加载失败，请稍后重试。'
+      return
+    } finally {
+      if (selected.value?.id === taskId) audioLoading.value = false
+    }
+  }
+  if (selected.value?.id !== taskId || !audio.value) return
+  audio.value.currentTime = startMs / 1000
+  if (play) await audio.value.play().catch(() => undefined)
 }
 function chooseFile(event: Event) {
   file.value = (event.target as HTMLInputElement).files?.[0] || null
@@ -254,13 +309,21 @@ async function loadSummaryDetail(taskId: string, runId: string) {
 }
 async function selectDetailTab(tab: DetailTab) {
   detailTab.value = tab
-  if (tab === 'summary') await loadSummary()
+  if (tab === 'summary') await loadExistingSummary()
 }
-async function loadSummary() {
+async function loadExistingSummary() {
+  const task = selected.value
+  const existing = existingSummaryRun.value
+  if (!task || !existing || summaryByTaskId.value[task.id]?.run.id === existing.id) return
+  summaryLoadingTaskId.value = task.id
+  try { await loadSummaryDetail(task.id, existing.id) }
+  finally { if (summaryLoadingTaskId.value === task.id) summaryLoadingTaskId.value = null }
+}
+async function createSummary() {
   const task = selected.value
   const document = task?.organizedDocument
   if (!task || !document || document.status !== 'READY') return
-  const existing = summaryByTaskId.value[task.id]
+  const existing = summaryDetail.value
   if (existing && existing.run.status !== 'FAILED') return
   summaryLoadingTaskId.value = task.id
   try {
@@ -269,7 +332,7 @@ async function loadSummary() {
   } catch (error: any) {
     summaryByTaskId.value = {
       ...summaryByTaskId.value,
-      [task.id]: { run: { id: '', transcriptionTaskId: task.id, status: 'FAILED', callsUsed: 0, maxCalls: 0, failureMessage: error.response?.data?.message || '无法创建 AI 摘要' }, evidence: [] }
+      [task.id]: { run: { id: '', transcriptionTaskId: task.id, organizedDocumentId: document.id, analysisMode: 'summary', status: 'FAILED', callsUsed: 0, maxCalls: 0, failureMessage: error.response?.data?.message || '无法创建 AI 摘要' }, evidence: [] }
     }
   } finally {
     if (summaryLoadingTaskId.value === task.id) summaryLoadingTaskId.value = null
@@ -287,9 +350,7 @@ async function openHistory(run: KnowledgeRun | AnalysisRun) {
   }
 }
 async function seekToTime(startMs: number, play = false) {
-  if (!audio.value) return
-  audio.value.currentTime = startMs / 1000
-  if (play) await audio.value.play().catch(() => undefined)
+  await ensureAudio(startMs, play)
 }
 async function seekToSegment(segment: Segment) {
   await seekToTime(segment.startMs, true)
@@ -303,15 +364,18 @@ async function openEvidence(citation: { chunkId?: string; segmentId: string }) {
   }
   await openEvidenceForTask(citation, taskId)
 }
-async function openSummaryEvidence(citation: { segmentId: string }) {
+async function openSummaryEvidence(citation?: { segmentId: string }) {
+  if (!citation) return
   await openEvidenceForTask(citation, summaryDetail.value?.run.transcriptionTaskId)
 }
 async function openEvidenceForTask(citation: { segmentId: string }, taskId?: string) {
   const task = tasks.value.find(item => item.id === taskId)
   if (task && (task.id !== selected.value?.id || !isDocumentView.value)) await choose(task)
+  const activeTask = task || selected.value
+  if (activeTask && !segments.value.some(item => item.id === citation.segmentId)) await refreshTranscript(activeTask.id)
   await nextTick()
   const segment = segments.value.find(item => item.id === citation.segmentId)
-  if (segment && audio.value) {
+  if (segment) {
     await seekToSegment(segment)
     document.getElementById(`segment-${segment.id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
   }
@@ -371,10 +435,15 @@ async function deleteTask() {
   }
 }
 function upsertTask(task: Task) {
+  const previous = selected.value?.id === task.id ? selected.value : null
   tasks.value = [task, ...tasks.value.filter(item => item.id !== task.id)]
   if (selected.value?.id === task.id) selected.value = task
-  if (selected.value?.id === task.id && task.organizedDocument && task.organizedDocument.status === 'READY' && organized.value?.document.id !== task.organizedDocument.id) {
-    void api.get<OrganizedDocumentDetail>(`/organized-documents/${task.organizedDocument.id}`).then(response => { organized.value = response.data })
+  if (previous && selected.value?.id === task.id) {
+    if (task.transcriptReady && (!previous.transcriptReady || !segments.value.length)) void refreshTranscript(task.id)
+    const document = task.organizedDocument
+    if (document?.status === 'READY' && (previous.organizedDocument?.status !== 'READY' || organized.value?.document.id !== document.id || organized.value?.document.status !== 'READY')) {
+      void refreshOrganizedDocument(task.id, document.id)
+    }
   }
   if (task.knowledgeDocument) {
     const document: KnowledgeDocument = { ...task.knowledgeDocument, transcriptionTaskId: task.id, updatedAt: new Date().toISOString() }
@@ -390,7 +459,7 @@ function applySnapshot(snapshot: WorkspaceSnapshot) {
   analysisRuns.value = snapshot.analyses
   if (selected.value) {
     const update = tasks.value.find(task => task.id === selected.value?.id)
-    if (update) selected.value = update
+    if (update) upsertTask(update)
     else {
       selected.value = null
       segments.value = []
@@ -406,8 +475,12 @@ function handleProgressEvent(name: string, payload: any) {
   if (name === 'task-stage-settled' && payload.task) { upsertTask(payload.task as Task); return }
   if (name === 'knowledge-run-settled' && payload.run) { void loadKnowledgeDetail(payload.run.id); return }
   if (name === 'analysis-run-settled' && payload.run) {
-    const summaryTaskId = Object.entries(summaryByTaskId.value).find(([, detail]) => detail.run.id === payload.run.id)?.[0]
-    if (summaryTaskId) void loadSummaryDetail(summaryTaskId, payload.run.id)
+    const run = payload.run as AnalysisRun
+    upsertAnalysis(run)
+    const summaryTaskId = run.analysisMode === 'summary'
+      ? run.transcriptionTaskId
+      : Object.entries(summaryByTaskId.value).find(([, detail]) => detail.run.id === run.id)?.[0]
+    if (summaryTaskId) void loadSummaryDetail(summaryTaskId, run.id)
     else void loadAnalysisDetail(payload.run.id)
   }
 }
@@ -451,10 +524,17 @@ function stageWaitDuration(stage: { status: string; queuedAt: string; totalWaitD
   if (stage.status !== 'QUEUED') return stage.totalWaitDurationMs
   return stage.totalWaitDurationMs + Math.max(0, clockNow.value - new Date(stage.queuedAt).getTime())
 }
-function stageDurationText(stage: { stage: PipelineStage; status: string; queuedAt: string; totalWaitDurationMs: number }) {
-  const duration = formatDuration(stageWaitDuration(stage))
-  if (stage.stage === 'UPLOAD_COMPLETED') return `导入耗时 ${duration}`
-  return stage.status === 'QUEUED' ? `已等待 ${duration}` : `等待 ${duration}`
+function stageProcessingDuration(stage: { status: string; startedAt?: string; completedAt?: string }) {
+  if (!stage.startedAt) return 0
+  const endedAt = stage.status === 'RUNNING' ? clockNow.value : stage.completedAt ? new Date(stage.completedAt).getTime() : new Date(stage.startedAt).getTime()
+  return Math.max(0, endedAt - new Date(stage.startedAt).getTime())
+}
+function stageDurationText(stage: { stage: PipelineStage; status: string; queuedAt: string; startedAt?: string; completedAt?: string; totalWaitDurationMs: number }) {
+  const queueDuration = formatDuration(stageWaitDuration(stage))
+  if (stage.stage === 'UPLOAD_COMPLETED') return `导入耗时 ${queueDuration}`
+  if (stage.status === 'QUEUED') return `排队等待 ${queueDuration}`
+  const processingDuration = formatDuration(stageProcessingDuration(stage))
+  return stage.status === 'RUNNING' ? `排队 ${queueDuration} · 已处理 ${processingDuration}` : `排队 ${queueDuration} · 处理 ${processingDuration}`
 }
 function canRetryStage(stage: PipelineStage) {
   return (stage === 'ASR_SUBMIT' || stage === 'ASR_POLL' || stage === 'DOCUMENT_ORGANIZATION' || stage === 'KNOWLEDGE_INDEX')
@@ -574,7 +654,9 @@ onBeforeUnmount(() => {
         <section v-if="selected" class="player-surface" aria-label="音频播放">
           <p v-if="selected.failureMessage" class="task-failure" role="alert"><b>{{ stageText(selected.failedStage || selected.currentStage) }}失败</b><span>{{ selected.failureMessage }}</span></p>
           <div class="player-caption"><span class="live-dot"></span><b>原始音频</b><small>{{ selectedDocument ? statusText(selectedDocument.status) : statusText(selected.status) }}</small></div>
-          <audio v-if="audioUrl" ref="audio" :src="audioUrl" controls></audio>
+          <audio v-if="audioUrl" ref="audio" :src="audioUrl" controls preload="none"></audio>
+          <button v-else class="audio-load" type="button" :disabled="audioLoading" @click="ensureAudio()">{{ audioLoading ? '正在加载原音…' : '播放原音' }}</button>
+          <p v-if="audioLoadError" class="task-action-error" role="alert">{{ audioLoadError }}</p>
         </section>
 
         <template v-if="selected">
@@ -582,7 +664,7 @@ onBeforeUnmount(() => {
             <summary><span>处理进度</span><b>{{ stageText(selected.currentStage) }} · {{ selected.progressPercent || 0 }}%</b></summary>
             <ol class="pipeline-stages">
               <li v-for="stage in selected.stages" :key="`${stage.stage}-${stage.attemptNumber}`" :class="stage.status.toLowerCase()">
-                <i></i><div><b>{{ stageText(stage.stage) }}</b><small><span class="stage-status">{{ stageStatusText(stage) }}</span> · {{ stageDurationText(stage) }}</small><small v-if="stage.nextRetryAt">将在 {{ new Date(stage.nextRetryAt).toLocaleTimeString() }} 自动重试</small><small v-else-if="stage.errorMessage" class="error">{{ stage.errorMessage }}</small></div>
+                <i></i><div><b>{{ stageText(stage.stage) }}</b><small><span class="stage-status">{{ stageStatusText(stage) }}</span> · {{ stageDurationText(stage) }}</small><small v-if="stage.modelId">模型：{{ stage.modelId }}</small><small v-if="stage.stage === 'KNOWLEDGE_INDEX'">向量库：Qdrant</small><small v-if="stage.nextRetryAt">将在 {{ new Date(stage.nextRetryAt).toLocaleTimeString() }} 自动重试</small><small v-else-if="stage.errorMessage" class="error">{{ stage.errorMessage }}</small></div>
                 <button v-if="canRetryStage(stage.stage)" class="stage-retry" :disabled="retryingStage === stage.stage" @click="retryStage(stage.stage)">{{ retryingStage === stage.stage ? '正在重新提交…' : retryStageLabel(stage.stage) }}</button>
               </li>
             </ol>
@@ -596,20 +678,20 @@ onBeforeUnmount(() => {
           </nav>
 
           <section v-if="detailTab === 'transcript'" class="detail-content transcript" role="tabpanel">
-            <div v-if="speakers.length" class="speaker-roster"><span>说话人名称</span><label v-for="speaker in speakers" :key="speaker.speakerId"><b>{{ speaker.speakerId }}</b><input v-model="speaker.displayName" maxlength="128" placeholder="填写名称（可选）" @keyup.enter="saveSpeakerName(speaker)" @blur="saveSpeakerName(speaker)"><button type="button" class="speaker-save" :disabled="savingSpeakerId === speaker.speakerId" @click="saveSpeakerName(speaker)">{{ savingSpeakerId === speaker.speakerId ? '保存中' : '保存' }}</button></label></div>
-            <button v-for="segment in segments" :key="segment.id" :id="`segment-${segment.id}`" class="segment" type="button" @click="seekToSegment(segment)"><time>{{ timecode(segment.startMs) }}</time><span><b>{{ segment.speaker || '说话人' }}</b><p>{{ segment.text }}</p></span><i aria-hidden="true">↗</i></button>
+            <div v-if="speakers.length" class="speaker-roster"><span>说话人名称</span><label v-for="speaker in speakers" :key="speaker.speakerId"><b :style="{ color: speakerColor(speaker.speakerId) }">{{ speaker.speakerId }}</b><input v-model="speaker.displayName" maxlength="128" placeholder="填写名称（可选）" @keyup.enter="saveSpeakerName(speaker)" @blur="saveSpeakerName(speaker)"><button type="button" class="speaker-save" :disabled="savingSpeakerId === speaker.speakerId" @click="saveSpeakerName(speaker)">{{ savingSpeakerId === speaker.speakerId ? '保存中' : '保存' }}</button></label></div>
+            <button v-for="segment in segments" :key="segment.id" :id="`segment-${segment.id}`" class="segment" type="button" @click="seekToSegment(segment)"><time>{{ timecode(segment.startMs) }}</time><span><b :style="{ color: speakerColor(segment.speakerId) }">{{ segment.speaker || '说话人' }}</b><p>{{ segment.text }}</p></span><i aria-hidden="true">↗</i></button>
             <div v-if="!segments.length" class="content-empty"><span aria-hidden="true">…</span><b>原始文档尚未准备好。</b><p>完成后会显示带说话人和时间戳的完整 ASR 转写。</p></div>
           </section>
 
           <section v-else-if="detailTab === 'summary'" class="detail-content summary-content" role="tabpanel">
             <div v-if="!canSummarize" class="content-empty"><span aria-hidden="true">AI</span><b>整理文档完成后即可生成摘要。</b><p>摘要会基于整理后的内容提炼核心结论，并保留原文证据。</p></div>
             <template v-else-if="summaryDetail">
-              <div class="summary-label"><span>AI SUMMARY</span><small>{{ statusText(summaryDetail.run.status) }} · {{ summaryDetail.run.callsUsed }}/{{ summaryDetail.run.maxCalls }}</small></div>
-              <template v-if="parsedSummary"><p class="summary-lede">{{ parsedSummary.answer }}</p><article v-for="(finding, index) in parsedSummary.findings" :key="index" class="summary-finding"><b>{{ finding.title || `要点 ${index + 1}` }}</b><p>{{ finding.content }}</p><button v-for="citation in finding.evidence" :key="citation.segmentId" class="citation" @click="openSummaryEvidence(citation)">回到原文 ↗</button></article></template>
+              <div class="summary-label"><span>AI SUMMARY</span><small>{{ statusText(summaryDetail.run.status) }} · {{ summaryDetail.run.callsUsed }}/{{ summaryDetail.run.maxCalls }}<template v-if="summaryDetail.run.modelId"> · {{ summaryDetail.run.modelId }}</template></small></div>
+              <template v-if="parsedSummary"><p class="summary-lede">{{ parsedSummary.answer }}</p><article v-for="(finding, index) in parsedSummary.findings" :key="index" class="summary-finding"><b>{{ finding.title || `要点 ${index + 1}` }}</b><p>{{ finding.content }}</p><button v-if="finding.evidence?.length" class="citation" @click="openSummaryEvidence(finding.evidence?.[0])">定位原文音频<span v-if="finding.evidence.length > 1">（{{ finding.evidence.length }} 处）</span> ↗</button></article></template>
               <p v-else-if="summaryDetail.run.failureMessage" class="error">{{ summaryDetail.run.failureMessage }}</p>
               <p v-else class="waiting">AI 正在阅读整理文档并提炼重点…</p>
             </template>
-            <div v-else class="content-empty"><span aria-hidden="true">✦</span><b>{{ summaryLoading ? '正在准备 AI 摘要…' : '正在连接摘要任务…' }}</b><p>首次打开会生成或取回这份音频的摘要。</p></div>
+            <div v-else class="content-empty"><span aria-hidden="true">✦</span><b>{{ summaryLoading ? '正在读取已有 AI 摘要…' : 'AI 摘要尚未生成。' }}</b><p>摘要是可选操作，会基于正式文档额外调用模型生成重点与结论。</p><button class="stage-retry" type="button" :disabled="summaryLoading" @click="createSummary">{{ summaryLoading ? '正在开始…' : '生成 AI 摘要' }}</button></div>
           </section>
 
           <section v-else class="detail-content organized-content" role="tabpanel">

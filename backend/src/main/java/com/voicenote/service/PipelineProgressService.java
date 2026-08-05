@@ -55,6 +55,30 @@ public class PipelineProgressService {
         stages.save(attempt); tasks.save(task); notifyTask(task); return true;
     }
 
+    /** Makes user-triggered work visible immediately so queue time starts at the request, not at worker pickup. */
+    @Transactional
+    public boolean queue(String taskId, PipelineStage stage) {
+        TranscriptionTask task = tasks.findById(taskId).orElseThrow();
+        if (isTerminal(task) || stages.findTopByTranscriptionTaskIdAndStageOrderByAttemptNumberDesc(taskId, stage).isPresent()) return false;
+        stages.save(new TaskStageAttempt(taskId, stage, 1));
+        task.advance(stage, progressFor(stage));
+        task.mark(statusFor(stage));
+        tasks.save(task);
+        notifyTask(task);
+        return true;
+    }
+
+    /** Records the exact configured model only once a worker is about to invoke it. */
+    @Transactional
+    public void recordModelInvocation(String taskId, PipelineStage stage, String modelId) {
+        if (modelId == null || modelId.isBlank()) return;
+        TaskStageAttempt attempt = latest(taskId, stage);
+        if (modelId.equals(attempt.getModelId())) return;
+        attempt.recordModelInvocation(modelId);
+        stages.save(attempt);
+        tasks.findById(taskId).ifPresent(this::notifyTask);
+    }
+
     @Transactional
     public void succeeded(String taskId, PipelineStage stage, String snapshot, PipelineStage next) {
         TranscriptionTask task = tasks.findById(taskId).orElseThrow();
@@ -108,7 +132,7 @@ public class PipelineProgressService {
 
     @Transactional
     public void failed(String taskId, PipelineStage stage, String code, String message, boolean unknown) {
-        TaskStageAttempt attempt = latest(taskId, stage); attempt.fail(code, message, unknown); stages.save(attempt);
+        TaskStageAttempt attempt = latestOrCreate(taskId, stage); attempt.fail(code, message, unknown); stages.save(attempt);
         TranscriptionTask task = tasks.findById(taskId).orElseThrow();
         if (task.isCancelled()) return;
         task.advance(stage, progressFor(stage)); task.fail(TaskStatus.FAILED, code, message); tasks.save(task); notifyTask(task);
@@ -232,7 +256,7 @@ public class PipelineProgressService {
             TaskStageAttempt current = history.get(history.size() - 1);
             long totalWait = history.stream().map(TaskStageAttempt::getWaitDurationMs).filter(Objects::nonNull).mapToLong(Long::longValue).sum();
             stageViews.add(new StageView(stage, current.getStatus(), current.getAttemptNumber(), current.getQueuedAt(), current.getStartedAt(), current.getCompletedAt(),
-                    current.getWaitDurationMs(), totalWait, current.getNextRetryAt(), current.getErrorCode(), current.getErrorMessage()));
+                    current.getWaitDurationMs(), totalWait, current.getNextRetryAt(), current.getErrorCode(), current.getErrorMessage(), current.getModelId()));
         }
         KnowledgeDocumentView document = documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(task.getOwnerId(), task.getId(), task.getTranscriptVersion())
                 .map(value -> new KnowledgeDocumentView(value.getId(), value.getTitle(), value.getStatus().name(), value.getFailureMessage())).orElse(null);
@@ -265,7 +289,7 @@ public class PipelineProgressService {
     public record KnowledgeDocumentView(String id, String title, String status, String failureMessage) { }
     public record OrganizedDocumentView(String id, String title, String status, String failureMessage) { }
     public record StageView(PipelineStage stage, StageAttemptStatus status, int attemptNumber, Instant queuedAt, Instant startedAt, Instant completedAt,
-                            Long waitDurationMs, long totalWaitDurationMs, Instant nextRetryAt, String errorCode, String errorMessage) { }
+                            Long waitDurationMs, long totalWaitDurationMs, Instant nextRetryAt, String errorCode, String errorMessage, String modelId) { }
     public record TaskProgressView(String id, String audioBlobId, TaskStatus status, PipelinePhase currentPhase, PipelineStage currentStage, int progressPercent, boolean transcriptReady,
                                    int currentAttemptNumber, int transcriptVersion, String failureCode, String failureMessage, PipelineStage failedStage,
                                    List<PipelineStage> retryableStages, List<StageView> stages, KnowledgeDocumentView knowledgeDocument, OrganizedDocumentView organizedDocument) { }

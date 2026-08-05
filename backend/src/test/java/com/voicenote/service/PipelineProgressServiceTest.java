@@ -92,4 +92,66 @@ class PipelineProgressServiceTest {
         assertThat(submission.getStatus()).isEqualTo(StageAttemptStatus.RUNNING);
         verify(progress).publish(new ProgressEventPublisher.ProgressNotification("owner", "task-stage-settled", task.getId()));
     }
+
+    @Test
+    void recordsTheModelOnlyWhenAWorkerIsAboutToCallIt() {
+        TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class);
+        TaskStageAttemptRepository stages = mock(TaskStageAttemptRepository.class);
+        ProgressEventPublisher progress = mock(ProgressEventPublisher.class);
+        TranscriptionTask task = new TranscriptionTask("owner", "audio", "a".repeat(64), "pipeline");
+        TaskStageAttempt organization = new TaskStageAttempt(task.getId(), PipelineStage.DOCUMENT_ORGANIZATION, 1);
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(stages.findTopByTranscriptionTaskIdAndStageOrderByAttemptNumberDesc(task.getId(), PipelineStage.DOCUMENT_ORGANIZATION))
+                .thenReturn(Optional.of(organization));
+        PipelineProgressService service = new PipelineProgressService(tasks, stages, mock(KnowledgeDocumentRepository.class),
+                mock(OrganizedDocumentRepository.class), progress, mock(OutboxService.class), new AppProperties());
+
+        service.recordModelInvocation(task.getId(), PipelineStage.DOCUMENT_ORGANIZATION, "qwen-plus");
+
+        assertThat(organization.getModelId()).isEqualTo("qwen-plus");
+        verify(stages).save(organization);
+        verify(progress).publish(new ProgressEventPublisher.ProgressNotification("owner", "task-stage-settled", task.getId()));
+    }
+
+    @Test
+    void recordsTheFailureEvenWhenTheWorkerCouldNotCreateItsStage() {
+        TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class);
+        TaskStageAttemptRepository stages = mock(TaskStageAttemptRepository.class);
+        TranscriptionTask task = new TranscriptionTask("owner", "audio", "a".repeat(64), "pipeline");
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(stages.findTopByTranscriptionTaskIdAndStageOrderByAttemptNumberDesc(task.getId(), PipelineStage.DOCUMENT_ORGANIZATION))
+                .thenReturn(Optional.empty());
+        when(stages.save(any(TaskStageAttempt.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        PipelineProgressService service = new PipelineProgressService(tasks, stages, mock(KnowledgeDocumentRepository.class),
+                mock(OrganizedDocumentRepository.class), mock(ProgressEventPublisher.class), mock(OutboxService.class), new AppProperties());
+
+        service.failed(task.getId(), PipelineStage.DOCUMENT_ORGANIZATION, "FAILED", "worker crashed", false);
+
+        assertThat(task.getStatus()).isEqualTo(TaskStatus.FAILED);
+        assertThat(task.getFailedStage()).isEqualTo(PipelineStage.DOCUMENT_ORGANIZATION);
+        ArgumentCaptor<TaskStageAttempt> saved = ArgumentCaptor.forClass(TaskStageAttempt.class);
+        verify(stages, org.mockito.Mockito.atLeastOnce()).save(saved.capture());
+        assertThat(saved.getAllValues().get(0).getStatus()).isEqualTo(StageAttemptStatus.FAILED);
+    }
+
+    @Test
+    void startsFormalDocumentQueueTimingWhenTheUserRequestsGeneration() {
+        TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class);
+        TaskStageAttemptRepository stages = mock(TaskStageAttemptRepository.class);
+        TranscriptionTask task = new TranscriptionTask("owner", "audio", "a".repeat(64), "pipeline");
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(stages.findTopByTranscriptionTaskIdAndStageOrderByAttemptNumberDesc(task.getId(), PipelineStage.DOCUMENT_ORGANIZATION))
+                .thenReturn(Optional.empty());
+        when(stages.save(any(TaskStageAttempt.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        PipelineProgressService service = new PipelineProgressService(tasks, stages, mock(KnowledgeDocumentRepository.class),
+                mock(OrganizedDocumentRepository.class), mock(ProgressEventPublisher.class), mock(OutboxService.class), new AppProperties());
+
+        assertThat(service.queue(task.getId(), PipelineStage.DOCUMENT_ORGANIZATION)).isTrue();
+
+        assertThat(task.getStatus()).isEqualTo(TaskStatus.RUNNING);
+        assertThat(task.getCurrentStage()).isEqualTo(PipelineStage.DOCUMENT_ORGANIZATION);
+        ArgumentCaptor<TaskStageAttempt> saved = ArgumentCaptor.forClass(TaskStageAttempt.class);
+        verify(stages).save(saved.capture());
+        assertThat(saved.getValue().getStatus()).isEqualTo(StageAttemptStatus.QUEUED);
+    }
 }

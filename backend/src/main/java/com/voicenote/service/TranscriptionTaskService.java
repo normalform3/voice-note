@@ -138,6 +138,7 @@ public class TranscriptionTaskService {
             completeIdempotency(record, taskId, response); return response;
         }
         AudioBlob audio = blobs.findById(task.getAudioBlobId()).orElseThrow();
+        pipeline.queue(taskId, PipelineStage.DOCUMENT_ORGANIZATION);
         organizedDocuments.createForTranscript(task, audio);
         PipelineProgressService.TaskProgressView response = pipeline.ownedView(ownerId, taskId);
         completeIdempotency(record, taskId, response); return response;

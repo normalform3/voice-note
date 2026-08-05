@@ -94,7 +94,11 @@ public class AnalysisService {
         if (!run.consumeCall()) { runs.save(run); throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ANALYSIS_BUDGET_EXHAUSTED", "Analysis call budget exhausted"); }
         invocation.markInFlight(); invocations.save(invocation); runs.save(run); return StageAction.call(prompt);
     }
-    @Transactional public void completeStage(String runId, String stage, int index, String response) { AnalysisInvocation invocation = invocations.findByAnalysisRunIdAndStageNameAndChunkIndex(runId, stage, index).orElseThrow(); invocation.markSucceeded(response); invocations.save(invocation); }
+    @Transactional public void completeStage(String runId, String stage, int index, String response) {
+        requireJsonObject(response);
+        AnalysisInvocation invocation = invocations.findByAnalysisRunIdAndStageNameAndChunkIndex(runId, stage, index).orElseThrow();
+        invocation.markSucceeded(response); invocations.save(invocation);
+    }
     @Transactional public void failRun(String runId, ProviderException failure) {
         AnalysisRun run = runs.findById(runId).orElseThrow(); run.fail(failure.getCode() + ": " + failure.getMessage()); runs.save(run); notifySettled(run);
     }
@@ -106,6 +110,14 @@ public class AnalysisService {
     private AnalysisInvocation invocation(String runId, String stage, int index, String prompt) {
         return invocations.findByAnalysisRunIdAndStageNameAndChunkIndex(runId, stage, index)
                 .orElseGet(() -> invocations.save(new AnalysisInvocation(runId, stage, index, Hashing.sha256(prompt))));
+    }
+    private void requireJsonObject(String response) {
+        try {
+            JsonNode parsed = mapper.readTree(response);
+            if (parsed == null || !parsed.isObject()) throw new IllegalArgumentException("response is not a JSON object");
+        } catch (Exception exception) {
+            throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ANALYSIS_RESPONSE_INVALID", "Analysis must return a JSON object");
+        }
     }
     private void notifySettled(AnalysisRun run) {
         if (properties.getRocketmq().isEnabled()) outbox.enqueue("analysis_run", run.getId(), EventType.PROGRESS_CHANGED);
@@ -139,7 +151,13 @@ public class AnalysisService {
         catch (Exception exception) { throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ANALYSIS_SCHEMA_INVALID", "Analysis did not return valid JSON"); }
     }
     public record CreateAnalysisCommand(String transcriptionTaskId, String mode, String goal) { }
-    public record AnalysisView(String id, String transcriptionTaskId, AnalysisRunStatus status, int callsUsed, int maxCalls, String resultDocument, String failureMessage) { public static AnalysisView from(AnalysisRun run) { return new AnalysisView(run.getId(), run.getTranscriptionTaskId(), run.getStatus(), run.getCallsUsed(), run.getMaxCalls(), run.getResultDocument(), run.getFailureMessage()); } }
+    public record AnalysisView(String id, String transcriptionTaskId, String organizedDocumentId, String analysisMode, String modelId,
+                               AnalysisRunStatus status, int callsUsed, int maxCalls, String resultDocument, String failureMessage) {
+        public static AnalysisView from(AnalysisRun run) {
+            return new AnalysisView(run.getId(), run.getTranscriptionTaskId(), run.getOrganizedDocumentId(), run.getAnalysisMode(), run.getModelId(),
+                    run.getStatus(), run.getCallsUsed(), run.getMaxCalls(), run.getResultDocument(), run.getFailureMessage());
+        }
+    }
     public record RunWork(String runId, String mode, String goal, List<String> chunks) { }
     public record StageAction(boolean cached, String value) { static StageAction cached(String response) { return new StageAction(true, response); } static StageAction call(String prompt) { return new StageAction(false, prompt); } }
     static List<String> chunk(List<TranscriptSegment> source) {

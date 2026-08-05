@@ -36,6 +36,10 @@ public class KnowledgeIndexWorker {
                 embedded = new java.util.ArrayList<>();
                 throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "KNOWLEDGE_SOURCE_MISSING", "Knowledge indexing requires an organized document");
             } else {
+                if (properties.getDashscope().isEnabled()) {
+                    pipeline.recordModelInvocation(work.document().getTranscriptionTaskId(), com.voicenote.domain.PipelineStage.KNOWLEDGE_INDEX,
+                            properties.getDashscope().getEmbeddingModel());
+                }
                 List<KnowledgeChunker.EmbeddedChunk> semantic = chunker.build(work.document().getTitle(), work.organizedBlocks());
                 if (semantic.isEmpty()) throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "KNOWLEDGE_CHUNKS_EMPTY", "Organized document produced no semantic chunks");
                 vectors.deleteDocument(work.document().getOwnerId(), work.document().getId());

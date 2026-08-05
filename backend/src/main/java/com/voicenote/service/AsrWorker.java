@@ -68,11 +68,12 @@ public class AsrWorker {
         private final ObjectStorage storage;
         private final PipelineProgressService pipeline;
         private final ObjectMapper mapper;
+        private final AppProperties properties;
         public AsrAttemptState(TaskAttemptRepository attempts, TranscriptionTaskRepository tasks, AudioBlobRepository blobs, ProviderInvocationRepository invocations,
                                TranscriptSegmentRepository segments, RawTranscriptDocumentRepository rawDocuments, TranscriptSpeakerRepository speakers, ObjectStorage storage,
-                               PipelineProgressService pipeline, ObjectMapper mapper) {
+                               PipelineProgressService pipeline, ObjectMapper mapper, AppProperties properties) {
             this.attempts = attempts; this.tasks = tasks; this.blobs = blobs; this.invocations = invocations; this.segments = segments; this.rawDocuments = rawDocuments; this.storage = storage; this.pipeline = pipeline;
-            this.speakers = speakers; this.mapper = mapper;
+            this.speakers = speakers; this.mapper = mapper; this.properties = properties;
         }
         @Transactional(readOnly = true) public List<String> queuedAttempts() { return attempts.findTop20ByStatusOrderByCreatedAtAsc(AttemptStatus.QUEUED).stream().map(TaskAttempt::getId).toList(); }
         @Transactional(readOnly = true) public List<String> duePolls() { return attempts.findTop20ByStatusAndNextPollAtBeforeOrderByNextPollAtAsc(AttemptStatus.PROVIDER_RUNNING, Instant.now()).stream().map(TaskAttempt::getId).toList(); }
@@ -85,6 +86,9 @@ public class AsrWorker {
                     .orElseGet(() -> new ProviderInvocation(attempt.getId(), "ASR_SUBMIT", Hashing.sha256(task.getId() + ":" + attempt.getAttemptNumber())));
             if (invocation.getStatus() != InvocationStatus.READY) return null;
             invocation.markInFlight(); invocations.save(invocation); attempts.save(attempt); tasks.save(task);
+            if (properties.getDashscope().isEnabled()) {
+                pipeline.recordModelInvocation(task.getId(), PipelineStage.ASR_SUBMIT, properties.getDashscope().getAsrModel());
+            }
             return new SubmissionWork(attempt.getId(), blobs.findById(task.getAudioBlobId()).orElseThrow(), asrOptions(task));
         }
         @Transactional
@@ -123,7 +127,10 @@ public class AsrWorker {
             }
             persistRawDocument(task, attempt, version, created, result.rawResultDocument());
             attempt.succeed(); attempts.save(attempt); tasks.save(task);
-            pipeline.succeeded(task.getId(), PipelineStage.TRANSCRIPT_PERSIST, "{\"transcriptVersion\":" + version + ",\"segmentCount\":" + created.size() + "}", null);
+            pipeline.succeeded(task.getId(), PipelineStage.TRANSCRIPT_PERSIST, "{\"transcriptVersion\":" + version + ",\"segmentCount\":" + created.size() + "}", PipelineStage.RAW_DOCUMENT_READY);
+            if (pipeline.begin(task.getId(), PipelineStage.RAW_DOCUMENT_READY)) {
+                pipeline.succeeded(task.getId(), PipelineStage.RAW_DOCUMENT_READY, "{\"transcriptVersion\":" + version + "}", null);
+            }
             pipeline.awaitFormalDocument(task.getId());
         }
         @Transactional

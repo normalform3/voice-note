@@ -114,6 +114,6 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
         catch (RestClientResponseException exception) { throw unavailable(exception); }
     }
     private ProviderException unavailable(Exception exception) {
-        return new ProviderException(ProviderException.Kind.RETRYABLE_REJECTION, "QDRANT_UNAVAILABLE", "Qdrant is unavailable. Check that the service is running and reachable.");
+        return new ProviderException(ProviderException.Kind.RETRYABLE_REJECTION, "QDRANT_UNAVAILABLE", "Qdrant 暂时不可用，请确认服务已启动且 SSH 隧道仍可访问。");
     }
 }

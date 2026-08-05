@@ -4,6 +4,7 @@ import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.voicenote.domain.*;
 import com.voicenote.repository.*;
+import com.voicenote.provider.ProviderException;
 import com.voicenote.web.ApiException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -73,6 +74,7 @@ public class DocumentOrganizationService {
     }
 
     @Transactional public void completeSemantic(String documentId, String response) {
+        requireJsonObject(response, "DOCUMENT_ORGANIZATION_RESPONSE_INVALID", "Document organization must return a JSON object");
         OrganizationInvocation invocation = invocations.findByOrganizedDocumentIdAndStageName(documentId, STRUCTURE_STAGE).orElseThrow();
         invocation.succeed(response); invocations.save(invocation);
     }
@@ -241,6 +243,15 @@ public class DocumentOrganizationService {
         return new Span(source.get(ids.get(0)).getStartMs(), source.get(ids.get(ids.size() - 1)).getEndMs(), speakers);
     }
     private String json(Object value) throws Exception { return mapper.writeValueAsString(value); }
+
+    private void requireJsonObject(String response, String code, String message) {
+        try {
+            JsonNode parsed = mapper.readTree(response);
+            if (parsed == null || !parsed.isObject()) throw new IllegalArgumentException("response is not a JSON object");
+        } catch (Exception exception) {
+            throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, code, message);
+        }
+    }
     private String fragments(List<String> ids, Map<String, TranscriptSegment> source) throws Exception {
         List<Map<String, Object>> output = new ArrayList<>();
         for (String id : ids) { TranscriptSegment segment = source.get(id); output.add(Map.of("segmentId", id, "speakerId", segment.getAsrSpeakerId(), "startMs", segment.getStartMs(), "endMs", segment.getEndMs(), "text", segment.getTextContent())); }

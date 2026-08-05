@@ -20,6 +20,8 @@ class TaskStageAttemptTest {
 
         assertThat(attempt.getStatus()).isEqualTo(StageAttemptStatus.RETRY_WAIT);
         assertThat(attempt.getNextRetryAt()).isAfter(Instant.now());
+        attempt.recordModelInvocation("paraformer-v2");
+        assertThat(attempt.getModelId()).isEqualTo("paraformer-v2");
         attempt.retried();
         assertThat(attempt.getStatus()).isEqualTo(StageAttemptStatus.RETRIED);
     }

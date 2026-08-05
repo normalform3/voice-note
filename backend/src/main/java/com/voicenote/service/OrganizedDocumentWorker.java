@@ -30,7 +30,10 @@ public class OrganizedDocumentWorker {
             var blocks = documents.complete(documentId, result, work.segments());
             if (blocks.isEmpty()) return;
             pipeline.succeeded(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION,
-                    "{\"documentId\":\"" + documentId + "\",\"turnCount\":" + result.turns().size() + ",\"topicCount\":" + result.topics().size() + "}", null);
+                    "{\"documentId\":\"" + documentId + "\",\"turnCount\":" + result.turns().size() + ",\"topicCount\":" + result.topics().size() + "}", PipelineStage.FORMAL_DOCUMENT_READY);
+            if (pipeline.begin(work.document().getTranscriptionTaskId(), PipelineStage.FORMAL_DOCUMENT_READY)) {
+                pipeline.succeeded(work.document().getTranscriptionTaskId(), PipelineStage.FORMAL_DOCUMENT_READY, "{\"documentId\":\"" + documentId + "\"}", null);
+            }
             pipeline.awaitKnowledgeBuild(work.document().getTranscriptionTaskId());
         } catch (ProviderException exception) {
             documents.fail(documentId, exception.getCode() + ": " + exception.getMessage());
@@ -44,6 +47,9 @@ public class OrganizedDocumentWorker {
     private DocumentOrganizationService.OrganizationResult organize(DocumentOrganizationService.OrganizationWork work) {
         try {
             DocumentOrganizationService.ModelAction action = documents.prepareSemantic(work);
+            if (!action.cached() && properties.getDashscope().isEnabled()) {
+                pipeline.recordModelInvocation(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION, properties.getDashscope().getChatModel());
+            }
             String response = action.cached() ? action.value() : model.complete(action.value());
             if (!action.cached()) documents.completeSemantic(work.document().getId(), response);
             return documents.organizeSemantic(work, response);
