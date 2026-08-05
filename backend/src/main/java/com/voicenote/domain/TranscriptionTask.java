@@ -57,7 +57,17 @@ public class TranscriptionTask {
     public int nextAttemptNumber() { currentAttemptNumber += 1; updatedAt = Instant.now(); return currentAttemptNumber; }
     public void mark(TaskStatus status) { this.status = status; this.updatedAt = Instant.now(); }
     public void advance(PipelineStage stage, int progress) { this.currentStage = stage; this.currentPhase = phaseFor(stage); this.progressPercent = progress; this.failureCode = null; this.failureMessage = null; this.failedStage = null; this.updatedAt = Instant.now(); }
-    public void transcriptPersisted() { this.transcriptReady = true; this.currentStage = PipelineStage.DOCUMENT_ORGANIZATION; this.currentPhase = PipelinePhase.DOCUMENT_ORGANIZATION; this.progressPercent = 60; this.updatedAt = Instant.now(); }
+    public void transcriptPersisted() { this.transcriptReady = true; this.updatedAt = Instant.now(); }
+    public void awaitFormalDocument() {
+        this.status = TaskStatus.WAITING_FOR_FORMAL_DOCUMENT; this.currentStage = PipelineStage.RAW_DOCUMENT_READY;
+        this.currentPhase = PipelinePhase.RAW_DOCUMENT_REVIEW; this.progressPercent = 60;
+        this.failureCode = null; this.failureMessage = null; this.failedStage = null; this.updatedAt = Instant.now();
+    }
+    public void awaitKnowledgeBuild() {
+        this.status = TaskStatus.WAITING_FOR_KNOWLEDGE_BUILD; this.currentStage = PipelineStage.FORMAL_DOCUMENT_READY;
+        this.currentPhase = PipelinePhase.FORMAL_DOCUMENT_REVIEW; this.progressPercent = 80;
+        this.failureCode = null; this.failureMessage = null; this.failedStage = null; this.updatedAt = Instant.now();
+    }
     public void completePipeline() { this.status = TaskStatus.SUCCEEDED; this.currentStage = PipelineStage.COMPLETED; this.currentPhase = PipelinePhase.COMPLETED; this.progressPercent = 100; this.failedStage = null; this.failureCode = null; this.failureMessage = null; this.updatedAt = Instant.now(); }
     public void fail(TaskStatus status, String code, String message) { this.status = status; this.failureCode = code; this.failureMessage = message; this.failedStage = currentStage; this.updatedAt = Instant.now(); }
     public int nextTranscriptVersion() { transcriptVersion += 1; updatedAt = Instant.now(); return transcriptVersion; }
@@ -68,7 +78,9 @@ public class TranscriptionTask {
     private static PipelinePhase phaseFor(PipelineStage stage) {
         return switch (stage) {
             case UPLOAD_COMPLETED, ASR_SUBMIT, ASR_POLL, TRANSCRIPT_PERSIST -> PipelinePhase.TRANSCRIPTION;
+            case RAW_DOCUMENT_READY -> PipelinePhase.RAW_DOCUMENT_REVIEW;
             case DOCUMENT_ORGANIZATION -> PipelinePhase.DOCUMENT_ORGANIZATION;
+            case FORMAL_DOCUMENT_READY -> PipelinePhase.FORMAL_DOCUMENT_REVIEW;
             case KNOWLEDGE_PREPARE, KNOWLEDGE_INDEX -> PipelinePhase.KNOWLEDGE_BUILD;
             case COMPLETED -> PipelinePhase.COMPLETED;
         };

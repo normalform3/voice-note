@@ -27,6 +27,7 @@ public class KnowledgeIndexWorker {
         KnowledgeDocumentService.IndexWork work = documents.claim(documentId); if (work == null) return;
         try {
             pipeline.begin(work.document().getTranscriptionTaskId(), com.voicenote.domain.PipelineStage.KNOWLEDGE_INDEX);
+            vectors.ensureAvailable();
             vectors.ensureCollection();
             List<KnowledgeChunk> chunks;
             List<List<Double>> embedded;

@@ -22,6 +22,7 @@ public class RecordingDeletionService {
     private final TaskStageAttemptRepository stages;
     private final TranscriptSegmentRepository segments;
     private final TranscriptSpeakerRepository transcriptSpeakers;
+    private final RawTranscriptDocumentRepository rawTranscriptDocuments;
     private final OrganizedDocumentRepository organizedDocuments;
     private final OrganizedDocumentBlockRepository organizedBlocks;
     private final KnowledgeDocumentRepository knowledgeDocuments;
@@ -41,7 +42,7 @@ public class RecordingDeletionService {
 
     public RecordingDeletionService(TranscriptionTaskRepository tasks, AudioBlobRepository blobs, TaskAttemptRepository attempts,
                                     ProviderInvocationRepository providerInvocations, TaskStageAttemptRepository stages,
-                                    TranscriptSegmentRepository segments, TranscriptSpeakerRepository transcriptSpeakers, OrganizedDocumentRepository organizedDocuments,
+                                    TranscriptSegmentRepository segments, TranscriptSpeakerRepository transcriptSpeakers, RawTranscriptDocumentRepository rawTranscriptDocuments, OrganizedDocumentRepository organizedDocuments,
                                     OrganizedDocumentBlockRepository organizedBlocks, KnowledgeDocumentRepository knowledgeDocuments,
                                     KnowledgeChunkRepository knowledgeChunks, KnowledgeRunEvidenceRepository knowledgeEvidence,
                                     KnowledgeRunRepository knowledgeRuns, AnalysisRunRepository analysisRuns,
@@ -50,7 +51,7 @@ public class RecordingDeletionService {
                                     IdempotencyService idempotency, KnowledgeVectorStore vectors, ObjectStorage storage,
                                     PlatformTransactionManager transactionManager) {
         this.tasks = tasks; this.blobs = blobs; this.attempts = attempts; this.providerInvocations = providerInvocations; this.stages = stages;
-        this.segments = segments; this.transcriptSpeakers = transcriptSpeakers; this.organizedDocuments = organizedDocuments; this.organizedBlocks = organizedBlocks;
+        this.segments = segments; this.transcriptSpeakers = transcriptSpeakers; this.rawTranscriptDocuments = rawTranscriptDocuments; this.organizedDocuments = organizedDocuments; this.organizedBlocks = organizedBlocks;
         this.knowledgeDocuments = knowledgeDocuments; this.knowledgeChunks = knowledgeChunks; this.knowledgeEvidence = knowledgeEvidence;
         this.knowledgeRuns = knowledgeRuns; this.analysisRuns = analysisRuns; this.analysisEvidence = analysisEvidence;
         this.analysisInvocations = analysisInvocations; this.organizationInvocations = organizationInvocations; this.outbox = outbox; this.idempotencyRecords = idempotencyRecords;
@@ -66,6 +67,7 @@ public class RecordingDeletionService {
         DeletionPlan plan = transactions.execute(status -> cancelAndPlan(ownerId, taskId));
         if (plan == null) throw new IllegalStateException("Cannot prepare recording deletion");
         for (String documentId : plan.knowledgeDocumentIds()) vectors.deleteDocument(ownerId, documentId);
+        for (String rawResultKey : plan.rawResultObjectKeys()) storage.removeQuietly(rawResultKey);
         if (plan.deleteAudioBlob()) storage.remove(plan.objectKey());
         transactions.executeWithoutResult(status -> deleteMetadata(ownerId, taskId, plan.audioBlobId(), plan.deleteAudioBlob()));
         idempotency.complete(record, taskId, "{\"deleted\":true}");
@@ -80,7 +82,8 @@ public class RecordingDeletionService {
         }
         AudioBlob blob = blobs.findById(task.getAudioBlobId()).orElseThrow(() -> new ApiException(HttpStatus.CONFLICT, "AUDIO_NOT_FOUND", "The recording source is no longer available"));
         List<String> documentIds = knowledgeDocuments.findByTranscriptionTaskId(taskId).stream().map(KnowledgeDocument::getId).toList();
-        return new DeletionPlan(blob.getId(), blob.getObjectKey(), tasks.countByAudioBlobId(blob.getId()) == 1, documentIds);
+        List<String> rawResultKeys = rawTranscriptDocuments.findByTranscriptionTaskId(taskId).stream().map(RawTranscriptDocument::getResultObjectKey).toList();
+        return new DeletionPlan(blob.getId(), blob.getObjectKey(), tasks.countByAudioBlobId(blob.getId()) == 1, documentIds, rawResultKeys);
     }
 
     public void deleteMetadata(String ownerId, String taskId, String audioBlobId, boolean deleteAudioBlob) {
@@ -121,6 +124,7 @@ public class RecordingDeletionService {
         stages.deleteByTranscriptionTaskId(taskId);
         segments.deleteByTranscriptionTaskId(taskId);
         transcriptSpeakers.deleteByTranscriptionTaskId(taskId);
+        rawTranscriptDocuments.deleteByTranscriptionTaskId(taskId);
         outbox.deleteByAggregateTypeAndAggregateId("transcription_task", taskId);
         idempotencyRecords.deleteByOwnerIdAndResourceId(ownerId, taskId);
 
@@ -134,5 +138,5 @@ public class RecordingDeletionService {
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "TASK_NOT_FOUND", "Transcription task was not found"));
     }
 
-    record DeletionPlan(String audioBlobId, String objectKey, boolean deleteAudioBlob, List<String> knowledgeDocumentIds) { }
+    record DeletionPlan(String audioBlobId, String objectKey, boolean deleteAudioBlob, List<String> knowledgeDocumentIds, List<String> rawResultObjectKeys) { }
 }

@@ -30,6 +30,12 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
         this.client = RestClient.builder().baseUrl(properties.getKnowledge().getQdrantUrl()).build();
     }
 
+    @Override public void ensureAvailable() {
+        try { client.get().uri("/healthz").retrieve().toBodilessEntity(); }
+        catch (RestClientResponseException exception) { throw unavailable(exception); }
+        catch (RuntimeException exception) { throw unavailable(exception); }
+    }
+
     @Override public void ensureCollection() {
         Map<String, Object> body = Map.of(
                 "vectors", Map.of(DENSE, Map.of("size", properties.getDashscope().getEmbeddingDimension(), "distance", "Cosine")),
@@ -108,6 +114,6 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
         catch (RestClientResponseException exception) { throw unavailable(exception); }
     }
     private ProviderException unavailable(Exception exception) {
-        return new ProviderException(ProviderException.Kind.RETRYABLE_REJECTION, "QDRANT_UNAVAILABLE", "Qdrant request failed: " + exception.getMessage());
+        return new ProviderException(ProviderException.Kind.RETRYABLE_REJECTION, "QDRANT_UNAVAILABLE", "Qdrant is unavailable. Check that the service is running and reachable.");
     }
 }

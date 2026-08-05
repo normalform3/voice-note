@@ -13,6 +13,8 @@ import org.springframework.stereotype.Component;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
+import java.io.ByteArrayInputStream;
+import java.nio.charset.StandardCharsets;
 import java.util.LinkedHashSet;
 import java.util.List;
 
@@ -61,14 +63,15 @@ public class AsrWorker {
     public static class AsrAttemptState {
         private final TaskAttemptRepository attempts; private final TranscriptionTaskRepository tasks; private final AudioBlobRepository blobs;
         private final ProviderInvocationRepository invocations; private final TranscriptSegmentRepository segments;
+        private final RawTranscriptDocumentRepository rawDocuments;
         private final TranscriptSpeakerRepository speakers;
-        private final DocumentOrganizationService organizedDocuments;
+        private final ObjectStorage storage;
         private final PipelineProgressService pipeline;
         private final ObjectMapper mapper;
         public AsrAttemptState(TaskAttemptRepository attempts, TranscriptionTaskRepository tasks, AudioBlobRepository blobs, ProviderInvocationRepository invocations,
-                               TranscriptSegmentRepository segments, TranscriptSpeakerRepository speakers, DocumentOrganizationService organizedDocuments,
+                               TranscriptSegmentRepository segments, RawTranscriptDocumentRepository rawDocuments, TranscriptSpeakerRepository speakers, ObjectStorage storage,
                                PipelineProgressService pipeline, ObjectMapper mapper) {
-            this.attempts = attempts; this.tasks = tasks; this.blobs = blobs; this.invocations = invocations; this.segments = segments; this.organizedDocuments = organizedDocuments; this.pipeline = pipeline;
+            this.attempts = attempts; this.tasks = tasks; this.blobs = blobs; this.invocations = invocations; this.segments = segments; this.rawDocuments = rawDocuments; this.storage = storage; this.pipeline = pipeline;
             this.speakers = speakers; this.mapper = mapper;
         }
         @Transactional(readOnly = true) public List<String> queuedAttempts() { return attempts.findTop20ByStatusOrderByCreatedAtAsc(AttemptStatus.QUEUED).stream().map(TaskAttempt::getId).toList(); }
@@ -118,10 +121,10 @@ public class AsrWorker {
                 speakers.findByTranscriptionTaskIdAndTranscriptVersionAndAsrSpeakerId(task.getId(), version, speakerId)
                         .orElseGet(() -> speakers.save(new TranscriptSpeaker(task.getId(), version, speakerId)));
             }
+            persistRawDocument(task, attempt, version, created, result.rawResultDocument());
             attempt.succeed(); attempts.save(attempt); tasks.save(task);
-            pipeline.succeeded(task.getId(), PipelineStage.TRANSCRIPT_PERSIST, "{\"transcriptVersion\":" + version + ",\"segmentCount\":" + created.size() + "}", PipelineStage.DOCUMENT_ORGANIZATION);
-            if (task.isCancelled()) return;
-            organizedDocuments.createForTranscript(task, blobs.findById(task.getAudioBlobId()).orElseThrow());
+            pipeline.succeeded(task.getId(), PipelineStage.TRANSCRIPT_PERSIST, "{\"transcriptVersion\":" + version + ",\"segmentCount\":" + created.size() + "}", null);
+            pipeline.awaitFormalDocument(task.getId());
         }
         @Transactional
         public void recordFailure(String attemptId, PipelineStage stage, ProviderException exception) {
@@ -191,6 +194,23 @@ public class AsrWorker {
                     throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ASR_RESULT_INVALID", "ASR did not return ordered sentence results");
                 }
                 previousEnd = segment.endMs();
+            }
+        }
+        private void persistRawDocument(TranscriptionTask task, TaskAttempt attempt, int version, List<TranscriptSegment> segments, String rawResult) {
+            String raw = rawResult == null || rawResult.isBlank() ? "{}" : rawResult;
+            String objectKey = "transcripts/" + task.getId() + "/v" + version + "/dashscope-result.json";
+            byte[] bytes = raw.getBytes(StandardCharsets.UTF_8);
+            String content = segments.stream().map(segment -> "[" + segment.getStartMs() + "-" + segment.getEndMs() + "ms] " + segment.getAsrSpeakerId() + ": " + segment.getTextContent())
+                    .collect(java.util.stream.Collectors.joining("\n"));
+            // The unique source key makes a recovered poll idempotent and prevents rewriting an accepted artifact.
+            if (rawDocuments.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(task.getOwnerId(), task.getId(), version).isPresent()) return;
+            try {
+                storage.put(objectKey, new ByteArrayInputStream(bytes), bytes.length, "application/json");
+                rawDocuments.save(new RawTranscriptDocument(task.getOwnerId(), task.getId(), version, attempt.getProviderTaskId(), objectKey,
+                        Hashing.sha256(raw), content, segments.size()));
+            } catch (RuntimeException exception) {
+                storage.removeQuietly(objectKey);
+                throw exception;
             }
         }
         public record SubmissionWork(String attemptId, AudioBlob audio, AsrProvider.AsrOptions options) { }

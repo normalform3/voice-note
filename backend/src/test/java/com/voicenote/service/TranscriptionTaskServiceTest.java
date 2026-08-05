@@ -31,4 +31,13 @@ class TranscriptionTaskServiceTest {
                 .isInstanceOf(ApiException.class)
                 .hasMessageContaining("speakerCount must be between 2 and 100");
     }
+
+    @Test
+    void rejectsSpeakerCountWhenDiarizationIsDisabled() {
+        TranscriptionTaskService.AsrConfig config = new TranscriptionTaskService.AsrConfig(List.of("zh"), false, 2);
+
+        assertThatThrownBy(config::normalized)
+                .isInstanceOf(ApiException.class)
+                .hasMessageContaining("requires speaker diarization");
+    }
 }

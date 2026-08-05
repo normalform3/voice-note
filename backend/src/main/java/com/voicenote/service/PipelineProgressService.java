@@ -82,6 +82,20 @@ public class PipelineProgressService {
     }
 
     @Transactional
+    public void awaitFormalDocument(String taskId) {
+        TranscriptionTask task = tasks.findById(taskId).orElseThrow();
+        if (task.isCancelled()) return;
+        task.awaitFormalDocument(); tasks.save(task); notifyTask(task);
+    }
+
+    @Transactional
+    public void awaitKnowledgeBuild(String taskId) {
+        TranscriptionTask task = tasks.findById(taskId).orElseThrow();
+        if (task.isCancelled()) return;
+        task.awaitKnowledgeBuild(); tasks.save(task); notifyTask(task);
+    }
+
+    @Transactional
     public void retryLater(String taskId, PipelineStage stage, String code, String message, int retryNumber) {
         TranscriptionTask task = tasks.findById(taskId).orElseThrow();
         if (isTerminal(task)) return;
@@ -245,7 +259,7 @@ public class PipelineProgressService {
         String message = failure.getMessage();
         return message == null || message.isBlank() ? failure.getClass().getSimpleName() : message;
     }
-    private static int progressFor(PipelineStage stage) { return switch (stage) { case UPLOAD_COMPLETED -> 5; case ASR_SUBMIT -> 10; case ASR_POLL -> 40; case TRANSCRIPT_PERSIST -> 60; case DOCUMENT_ORGANIZATION -> 70; case KNOWLEDGE_PREPARE -> 85; case KNOWLEDGE_INDEX -> 90; case COMPLETED -> 100; }; }
+    private static int progressFor(PipelineStage stage) { return switch (stage) { case UPLOAD_COMPLETED -> 5; case ASR_SUBMIT -> 10; case ASR_POLL -> 40; case TRANSCRIPT_PERSIST, RAW_DOCUMENT_READY -> 60; case DOCUMENT_ORGANIZATION -> 70; case FORMAL_DOCUMENT_READY -> 80; case KNOWLEDGE_PREPARE -> 85; case KNOWLEDGE_INDEX -> 90; case COMPLETED -> 100; }; }
     private static TaskStatus statusFor(PipelineStage stage) { return stage == PipelineStage.UPLOAD_COMPLETED ? TaskStatus.QUEUED : TaskStatus.RUNNING; }
 
     public record KnowledgeDocumentView(String id, String title, String status, String failureMessage) { }

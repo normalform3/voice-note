@@ -101,7 +101,10 @@ public class DashscopeAsrProvider implements AsrProvider {
             if (transcriptionUrl == null) return new AsrPollResult(AsrPollResult.Status.FAILED, "ASR_RESULT_MISSING", "ASR completed without a transcript URL", List.of());
             JsonNode transcript = RestClient.create().get().uri(URI.create(transcriptionUrl)).retrieve().body(JsonNode.class);
             ParsedTranscript parsed = parseTranscript(transcript);
-            return new AsrPollResult(AsrPollResult.Status.SUCCEEDED, null, null, parsed.segments(), parsed.metadata());
+            String rawDocument;
+            try { rawDocument = mapper.writeValueAsString(transcript); }
+            catch (Exception exception) { throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ASR_RESULT_SERIALIZATION_FAILED", "Could not preserve the ASR result document"); }
+            return new AsrPollResult(AsrPollResult.Status.SUCCEEDED, null, null, parsed.segments(), parsed.metadata(), rawDocument);
         } catch (RestClientResponseException exception) { throw classifyHttp(exception.getStatusCode().value(), exception.getResponseBodyAsString()); }
         catch (RuntimeException exception) { throw new ProviderException(ProviderException.Kind.RETRYABLE_REJECTION, "DASHSCOPE_POLL_FAILED", "Could not poll the ASR task"); }
     }

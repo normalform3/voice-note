@@ -15,4 +15,19 @@ class TranscriptionTaskStateTest {
         assertThat(task.isCancelled()).isTrue();
         assertThat(task.cancel()).isFalse();
     }
+
+    @Test
+    void waitsForUserActionsBetweenTheThreePersistedArtifacts() {
+        TranscriptionTask task = new TranscriptionTask("owner", "audio", "a".repeat(64), "manual-gates-v2");
+
+        task.transcriptPersisted();
+        task.awaitFormalDocument();
+        assertThat(task.getStatus()).isEqualTo(TaskStatus.WAITING_FOR_FORMAL_DOCUMENT);
+        assertThat(task.getCurrentStage()).isEqualTo(PipelineStage.RAW_DOCUMENT_READY);
+
+        task.advance(PipelineStage.DOCUMENT_ORGANIZATION, 70);
+        task.awaitKnowledgeBuild();
+        assertThat(task.getStatus()).isEqualTo(TaskStatus.WAITING_FOR_KNOWLEDGE_BUILD);
+        assertThat(task.getCurrentStage()).isEqualTo(PipelineStage.FORMAL_DOCUMENT_READY);
+    }
 }

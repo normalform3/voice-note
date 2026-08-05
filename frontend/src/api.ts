@@ -7,8 +7,8 @@ api.interceptors.request.use((config) => {
   return config
 })
 
-export type PipelineStage = 'UPLOAD_COMPLETED' | 'ASR_SUBMIT' | 'ASR_POLL' | 'TRANSCRIPT_PERSIST' | 'DOCUMENT_ORGANIZATION' | 'KNOWLEDGE_PREPARE' | 'KNOWLEDGE_INDEX' | 'COMPLETED'
-export type PipelinePhase = 'TRANSCRIPTION' | 'DOCUMENT_ORGANIZATION' | 'KNOWLEDGE_BUILD' | 'COMPLETED'
+export type PipelineStage = 'UPLOAD_COMPLETED' | 'ASR_SUBMIT' | 'ASR_POLL' | 'TRANSCRIPT_PERSIST' | 'RAW_DOCUMENT_READY' | 'DOCUMENT_ORGANIZATION' | 'FORMAL_DOCUMENT_READY' | 'KNOWLEDGE_PREPARE' | 'KNOWLEDGE_INDEX' | 'COMPLETED'
+export type PipelinePhase = 'TRANSCRIPTION' | 'RAW_DOCUMENT_REVIEW' | 'DOCUMENT_ORGANIZATION' | 'FORMAL_DOCUMENT_REVIEW' | 'KNOWLEDGE_BUILD' | 'COMPLETED'
 export type StageAttempt = { stage: PipelineStage; status: string; attemptNumber: number; queuedAt: string; startedAt?: string; completedAt?: string; waitDurationMs?: number; totalWaitDurationMs: number; nextRetryAt?: string; errorCode?: string; errorMessage?: string }
 export type Task = {
   id: string; audioBlobId: string; status: string; currentPhase?: PipelinePhase; currentStage?: PipelineStage; progressPercent?: number; transcriptReady?: boolean
@@ -76,12 +76,13 @@ export const timecode = (milliseconds: number) => {
 export const statusText = (status: string) => ({
   PENDING: '等待调度', QUEUED: '等待处理', INDEXING: '建立索引', READY: '已收录', FAILED: '处理失败',
   SUCCEEDED: '已完成', RUNNING: '处理中', PROVIDER_RUNNING: '转写中', SUBMITTING: '提交中', ORGANIZING: '整理中', CANCELLED: '已取消',
+  WAITING_FOR_FORMAL_DOCUMENT: '等待生成正式文档', WAITING_FOR_KNOWLEDGE_BUILD: '等待建立知识库',
   FINAL_FAILED: '转写失败', RETRYABLE_FAILED: '自动重试中', SUBMISSION_UNKNOWN: '状态未知', BUDGET_EXHAUSTED: '额度已用尽',
   RETRY_WAIT: '等待重试', UNKNOWN: '状态未知', RETRIED: '已重试'
 }[status] || status)
 export const stageText = (stage?: PipelineStage) => {
   const labels: Record<PipelineStage, string> = {
-  UPLOAD_COMPLETED: '音频已存入 MinIO', ASR_SUBMIT: '提交至转写服务', ASR_POLL: '异步转写任务已启动', TRANSCRIPT_PERSIST: '保存听记', DOCUMENT_ORGANIZATION: '整理文档',
+  UPLOAD_COMPLETED: '音频已存入 MinIO', ASR_SUBMIT: '提交至转写服务', ASR_POLL: '异步转写任务已启动', TRANSCRIPT_PERSIST: '保存原始文档', RAW_DOCUMENT_READY: '原始文档已就绪', DOCUMENT_ORGANIZATION: '生成正式文档', FORMAL_DOCUMENT_READY: '正式文档已就绪',
   KNOWLEDGE_PREPARE: '准备知识文档', KNOWLEDGE_INDEX: '建立知识索引', COMPLETED: '处理完成'
   }
   return stage ? labels[stage] : '等待处理'

@@ -111,6 +111,8 @@ input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px
 .diarization-option { display: flex; align-items: center; gap: 6px; color: var(--ink); font-size: 11px; letter-spacing: 0; white-space: nowrap; }
 .diarization-option input { width: auto; accent-color: var(--accent-deep); }
 .diarization-option small { color: var(--muted); font-family: 'DM Mono', monospace; font-size: 9px; }
+.speaker-count-option { display: inline-flex; align-items: center; gap: 7px; color: var(--ink); font-size: 11px; }
+.speaker-count-option input { width: 94px; min-height: 30px; padding: 4px 7px; font-size: 11px; }
 .upload-queue p { margin: 0; flex: 1; line-height: 1.5; }
 .upload-timer { color: var(--accent-deep); font-weight: 500; }
 .upload-start { min-width: 130px; margin-left: auto; padding: 10px 12px; font-size: 12px; }
@@ -203,7 +205,9 @@ input:focus, textarea:focus { border-color: var(--accent); box-shadow: 0 0 0 3px
 .speaker-roster > span { color: var(--faint); font-family: 'DM Mono', monospace; font-size: 10px; }
 .speaker-roster label { display: inline-flex; align-items: center; gap: 6px; color: var(--muted); font-size: 11px; }
 .speaker-roster b { max-width: 120px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.speaker-roster select { width: auto; min-height: 0; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; color: var(--accent-deep); background: #fff; font-size: 10px; }
+.speaker-roster input { width: 132px; min-height: 0; border: 1px solid var(--line); border-radius: 6px; padding: 4px 6px; color: var(--accent-deep); background: #fff; font-size: 10px; }
+.speaker-save { min-height: 0; border: 0; border-radius: 6px; padding: 4px 7px; color: #fff; background: var(--accent-deep); font-size: 10px; cursor: pointer; }
+.speaker-save:disabled { opacity: .65; cursor: wait; }
 .segment { display: grid; grid-template-columns: 68px minmax(0, 1fr) 20px; align-items: start; gap: 16px; border: 0; border-top: 1px solid var(--line); padding: 18px 8px; color: inherit; background: transparent; text-align: left; transition: background .18s ease, padding .18s ease; }
 .segment:hover { padding-right: 14px; padding-left: 14px; background: var(--surface-soft); }
 .segment time { padding-top: 3px; color: var(--accent); font-family: 'DM Mono', monospace; font-size: 11px; }

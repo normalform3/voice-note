@@ -10,12 +10,11 @@ import org.springframework.stereotype.Component;
 public class OrganizedDocumentWorker {
     private final AppProperties properties;
     private final DocumentOrganizationService documents;
-    private final KnowledgeDocumentService knowledge;
     private final PipelineProgressService pipeline;
     private final AnalysisModelClient model;
 
-    public OrganizedDocumentWorker(AppProperties properties, DocumentOrganizationService documents, KnowledgeDocumentService knowledge, PipelineProgressService pipeline, AnalysisModelClient model) {
-        this.properties = properties; this.documents = documents; this.knowledge = knowledge; this.pipeline = pipeline; this.model = model;
+    public OrganizedDocumentWorker(AppProperties properties, DocumentOrganizationService documents, PipelineProgressService pipeline, AnalysisModelClient model) {
+        this.properties = properties; this.documents = documents; this.pipeline = pipeline; this.model = model;
     }
 
     /** Invoked after the RocketMQ consumer commits the durable QUEUED transition. */
@@ -30,18 +29,9 @@ public class OrganizedDocumentWorker {
             DocumentOrganizationService.OrganizationResult result = organize(work);
             var blocks = documents.complete(documentId, result, work.segments());
             if (blocks.isEmpty()) return;
-            if (!properties.getKnowledge().isEnabled()) {
-                pipeline.succeeded(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION,
-                        "{\"documentId\":\"" + documentId + "\",\"turnCount\":" + result.turns().size() + ",\"topicCount\":" + result.topics().size() + ",\"knowledgeIndexing\":false}", null);
-                pipeline.completeWithoutKnowledge(work.document().getTranscriptionTaskId());
-                return;
-            }
             pipeline.succeeded(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION,
-                    "{\"documentId\":\"" + documentId + "\",\"turnCount\":" + result.turns().size() + ",\"topicCount\":" + result.topics().size() + "}", PipelineStage.KNOWLEDGE_PREPARE);
-            if (!pipeline.begin(work.document().getTranscriptionTaskId(), PipelineStage.KNOWLEDGE_PREPARE)) return;
-            knowledge.createForOrganizedDocument(work.document(), blocks);
-            pipeline.succeeded(work.document().getTranscriptionTaskId(), PipelineStage.KNOWLEDGE_PREPARE,
-                    "{\"organizedDocumentId\":\"" + documentId + "\"}", PipelineStage.KNOWLEDGE_INDEX);
+                    "{\"documentId\":\"" + documentId + "\",\"turnCount\":" + result.turns().size() + ",\"topicCount\":" + result.topics().size() + "}", null);
+            pipeline.awaitKnowledgeBuild(work.document().getTranscriptionTaskId());
         } catch (ProviderException exception) {
             documents.fail(documentId, exception.getCode() + ": " + exception.getMessage());
             pipeline.failed(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION, exception.getCode(), exception.getMessage(), false);

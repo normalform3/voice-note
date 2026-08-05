@@ -42,6 +42,14 @@ public class TranscriptSpeakerService {
     }
 
     @Transactional
+    public TranscriptSpeaker rename(String ownerId, String taskId, String asrSpeakerId, String displayName) {
+        var task = ownedTask(ownerId, taskId);
+        TranscriptSpeaker speaker = speakers.findByTranscriptionTaskIdAndTranscriptVersionAndAsrSpeakerId(taskId, task.getTranscriptVersion(), asrSpeakerId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "SPEAKER_NOT_FOUND", "ASR speaker was not found"));
+        speaker.confirm(null, displayName); return speakers.save(speaker);
+    }
+
+    @Transactional
     public void suggest(String taskId, int transcriptVersion, String asrSpeakerId, SpeakerRole role, Double confidence) {
         speakers.findByTranscriptionTaskIdAndTranscriptVersionAndAsrSpeakerId(taskId, transcriptVersion, asrSpeakerId)
                 .ifPresent(speaker -> { speaker.suggest(role, confidence); speakers.save(speaker); });

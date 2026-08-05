@@ -5,6 +5,7 @@ import com.voicenote.domain.KnowledgeDocument;
 import java.util.List;
 
 public interface KnowledgeVectorStore {
+    void ensureAvailable();
     void ensureCollection();
     void upsert(KnowledgeDocument document, KnowledgeChunk chunk, List<Double> denseVector);
     void deleteDocument(String ownerId, String documentId);

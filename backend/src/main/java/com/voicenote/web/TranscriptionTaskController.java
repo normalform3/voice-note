@@ -41,6 +41,12 @@ public class TranscriptionTaskController {
     @PostMapping("/{taskId}/cancel") PipelineProgressService.TaskProgressView cancel(@PathVariable String taskId, @RequestHeader("Idempotency-Key") String key, Authentication authentication) {
         return taskService.cancel(CurrentUser.require(authentication).id(), key, taskId);
     }
+    @PostMapping("/{taskId}/formal-document") PipelineProgressService.TaskProgressView formalDocument(@PathVariable String taskId, @RequestHeader("Idempotency-Key") String key, Authentication authentication) {
+        return taskService.createFormalDocument(CurrentUser.require(authentication).id(), key, taskId);
+    }
+    @PostMapping("/{taskId}/knowledge-build") PipelineProgressService.TaskProgressView knowledgeBuild(@PathVariable String taskId, @RequestHeader("Idempotency-Key") String key, Authentication authentication) {
+        return taskService.createKnowledgeBuild(CurrentUser.require(authentication).id(), key, taskId);
+    }
     @DeleteMapping("/{taskId}") ResponseEntity<Void> delete(@PathVariable String taskId, @RequestHeader("Idempotency-Key") String key, Authentication authentication) {
         deletion.delete(CurrentUser.require(authentication).id(), key, taskId);
         return ResponseEntity.noContent().build();
@@ -57,9 +63,9 @@ public class TranscriptionTaskController {
     @GetMapping("/{taskId}/speakers") List<SpeakerView> listSpeakers(@PathVariable String taskId, Authentication authentication) {
         return speakers.list(CurrentUser.require(authentication).id(), taskId).stream().map(SpeakerView::from).toList();
     }
-    @PutMapping("/{taskId}/speakers/{speakerId}") SpeakerView confirmSpeaker(@PathVariable String taskId, @PathVariable String speakerId,
-                                                                               @Valid @RequestBody ConfirmSpeakerRequest request, Authentication authentication) {
-        return SpeakerView.from(speakers.confirm(CurrentUser.require(authentication).id(), taskId, speakerId, request.role(), request.displayName()));
+    @PutMapping("/{taskId}/speakers/{speakerId}") SpeakerView updateSpeaker(@PathVariable String taskId, @PathVariable String speakerId,
+                                                                              @Valid @RequestBody UpdateSpeakerRequest request, Authentication authentication) {
+        return SpeakerView.from(speakers.rename(CurrentUser.require(authentication).id(), taskId, speakerId, request.displayName()));
     }
     public record CreateTaskRequest(@NotBlank String audioBlobId, TranscriptionTaskService.AsrConfig asrConfig) { }
     public record SegmentView(String id, int index, String speakerId, String speaker, String role, long startMs, long endMs, String text) {
@@ -69,7 +75,7 @@ public class TranscriptionTaskController {
             return new SegmentView(value.getId(), value.getSegmentIndex(), value.getAsrSpeakerId(), name, role, value.getStartMs(), value.getEndMs(), value.getTextContent());
         }
     }
-    public record ConfirmSpeakerRequest(SpeakerRole role, @Size(max = 128) String displayName) { }
+    public record UpdateSpeakerRequest(@Size(max = 128) String displayName) { }
     public record SpeakerView(String speakerId, String suggestedRole, Double suggestedConfidence, String confirmedRole, String resolvedRole, String displayName) {
         static SpeakerView from(TranscriptSpeaker value) {
             return new SpeakerView(value.getAsrSpeakerId(), value.getSuggestedRole().name(), value.getSuggestedConfidence(),

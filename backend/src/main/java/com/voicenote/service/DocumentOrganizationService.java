@@ -53,12 +53,15 @@ public class DocumentOrganizationService {
         if (document == null) return null;
         TranscriptionTask task = tasks.findById(document.getTranscriptionTaskId()).orElseThrow();
         if (task.isCancelled() || !document.begin()) return null;
-        return new OrganizationWork(document, segments.findByTranscriptionTaskIdAndTranscriptVersionOrderBySegmentIndex(task.getId(), document.getTranscriptVersion()));
+        Map<String, String> displayNames = speakers.index(task.getOwnerId(), task.getId()).values().stream()
+                .filter(value -> value.getDisplayName() != null && !value.getDisplayName().isBlank())
+                .collect(Collectors.toMap(TranscriptSpeaker::getAsrSpeakerId, TranscriptSpeaker::getDisplayName));
+        return new OrganizationWork(document, segments.findByTranscriptionTaskIdAndTranscriptVersionOrderBySegmentIndex(task.getId(), document.getTranscriptVersion()), displayNames);
     }
 
     @Transactional
     public ModelAction prepareSemantic(OrganizationWork work) {
-        String prompt = semanticPrompt(work.document().getTitle(), turns(work.segments()));
+        String prompt = semanticPrompt(work.document().getTitle(), turns(work.segments(), work.speakerNames()));
         String hash = Hashing.sha256(prompt);
         OrganizationInvocation invocation = invocations.findByOrganizedDocumentIdAndStageName(work.document().getId(), STRUCTURE_STAGE)
                 .orElseGet(() -> invocations.save(new OrganizationInvocation(work.document().getId(), STRUCTURE_STAGE, hash)));
@@ -78,7 +81,7 @@ public class DocumentOrganizationService {
     }
 
     public OrganizationResult organizeSemantic(OrganizationWork work, String rawResponse) {
-        List<Turn> allTurns = turns(work.segments());
+        List<Turn> allTurns = turns(work.segments(), work.speakerNames());
         try {
             JsonNode root = mapper.readTree(rawResponse);
             if (!root.isObject() || !root.path("topics").isArray()) throw invalid("LLM must return a topics array");
@@ -147,8 +150,9 @@ public class DocumentOrganizationService {
     }
 
     /** Kept deterministic so disabled or malformed model calls never send raw ASR directly to indexing. */
-    static OrganizationResult organize(List<TranscriptSegment> source) {
-        List<Turn> turns = turns(source); List<Topic> topics = new ArrayList<>(); TopicBuilder current = null;
+    static OrganizationResult organize(List<TranscriptSegment> source) { return organize(source, Map.of()); }
+    static OrganizationResult organize(List<TranscriptSegment> source, Map<String, String> speakerNames) {
+        List<Turn> turns = turns(source, speakerNames); List<Topic> topics = new ArrayList<>(); TopicBuilder current = null;
         for (Turn turn : turns) {
             if (current == null || turn.startMs() - current.endMs > 30_000 || current.characterCount() + turn.text().length() > 2_400) {
                 if (current != null) topics.add(current.build(topics.size() + 1));
@@ -159,16 +163,18 @@ public class DocumentOrganizationService {
         return new OrganizationResult("整理文档", null, "FALLBACK", turns, List.copyOf(topics), plainText("整理文档", null, topics), List.of());
     }
     static OrganizationResult fallbackFor(OrganizationWork work) {
-        OrganizationResult fallback = organize(work.segments());
+        OrganizationResult fallback = organize(work.segments(), work.speakerNames());
         return new OrganizationResult(work.document().getTitle(), fallback.summary(), fallback.mode(), fallback.turns(), fallback.topics(),
                 plainText(work.document().getTitle(), fallback.summary(), fallback.topics()), fallback.roleSuggestions());
     }
 
-    static List<Turn> turns(List<TranscriptSegment> source) {
+    static List<Turn> turns(List<TranscriptSegment> source) { return turns(source, Map.of()); }
+    static List<Turn> turns(List<TranscriptSegment> source, Map<String, String> speakerNames) {
         List<Turn> output = new ArrayList<>(); TurnBuilder current = null;
         for (TranscriptSegment segment : source) {
             String text = clean(segment.getTextContent()); if (text.isBlank()) continue;
-            String speaker = segment.getAsrSpeakerId() == null || segment.getAsrSpeakerId().isBlank() ? "SPEAKER_UNKNOWN" : segment.getAsrSpeakerId();
+            String speakerId = segment.getAsrSpeakerId() == null || segment.getAsrSpeakerId().isBlank() ? "SPEAKER_UNKNOWN" : segment.getAsrSpeakerId();
+            String speaker = speakerNames.getOrDefault(speakerId, speakerId);
             if (current != null && current.speaker.equals(speaker) && segment.getStartMs() - current.endMs <= 5_000 && current.characterCount() + text.length() <= 2_400) current.append(segment, text);
             else { if (current != null) output.add(current.build()); current = new TurnBuilder(speaker, segment, text); }
         }
@@ -178,6 +184,14 @@ public class DocumentOrganizationService {
     @Transactional public void fail(String documentId, String message) { documents.findById(documentId).ifPresent(document -> { document.fail(message); documents.save(document); }); }
     @Transactional(readOnly = true) public OrganizedDocument ownedDocument(String ownerId, String documentId) {
         return documents.findById(documentId).filter(value -> value.getOwnerId().equals(ownerId)).orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORGANIZED_DOCUMENT_NOT_FOUND", "Organized document was not found"));
+    }
+    @Transactional(readOnly = true) public OrganizedDocument ownedReadyDocument(String ownerId, String taskId) {
+        OrganizedDocument document = documents.findTopByOwnerIdAndTranscriptionTaskIdOrderByUpdatedAtDesc(ownerId, taskId)
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "ORGANIZED_DOCUMENT_NOT_FOUND", "Formal document was not found"));
+        if (document.getStatus() != OrganizedDocumentStatus.READY) {
+            throw new ApiException(HttpStatus.CONFLICT, "FORMAL_DOCUMENT_NOT_READY", "Wait for the formal document before building the knowledge base");
+        }
+        return document;
     }
     @Transactional(readOnly = true) public List<OrganizedDocumentBlock> ownedBlocks(String ownerId, String documentId) { ownedDocument(ownerId, documentId); return blocks.findByOrganizedDocumentIdOrderByBlockIndex(documentId); }
     @Transactional public void retryForTask(String ownerId, String taskId) {
@@ -257,7 +271,7 @@ public class DocumentOrganizationService {
         private Topic build(int number) { return new Topic("主题 " + number, null, startMs, endMs, List.copyOf(ids), List.copyOf(units), text.toString()); }
     }
 
-    public record OrganizationWork(OrganizedDocument document, List<TranscriptSegment> segments) { }
+    public record OrganizationWork(OrganizedDocument document, List<TranscriptSegment> segments, Map<String, String> speakerNames) { }
     public record ModelAction(boolean cached, String value) { static ModelAction cached(String response) { return new ModelAction(true, response); } static ModelAction call(String prompt) { return new ModelAction(false, prompt); } }
     public record Turn(String speaker, long startMs, long endMs, List<String> segmentIds, String text) { }
     public record ContentUnit(OrganizedBlockType type, String text, long startMs, long endMs, List<String> segmentIds, List<String> speakerIds) { }

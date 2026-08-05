@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { api, hashFile, key, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AnalysisEvidence, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeEvidence, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PipelineStage, type Segment, type Speaker, type Task, type WorkspaceSnapshot } from './api'
 
 type AgentScope = 'CURRENT_DOCUMENT' | 'CROSS_DOCUMENT'
@@ -37,6 +37,10 @@ const asking = ref(false)
 const audio = ref<HTMLAudioElement | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 const speakerDiarization = ref(true)
+const speakerCount = ref<number | null>(null)
+const savingSpeakerId = ref<string | null>(null)
+const startingFormalDocument = ref(false)
+const startingKnowledgeBuild = ref(false)
 const workspaceView = ref<WorkspaceView>('library')
 const detailTab = ref<DetailTab>('transcript')
 const mobileAgentOpen = ref(false)
@@ -57,6 +61,8 @@ const canAnalyzeCurrent = computed(() => Boolean(selected.value?.transcriptReady
 const canCancelTask = computed(() => Boolean(selected.value && !['SUCCEEDED', 'CANCELLED'].includes(selected.value.status)))
 const canResubmitTask = computed(() => selected.value?.status === 'CANCELLED')
 const canSummarize = computed(() => selected.value?.organizedDocument?.status === 'READY')
+const canCreateFormalDocument = computed(() => selected.value?.status === 'WAITING_FOR_FORMAL_DOCUMENT' && !selected.value?.organizedDocument)
+const canCreateKnowledgeBuild = computed(() => selected.value?.status === 'WAITING_FOR_KNOWLEDGE_BUILD' && selected.value?.organizedDocument?.status === 'READY')
 const activeRun = computed(() => scope.value === 'CURRENT_DOCUMENT' ? analysis.value?.run : knowledge.value?.run)
 const activeEvidence = computed(() => scope.value === 'CURRENT_DOCUMENT' ? analysis.value?.evidence || [] : knowledge.value?.evidence || [])
 const activeRunUsage = computed(() => scope.value === 'CURRENT_DOCUMENT'
@@ -142,12 +148,15 @@ async function choose(task: Task) {
   audioUrl.value = URL.createObjectURL(audioResponse.data)
 }
 function topicChildren(topicId: string) { return organized.value?.blocks.filter(block => block.parentBlockId === topicId) || [] }
-async function confirmSpeaker(speaker: Speaker, role: string) {
+async function saveSpeakerName(speaker: Speaker) {
   if (!selected.value) return
-  const { data } = await api.put<Speaker>(`/transcription-tasks/${selected.value.id}/speakers/${speaker.speakerId}`, { role })
-  speakers.value = speakers.value.map(value => value.speakerId === data.speakerId ? data : value)
-  const { data: transcript } = await api.get<Segment[]>(`/transcription-tasks/${selected.value.id}/segments`)
-  segments.value = transcript
+  savingSpeakerId.value = speaker.speakerId
+  try {
+    const { data } = await api.put<Speaker>(`/transcription-tasks/${selected.value.id}/speakers/${speaker.speakerId}`, { displayName: speaker.displayName || null })
+    speakers.value = speakers.value.map(value => value.speakerId === data.speakerId ? data : value)
+    const { data: transcript } = await api.get<Segment[]>(`/transcription-tasks/${selected.value.id}/segments`)
+    segments.value = transcript
+  } finally { savingSpeakerId.value = null }
 }
 function evidenceLabel(citation: { chunkId?: string; segmentId: string }) {
   const evidence = (activeEvidence.value as KnowledgeEvidence[]).find(item => item.chunkId === citation.chunkId && item.segmentId === citation.segmentId)
@@ -178,7 +187,7 @@ async function upload() {
     }
     phase = 'task'; progress.value = '正在创建异步处理任务…'
     const { data: task } = await api.post<Task>(`/uploads/intents/${intent.data.audioBlobId}/complete`, {
-      asrConfig: { diarizationEnabled: speakerDiarization.value },
+      asrConfig: { diarizationEnabled: speakerDiarization.value, speakerCount: speakerCount.value || null },
       clientImportStartedAt: new Date(startedAt).toISOString()
     }, { headers: { 'Idempotency-Key': key() } })
     file.value = null
@@ -188,6 +197,26 @@ async function upload() {
     progress.value = `导入完成，用时 ${formatDuration(Date.now() - startedAt)}；后续阶段会自动更新。`
   } catch (error: unknown) { progress.value = uploadErrorMessage(error, phase) }
   finally { uploading.value = false; importStartedAt.value = null }
+}
+async function createFormalDocument() {
+  if (!selected.value) return
+  startingFormalDocument.value = true
+  taskActionError.value = ''
+  try {
+    const { data } = await api.post<Task>(`/transcription-tasks/${selected.value.id}/formal-document`, undefined, { headers: { 'Idempotency-Key': key() } })
+    upsertTask(data)
+  } catch (error: any) { taskActionError.value = error.response?.data?.message || '无法开始生成正式文档。' }
+  finally { startingFormalDocument.value = false }
+}
+async function createKnowledgeBuild() {
+  if (!selected.value) return
+  startingKnowledgeBuild.value = true
+  taskActionError.value = ''
+  try {
+    const { data } = await api.post<Task>(`/transcription-tasks/${selected.value.id}/knowledge-build`, undefined, { headers: { 'Idempotency-Key': key() } })
+    upsertTask(data)
+  } catch (error: any) { taskActionError.value = error.response?.data?.message || '无法开始建立知识库。' }
+  finally { startingKnowledgeBuild.value = false }
 }
 async function askAgent() {
   if (!question.value.trim()) return
@@ -451,6 +480,7 @@ function logout() {
   summaryByTaskId.value = {}
   workspaceView.value = 'library'
 }
+watch(speakerDiarization, enabled => { if (!enabled) speakerCount.value = null })
 onMounted(() => {
   clockTimer = window.setInterval(() => { clockNow.value = Date.now() }, 1000)
   if (token.value) { void loadWorkspace(); void connectProgressEvents() }
@@ -514,6 +544,7 @@ onBeforeUnmount(() => {
         <section v-if="file || progress" class="upload-queue" aria-live="polite">
           <div v-if="file" class="picked-file"><span class="file-glyph" aria-hidden="true">♫</span><div><b>{{ file.name }}</b><small>{{ formatFileSize(file.size) }}</small></div></div>
           <label v-if="file" class="diarization-option"><input v-model="speakerDiarization" type="checkbox"> 识别说话人 <small>仅单声道</small></label>
+          <label v-if="file && speakerDiarization" class="speaker-count-option">说话人数（可选）<input v-model.number="speakerCount" type="number" min="2" max="100" placeholder="自动判断"></label>
           <p v-if="progress">{{ progress }}<b v-if="uploading" class="upload-timer"> · 导入用时 {{ formatDuration(importElapsedMs) }}</b></p>
           <button v-if="file" class="primary upload-start" :disabled="uploading" @click="upload">{{ uploading ? '正在导入' : '上传并转写' }} <span>→</span></button>
         </section>
@@ -537,7 +568,7 @@ onBeforeUnmount(() => {
         <nav class="breadcrumb" aria-label="当前位置"><button type="button" @click="showLibrary">音频资料库</button><span>/</span><b>{{ selectedTitle }}</b></nav>
         <header class="document-head">
           <div><p class="eyebrow">DOCUMENT LISTENING</p><h2>{{ selectedTitle }}</h2></div>
-          <div v-if="selected" class="document-actions"><span class="state-pill">{{ selected.progressPercent || 0 }}% · {{ stageText(selected.currentStage) }}</span><button v-if="canCancelTask" class="text-action" @click="cancelTask">取消任务</button><button v-if="canResubmitTask" class="stage-retry resubmit-task" :disabled="resubmittingTask" @click="resubmitTask">{{ resubmittingTask ? '正在重新提交…' : '重新提交转写' }}</button><button class="text-action danger" @click="deleteTask">删除录音</button><p v-if="taskActionError" class="task-action-error" role="alert">{{ taskActionError }}</p></div>
+          <div v-if="selected" class="document-actions"><span class="state-pill">{{ selected.progressPercent || 0 }}% · {{ stageText(selected.currentStage) }}</span><button v-if="canCreateFormalDocument" class="stage-retry" :disabled="startingFormalDocument" @click="createFormalDocument">{{ startingFormalDocument ? '正在开始…' : '生成正式文档' }}</button><button v-if="canCreateKnowledgeBuild" class="stage-retry" :disabled="startingKnowledgeBuild" @click="createKnowledgeBuild">{{ startingKnowledgeBuild ? '正在开始…' : '建立知识库' }}</button><button v-if="canCancelTask" class="text-action" @click="cancelTask">取消任务</button><button v-if="canResubmitTask" class="stage-retry resubmit-task" :disabled="resubmittingTask" @click="resubmitTask">{{ resubmittingTask ? '正在重新提交…' : '重新提交转写' }}</button><button class="text-action danger" @click="deleteTask">删除录音</button><p v-if="taskActionError" class="task-action-error" role="alert">{{ taskActionError }}</p></div>
         </header>
 
         <section v-if="selected" class="player-surface" aria-label="音频播放">
@@ -559,15 +590,15 @@ onBeforeUnmount(() => {
           </details>
 
           <nav class="detail-tabs" role="tablist" aria-label="文档内容">
-            <button type="button" role="tab" :aria-selected="detailTab === 'transcript'" :class="{ active: detailTab === 'transcript' }" @click="selectDetailTab('transcript')"><span class="tab-icon">文</span><span><b>转写内容</b><small>逐段原始听记</small></span></button>
+            <button type="button" role="tab" :aria-selected="detailTab === 'transcript'" :class="{ active: detailTab === 'transcript' }" @click="selectDetailTab('transcript')"><span class="tab-icon">原</span><span><b>原始文档</b><small>完整 ASR 转写</small></span></button>
+            <button type="button" role="tab" :aria-selected="detailTab === 'organized'" :class="{ active: detailTab === 'organized' }" @click="selectDetailTab('organized')"><span class="tab-icon">正</span><span><b>正式文档</b><small>清洗与 AI 整理</small></span></button>
             <button type="button" role="tab" :aria-selected="detailTab === 'summary'" :class="{ active: detailTab === 'summary' }" @click="selectDetailTab('summary')"><span class="tab-icon">AI</span><span><b>AI 摘要</b><small>重点与结论</small></span></button>
-            <button type="button" role="tab" :aria-selected="detailTab === 'organized'" :class="{ active: detailTab === 'organized' }" @click="selectDetailTab('organized')"><span class="tab-icon">整</span><span><b>整理内容</b><small>按主题浏览</small></span></button>
           </nav>
 
           <section v-if="detailTab === 'transcript'" class="detail-content transcript" role="tabpanel">
-            <div v-if="speakers.length" class="speaker-roster"><span>说话人角色</span><label v-for="speaker in speakers" :key="speaker.speakerId"><b>{{ speaker.displayName || speaker.speakerId }}</b><select :value="speaker.confirmedRole || speaker.resolvedRole" @change="confirmSpeaker(speaker, ($event.target as HTMLSelectElement).value)"><option value="UNKNOWN">未确认</option><option value="INTERVIEWER">面试官</option><option value="CANDIDATE">候选人</option><option value="PARTICIPANT">参会者</option></select></label></div>
+            <div v-if="speakers.length" class="speaker-roster"><span>说话人名称</span><label v-for="speaker in speakers" :key="speaker.speakerId"><b>{{ speaker.speakerId }}</b><input v-model="speaker.displayName" maxlength="128" placeholder="填写名称（可选）" @keyup.enter="saveSpeakerName(speaker)" @blur="saveSpeakerName(speaker)"><button type="button" class="speaker-save" :disabled="savingSpeakerId === speaker.speakerId" @click="saveSpeakerName(speaker)">{{ savingSpeakerId === speaker.speakerId ? '保存中' : '保存' }}</button></label></div>
             <button v-for="segment in segments" :key="segment.id" :id="`segment-${segment.id}`" class="segment" type="button" @click="seekToSegment(segment)"><time>{{ timecode(segment.startMs) }}</time><span><b>{{ segment.speaker || '说话人' }}</b><p>{{ segment.text }}</p></span><i aria-hidden="true">↗</i></button>
-            <div v-if="!segments.length" class="content-empty"><span aria-hidden="true">…</span><b>{{ selected.currentStage === 'KNOWLEDGE_INDEX' ? '听记已保存，正在建立可跨文档检索的知识索引。' : '转写尚未准备好。' }}</b><p>完成后会显示带说话人和时间戳的可回跳听记。</p></div>
+            <div v-if="!segments.length" class="content-empty"><span aria-hidden="true">…</span><b>原始文档尚未准备好。</b><p>完成后会显示带说话人和时间戳的完整 ASR 转写。</p></div>
           </section>
 
           <section v-else-if="detailTab === 'summary'" class="detail-content summary-content" role="tabpanel">
@@ -583,7 +614,7 @@ onBeforeUnmount(() => {
 
           <section v-else class="detail-content organized-content" role="tabpanel">
             <template v-if="organized?.document.status === 'READY'"><div v-if="organized.document.summary" class="organized-summary"><b>文档摘要</b><p>{{ organized.document.summary }}</p></div><article v-for="topic in organizedTopics" :key="topic.id" class="organized-block"><button class="topic-link" @click="seekToTime(topic.startMs, true)">{{ topic.topic || '整理片段' }} <span>{{ timecode(topic.startMs) }}</span></button><p v-if="topic.summary" class="topic-summary">{{ topic.summary }}</p><article v-for="item in topicChildren(topic.id)" :key="item.id" class="organized-unit"><small>{{ item.type === 'QA_PAIR' ? '问答' : '对话' }}</small><p>{{ item.text }}</p></article></article></template>
-            <div v-else class="content-empty"><span aria-hidden="true">◎</span><b>整理内容尚未准备好。</b><p>系统会在转写完成后按主题整理内容，方便快速回顾。</p></div>
+            <div v-else class="content-empty"><span aria-hidden="true">◎</span><b>正式文档尚未准备好。</b><p>请在原始文档完成后手动生成清洗、整理后的正式文档。</p></div>
           </section>
         </template>
       </section>

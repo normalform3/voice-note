@@ -5,6 +5,7 @@ import com.voicenote.repository.AudioBlobRepository;
 import com.voicenote.repository.TaskAttemptRepository;
 import com.voicenote.repository.TranscriptionTaskRepository;
 import com.voicenote.web.ApiException;
+import com.voicenote.provider.ProviderException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
@@ -14,7 +15,7 @@ import java.util.List;
 
 @Service
 public class TranscriptionTaskService {
-    private static final String PIPELINE_VERSION = "three-phase-v1";
+    private static final String PIPELINE_VERSION = "manual-gates-v2";
     private static final String CREATE_OPERATION = "CREATE_TRANSCRIPTION_TASK";
     private static final String RETRY_OPERATION = "RETRY_TRANSCRIPTION_TASK";
     private static final String CANCEL_OPERATION = "CANCEL_TRANSCRIPTION_TASK";
@@ -27,12 +28,13 @@ public class TranscriptionTaskService {
     private final PipelineProgressService pipeline;
     private final KnowledgeDocumentService knowledgeDocuments;
     private final DocumentOrganizationService organizedDocuments;
+    private final KnowledgeVectorStore vectors;
 
     public TranscriptionTaskService(TranscriptionTaskRepository tasks, TaskAttemptRepository attempts, AudioBlobRepository blobs,
                                     IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, PipelineProgressService pipeline,
-                                    KnowledgeDocumentService knowledgeDocuments, DocumentOrganizationService organizedDocuments) {
+                                    KnowledgeDocumentService knowledgeDocuments, DocumentOrganizationService organizedDocuments, KnowledgeVectorStore vectors) {
         this.tasks = tasks; this.attempts = attempts; this.blobs = blobs; this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper;
-        this.pipeline = pipeline; this.knowledgeDocuments = knowledgeDocuments; this.organizedDocuments = organizedDocuments;
+        this.pipeline = pipeline; this.knowledgeDocuments = knowledgeDocuments; this.organizedDocuments = organizedDocuments; this.vectors = vectors;
     }
 
     @Transactional
@@ -126,6 +128,55 @@ public class TranscriptionTaskService {
     }
 
     @Transactional
+    public PipelineProgressService.TaskProgressView createFormalDocument(String ownerId, String key, String taskId) {
+        IdempotencyRecord record = idempotency.reserve(ownerId, "CREATE_FORMAL_DOCUMENT", key, Hashing.sha256(taskId));
+        if (record.getResourceId() != null) return pipeline.ownedView(ownerId, taskId);
+        TranscriptionTask task = ownedTask(ownerId, taskId);
+        if (!task.isTranscriptReady()) throw new ApiException(HttpStatus.CONFLICT, "RAW_DOCUMENT_NOT_READY", "Wait for the original document before creating a formal document");
+        if (task.getStatus() == TaskStatus.WAITING_FOR_KNOWLEDGE_BUILD || task.getStatus() == TaskStatus.SUCCEEDED) {
+            PipelineProgressService.TaskProgressView response = pipeline.ownedView(ownerId, taskId);
+            completeIdempotency(record, taskId, response); return response;
+        }
+        AudioBlob audio = blobs.findById(task.getAudioBlobId()).orElseThrow();
+        organizedDocuments.createForTranscript(task, audio);
+        PipelineProgressService.TaskProgressView response = pipeline.ownedView(ownerId, taskId);
+        completeIdempotency(record, taskId, response); return response;
+    }
+
+    @Transactional
+    public PipelineProgressService.TaskProgressView createKnowledgeBuild(String ownerId, String key, String taskId) {
+        IdempotencyRecord record = idempotency.reserve(ownerId, "CREATE_KNOWLEDGE_BUILD", key, Hashing.sha256(taskId));
+        if (record.getResourceId() != null) return pipeline.ownedView(ownerId, taskId);
+        TranscriptionTask task = ownedTask(ownerId, taskId);
+        var organized = organizedDocuments.ownedReadyDocument(ownerId, taskId);
+        try { vectors.ensureAvailable(); }
+        catch (ProviderException exception) {
+            throw new ApiException(HttpStatus.SERVICE_UNAVAILABLE, exception.getCode(), "知识库服务暂时不可用，请确认 Qdrant 已启动后再试。");
+        }
+        if (!pipeline.begin(taskId, PipelineStage.KNOWLEDGE_PREPARE)) {
+            throw new ApiException(HttpStatus.CONFLICT, "KNOWLEDGE_BUILD_NOT_READY", "Knowledge build cannot start in the current task state");
+        }
+        try {
+            knowledgeDocuments.createForOrganizedDocument(organized, List.of());
+            pipeline.succeeded(taskId, PipelineStage.KNOWLEDGE_PREPARE, "{\"organizedDocumentId\":\"" + organized.getId() + "\"}", PipelineStage.KNOWLEDGE_INDEX);
+        } catch (RuntimeException exception) {
+            pipeline.failed(taskId, PipelineStage.KNOWLEDGE_PREPARE, "KNOWLEDGE_PREPARE_FAILED", safeMessage(exception), false);
+            throw exception;
+        }
+        PipelineProgressService.TaskProgressView response = pipeline.ownedView(ownerId, taskId);
+        completeIdempotency(record, taskId, response); return response;
+    }
+
+    private void completeIdempotency(IdempotencyRecord record, String taskId, PipelineProgressService.TaskProgressView response) {
+        try { idempotency.complete(record, taskId, mapper.writeValueAsString(response)); }
+        catch (Exception exception) { throw new IllegalStateException("Cannot persist idempotent response", exception); }
+    }
+    private static String safeMessage(RuntimeException exception) {
+        String message = exception.getMessage();
+        return message == null || message.isBlank() ? exception.getClass().getSimpleName() : message;
+    }
+
+    @Transactional
     public void ensureFirstAttempt(String taskId) {
         TranscriptionTask task = tasks.findById(taskId).orElseThrow();
         if (task.getStatus() == TaskStatus.FAILED || task.getStatus() == TaskStatus.CANCELLED || task.getStatus() == TaskStatus.SUCCEEDED) return;
@@ -149,6 +200,9 @@ public class TranscriptionTaskService {
             boolean normalizedDiarization = diarizationEnabled == null || diarizationEnabled;
             if (speakerCount != null && (speakerCount < 2 || speakerCount > 100)) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "INVALID_SPEAKER_COUNT", "speakerCount must be between 2 and 100");
+            }
+            if (!normalizedDiarization && speakerCount != null) {
+                throw new ApiException(HttpStatus.BAD_REQUEST, "SPEAKER_COUNT_REQUIRES_DIARIZATION", "speakerCount requires speaker diarization to be enabled");
             }
             return new AsrConfig(languageHints == null || languageHints.isEmpty() ? List.of("zh", "en") : languageHints.stream().sorted().toList(), normalizedDiarization, speakerCount);
         }
