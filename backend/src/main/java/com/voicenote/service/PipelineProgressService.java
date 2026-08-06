@@ -3,6 +3,8 @@ package com.voicenote.service;
 import com.voicenote.domain.*;
 import com.voicenote.config.AppProperties;
 import com.voicenote.repository.KnowledgeDocumentRepository;
+import com.voicenote.repository.KnowledgeIndexStageAttemptRepository;
+import com.voicenote.repository.KnowledgeIndexVersionRepository;
 import com.voicenote.repository.OrganizedDocumentRepository;
 import com.voicenote.repository.TaskStageAttemptRepository;
 import com.voicenote.repository.TranscriptionTaskRepository;
@@ -19,15 +21,25 @@ public class PipelineProgressService {
     private final TaskStageAttemptRepository stages;
     private final KnowledgeDocumentRepository documents;
     private final OrganizedDocumentRepository organizedDocuments;
+    private final KnowledgeIndexVersionRepository indexVersions;
+    private final KnowledgeIndexStageAttemptRepository indexStages;
     private final ProgressEventPublisher progressEvents;
     private final OutboxService outbox;
     private final AppProperties properties;
 
+    @org.springframework.beans.factory.annotation.Autowired
     public PipelineProgressService(TranscriptionTaskRepository tasks, TaskStageAttemptRepository stages,
                                    KnowledgeDocumentRepository documents, OrganizedDocumentRepository organizedDocuments,
+                                   KnowledgeIndexVersionRepository indexVersions, KnowledgeIndexStageAttemptRepository indexStages,
                                    ProgressEventPublisher progressEvents, OutboxService outbox, AppProperties properties) {
         this.tasks = tasks; this.stages = stages; this.documents = documents; this.organizedDocuments = organizedDocuments;
+        this.indexVersions = indexVersions; this.indexStages = indexStages;
         this.progressEvents = progressEvents; this.outbox = outbox; this.properties = properties;
+    }
+    PipelineProgressService(TranscriptionTaskRepository tasks, TaskStageAttemptRepository stages,
+                            KnowledgeDocumentRepository documents, OrganizedDocumentRepository organizedDocuments,
+                            ProgressEventPublisher progressEvents, OutboxService outbox, AppProperties properties) {
+        this(tasks, stages, documents, organizedDocuments, null, null, progressEvents, outbox, properties);
     }
 
     @Transactional
@@ -148,10 +160,18 @@ public class PipelineProgressService {
                 document.fail(message); organizedDocuments.save(document);
                 failed(document.getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION, "MESSAGE_DELIVERY_FAILED", message, false);
             });
-            case KNOWLEDGE_INDEX_REQUESTED -> documents.findById(event.getAggregateId()).ifPresent(document -> {
-                document.fail(message); documents.save(document);
-                failed(document.getTranscriptionTaskId(), PipelineStage.KNOWLEDGE_INDEX, "MESSAGE_DELIVERY_FAILED", message, false);
-            });
+            case KNOWLEDGE_INDEX_REQUESTED -> {
+                if (indexVersions == null || indexStages == null) break;
+                indexVersions.findById(event.getAggregateId()).ifPresent(index -> documents.findById(index.getKnowledgeDocumentId()).ifPresent(document -> {
+                    index.fail(message); indexVersions.save(index);
+                    KnowledgeIndexStage stage = index.getCurrentStage() == null ? KnowledgeIndexStage.INGEST : index.getCurrentStage();
+                    indexStages.findTopByKnowledgeIndexVersionIdAndStageOrderByAttemptNumberDesc(index.getId(), stage).ifPresent(attempt -> { attempt.fail("MESSAGE_DELIVERY_FAILED", message); indexStages.save(attempt); });
+                    if (!document.hasActiveIndexVersion()) {
+                        document.fail(message); documents.save(document);
+                        failed(document.getTranscriptionTaskId(), PipelineStage.KNOWLEDGE_INDEX, "MESSAGE_DELIVERY_FAILED", message, false);
+                    }
+                }));
+            }
             default -> { }
         }
     }
@@ -259,7 +279,7 @@ public class PipelineProgressService {
                     current.getWaitDurationMs(), totalWait, current.getNextRetryAt(), current.getErrorCode(), current.getErrorMessage(), current.getModelId()));
         }
         KnowledgeDocumentView document = documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(task.getOwnerId(), task.getId(), task.getTranscriptVersion())
-                .map(value -> new KnowledgeDocumentView(value.getId(), value.getTitle(), value.getStatus().name(), value.getFailureMessage())).orElse(null);
+                .map(value -> new KnowledgeDocumentView(value.getId(), value.getTitle(), value.getStatus().name(), value.getFailureMessage(), indexBuild(value.getId()))).orElse(null);
         OrganizedDocumentView organized = organizedDocuments.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(task.getOwnerId(), task.getId(), task.getTranscriptVersion())
                 .map(value -> new OrganizedDocumentView(value.getId(), value.getTitle(), value.getStatus().name(), value.getFailureMessage())).orElse(null);
         List<PipelineStage> retryable = stageViews.stream().filter(stage -> stage.status() == StageAttemptStatus.FAILED || stage.status() == StageAttemptStatus.UNKNOWN || stage.status() == StageAttemptStatus.RETRY_WAIT).map(StageView::stage).toList();
@@ -286,7 +306,21 @@ public class PipelineProgressService {
     private static int progressFor(PipelineStage stage) { return switch (stage) { case UPLOAD_COMPLETED -> 5; case ASR_SUBMIT -> 10; case ASR_POLL -> 40; case TRANSCRIPT_PERSIST, RAW_DOCUMENT_READY -> 60; case DOCUMENT_ORGANIZATION -> 70; case FORMAL_DOCUMENT_READY -> 80; case KNOWLEDGE_PREPARE -> 85; case KNOWLEDGE_INDEX -> 90; case COMPLETED -> 100; }; }
     private static TaskStatus statusFor(PipelineStage stage) { return stage == PipelineStage.UPLOAD_COMPLETED ? TaskStatus.QUEUED : TaskStatus.RUNNING; }
 
-    public record KnowledgeDocumentView(String id, String title, String status, String failureMessage) { }
+    private KnowledgeIndexBuildView indexBuild(String documentId) {
+        if (indexVersions == null || indexStages == null) return null;
+        return indexVersions.findTopByKnowledgeDocumentIdOrderByGenerationDesc(documentId).map(index -> {
+            List<KnowledgeIndexStageView> stages = indexStages.findByKnowledgeIndexVersionIdOrderByQueuedAtAsc(index.getId()).stream()
+                    .map(value -> new KnowledgeIndexStageView(value.getStage().name(), value.getStatus().name(), value.getProgressPercent(), value.getCompletedCount(), value.getTotalCount(), value.getErrorMessage())).toList();
+            int progress = stages.stream().mapToInt(value -> switch (value.stage()) { case "INGEST" -> value.progressPercent() * 15 / 100; case "CHUNK" -> 15 + value.progressPercent() * 25 / 100; case "INDEX" -> 40 + value.progressPercent() * 60 / 100; default -> 0; }).max().orElse(0);
+            if (index.getStatus() == KnowledgeIndexVersionStatus.READY) progress = 100;
+            return new KnowledgeIndexBuildView(index.getId(), index.getStatus().name(), index.getCurrentStage() == null ? null : index.getCurrentStage().name(), progress,
+                    index.getTopicCount(), index.getChunkCount(), index.getIndexedChunkCount(), index.getFailureMessage(), stages);
+        }).orElse(null);
+    }
+    public record KnowledgeIndexStageView(String stage, String status, int progressPercent, int completedCount, int totalCount, String errorMessage) { }
+    public record KnowledgeIndexBuildView(String id, String status, String currentStage, int progressPercent, int topicCount, int chunkCount, int indexedChunkCount,
+                                          String failureMessage, List<KnowledgeIndexStageView> stages) { }
+    public record KnowledgeDocumentView(String id, String title, String status, String failureMessage, KnowledgeIndexBuildView currentBuild) { }
     public record OrganizedDocumentView(String id, String title, String status, String failureMessage) { }
     public record StageView(PipelineStage stage, StageAttemptStatus status, int attemptNumber, Instant queuedAt, Instant startedAt, Instant completedAt,
                             Long waitDurationMs, long totalWaitDurationMs, Instant nextRetryAt, String errorCode, String errorMessage, String modelId) { }

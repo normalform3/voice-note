@@ -66,7 +66,13 @@ app:
   knowledge:
     enabled: ${VOICENOTE_KNOWLEDGE_ENABLED:false}
     qdrant-url: ${VOICENOTE_QDRANT_URL:http://127.0.0.1:6333}
+    qdrant-api-key: ${VOICENOTE_QDRANT_API_KEY:}
     collection: ${VOICENOTE_QDRANT_COLLECTION:voicenote_knowledge}
     chunk-characters: ${VOICENOTE_KNOWLEDGE_CHUNK_CHARACTERS:2000}
+    short-topic-tokens: ${VOICENOTE_KNOWLEDGE_SHORT_TOPIC_TOKENS:200}
     chunk-target-tokens: ${VOICENOTE_KNOWLEDGE_CHUNK_TARGET_TOKENS:800}
     chunk-max-tokens: ${VOICENOTE_KNOWLEDGE_CHUNK_MAX_TOKENS:1200}
+    retrieval-prefetch-limit: ${VOICENOTE_KNOWLEDGE_RETRIEVAL_PREFETCH_LIMIT:50}
+    retrieval-seed-limit: ${VOICENOTE_KNOWLEDGE_RETRIEVAL_SEED_LIMIT:4}
+    retrieval-context-max-chunks: ${VOICENOTE_KNOWLEDGE_CONTEXT_MAX_CHUNKS:12}
+    retrieval-context-max-tokens: ${VOICENOTE_KNOWLEDGE_CONTEXT_MAX_TOKENS:10000}

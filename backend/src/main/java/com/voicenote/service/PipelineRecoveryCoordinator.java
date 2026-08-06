@@ -38,8 +38,9 @@ public class PipelineRecoveryCoordinator {
                 String documentId = organizationState.recoverForTask(retry.taskId());
                 if (documentId != null) organizedDocuments.process(documentId);
             } else {
-                String documentId = knowledgeState.recoverForTask(retry.taskId());
-                if (documentId != null) knowledgeIndex.process(documentId);
+                // Rebuilds are durable index-version jobs. A user retry creates a fresh queued version,
+                // which recoverQueued() will pick up without reopening a completed audio task.
+                knowledgeIndex.recoverQueued();
             }
         }
         asr.activateDueRetries();

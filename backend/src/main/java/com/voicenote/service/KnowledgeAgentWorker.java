@@ -29,16 +29,13 @@ public class KnowledgeAgentWorker {
         KnowledgeAgentService.RunWork run = runs.claim(runId); if (run == null) return;
         try {
             runs.consumeTool(run.runId());
-            List<KnowledgeSearchService.SearchHit> hits = knowledge.searchKnowledge(run.ownerId(), run.question(), 3);
+            List<KnowledgeSearchService.SearchHit> hits = knowledge.searchKnowledge(run.ownerId(), run.question(), 20);
             if (hits.isEmpty()) {
                 runs.complete(run.runId(), mapper.writeValueAsString(java.util.Map.of("answer", "知识库中没有足够资料回答这个问题。", "findings", List.of())), List.of());
                 return;
             }
-            List<KnowledgeSearchService.ReadableChunk> readable = new ArrayList<>();
-            for (KnowledgeSearchService.SearchHit hit : hits) {
-                runs.consumeTool(run.runId());
-                readable.add(knowledge.readDocumentChunk(run.ownerId(), hit.chunkId()));
-            }
+            runs.consumeTool(run.runId());
+            List<KnowledgeSearchService.ReadableChunk> readable = knowledge.readExpandedContext(run.ownerId(), hits);
             String response = model.complete(prompt(run.question(), readable));
             runs.complete(run.runId(), response, readable);
         } catch (ProviderException exception) { runs.fail(runId, exception.getCode() + ": " + exception.getMessage()); }

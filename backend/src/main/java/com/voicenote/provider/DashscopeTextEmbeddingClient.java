@@ -37,8 +37,7 @@ public class DashscopeTextEmbeddingClient implements TextEmbeddingClient {
             JsonNode embedding = response == null ? null : response.path("output").path("embeddings").path(0);
             if (embedding == null || embedding.isMissingNode()) throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "EMBEDDING_RESPONSE_INVALID", "DashScope returned no embedding");
             List<Double> values = vector(embedding);
-            int tokens = response.path("usage").path("prompt_tokens").asInt(-1);
-            return new EmbeddedDocument(values, tokens < 0 ? null : tokens);
+            return new EmbeddedDocument(values, inputTokens(response));
         } catch (ProviderException exception) { throw exception; }
         catch (RestClientResponseException exception) {
             if (exception.getStatusCode().value() == 429) throw new ProviderException(ProviderException.Kind.RETRYABLE_REJECTION, "EMBEDDING_RATE_LIMIT", "DashScope rate limited embeddings");
@@ -82,5 +81,14 @@ public class DashscopeTextEmbeddingClient implements TextEmbeddingClient {
             throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "EMBEDDING_DIMENSION_INVALID", "DashScope returned an unexpected embedding dimension");
         }
         return values;
+    }
+
+    private static Integer inputTokens(JsonNode response) {
+        JsonNode usage = response == null ? null : response.path("usage");
+        if (usage == null || usage.isMissingNode()) return null;
+        int promptTokens = usage.path("prompt_tokens").asInt(-1);
+        if (promptTokens >= 0) return promptTokens;
+        int totalTokens = usage.path("total_tokens").asInt(-1);
+        return totalTokens < 0 ? null : totalTokens;
     }
 }

@@ -32,7 +32,7 @@ public class ProgressEventsController {
         UserPrincipal user = CurrentUser.require(authentication);
         WorkspaceSnapshot snapshot = new WorkspaceSnapshot(
                 pipeline.ownedViews(user.id()),
-                documents.ownedDocuments(user.id()).stream().map(KnowledgeDocumentController.DocumentView::from).toList(),
+                documents.ownedDocuments(user.id()).stream().map(document -> KnowledgeDocumentController.DocumentView.from(document, documents.currentBuild(document.getId()))).toList(),
                 analyses.ownedRuns(user.id()).stream().map(AnalysisService.AnalysisView::from).toList(),
                 knowledge.ownedRuns(user.id()).stream().map(KnowledgeAgentService.KnowledgeRunView::from).toList());
         return hub.subscribe(user.id(), snapshot);

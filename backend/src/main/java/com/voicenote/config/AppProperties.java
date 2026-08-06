@@ -111,21 +111,39 @@ public class AppProperties {
     public static class Knowledge {
         private boolean enabled;
         private String qdrantUrl;
+        private String qdrantApiKey;
         private String collection = "voicenote_knowledge";
         private int chunkCharacters = 2000;
+        private int shortTopicTokens = 200;
         private int chunkTargetTokens = 800;
         private int chunkMaxTokens = 1200;
+        private int retrievalPrefetchLimit = 50;
+        private int retrievalSeedLimit = 4;
+        private int retrievalContextMaxChunks = 12;
+        private int retrievalContextMaxTokens = 10_000;
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
         public String getQdrantUrl() { return qdrantUrl; }
         public void setQdrantUrl(String qdrantUrl) { this.qdrantUrl = qdrantUrl; }
+        public String getQdrantApiKey() { return qdrantApiKey; }
+        public void setQdrantApiKey(String qdrantApiKey) { this.qdrantApiKey = qdrantApiKey; }
         public String getCollection() { return collection; }
         public void setCollection(String collection) { this.collection = collection; }
         public int getChunkCharacters() { return chunkCharacters; }
         public void setChunkCharacters(int chunkCharacters) { this.chunkCharacters = chunkCharacters; }
+        public int getShortTopicTokens() { return shortTopicTokens; }
+        public void setShortTopicTokens(int shortTopicTokens) { this.shortTopicTokens = shortTopicTokens; }
         public int getChunkTargetTokens() { return chunkTargetTokens; }
         public void setChunkTargetTokens(int chunkTargetTokens) { this.chunkTargetTokens = chunkTargetTokens; }
         public int getChunkMaxTokens() { return chunkMaxTokens; }
         public void setChunkMaxTokens(int chunkMaxTokens) { this.chunkMaxTokens = chunkMaxTokens; }
+        public int getRetrievalPrefetchLimit() { return retrievalPrefetchLimit; }
+        public void setRetrievalPrefetchLimit(int retrievalPrefetchLimit) { this.retrievalPrefetchLimit = retrievalPrefetchLimit; }
+        public int getRetrievalSeedLimit() { return retrievalSeedLimit; }
+        public void setRetrievalSeedLimit(int retrievalSeedLimit) { this.retrievalSeedLimit = retrievalSeedLimit; }
+        public int getRetrievalContextMaxChunks() { return retrievalContextMaxChunks; }
+        public void setRetrievalContextMaxChunks(int retrievalContextMaxChunks) { this.retrievalContextMaxChunks = retrievalContextMaxChunks; }
+        public int getRetrievalContextMaxTokens() { return retrievalContextMaxTokens; }
+        public void setRetrievalContextMaxTokens(int retrievalContextMaxTokens) { this.retrievalContextMaxTokens = retrievalContextMaxTokens; }
     }
 }

@@ -1,11 +1,12 @@
 package com.voicenote.service;
 
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.voicenote.config.AppProperties;
 import com.voicenote.domain.KnowledgeChunk;
 import com.voicenote.domain.KnowledgeDocument;
+import com.voicenote.domain.KnowledgeIndexVersion;
 import com.voicenote.provider.ProviderException;
 import org.springframework.boot.autoconfigure.condition.ConditionalOnProperty;
 import org.springframework.http.MediaType;
@@ -27,7 +28,10 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
 
     public QdrantKnowledgeVectorStore(AppProperties properties, ObjectMapper mapper) {
         this.properties = properties; this.mapper = mapper;
-        this.client = RestClient.builder().baseUrl(properties.getKnowledge().getQdrantUrl()).build();
+        RestClient.Builder builder = RestClient.builder().baseUrl(properties.getKnowledge().getQdrantUrl());
+        String apiKey = properties.getKnowledge().getQdrantApiKey();
+        if (apiKey != null && !apiKey.isBlank()) builder.defaultHeader("api-key", apiKey);
+        this.client = builder.build();
     }
 
     @Override public void ensureAvailable() {
@@ -42,23 +46,21 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
                 "sparse_vectors", Map.of(BM25, Map.of("modifier", "idf")));
         try { client.put().uri("/collections/{collection}", properties.getKnowledge().getCollection()).contentType(MediaType.APPLICATION_JSON).body(body).retrieve().toBodilessEntity(); }
         catch (RestClientResponseException exception) { if (exception.getStatusCode().value() != 409) throw unavailable(exception); }
-        createPayloadIndex("ownerId"); createPayloadIndex("documentId"); createPayloadIndex("taskId");
+        createPayloadIndex("ownerId"); createPayloadIndex("documentId"); createPayloadIndex("indexVersionId"); createPayloadIndex("searchable");
     }
 
-    @Override public void upsert(KnowledgeDocument document, KnowledgeChunk chunk, List<Double> denseVector) {
+    @Override public void upsert(KnowledgeDocument document, KnowledgeIndexVersion indexVersion, KnowledgeChunk chunk, List<Double> denseVector, List<String> topicIds) {
         try {
-            List<String> segmentIds = mapper.readValue(chunk.getSegmentIds(), new TypeReference<>() { });
-            List<String> blockIds = chunk.getOrganizedDocumentBlockIds() == null ? List.of() : mapper.readValue(chunk.getOrganizedDocumentBlockIds(), new TypeReference<>() { });
             List<String> speakerIds = chunk.getSpeakerIds() == null ? List.of() : mapper.readValue(chunk.getSpeakerIds(), new TypeReference<>() { });
-            List<String> contextSegmentIds = chunk.getContextSegmentIds() == null ? List.of() : mapper.readValue(chunk.getContextSegmentIds(), new TypeReference<>() { });
             Map<String, Object> bm25 = new LinkedHashMap<>();
             bm25.put("text", chunk.getTextContent()); bm25.put("model", "qdrant/bm25");
             bm25.put("options", Map.of("language", "none", "tokenizer", "multilingual"));
             Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("ownerId", document.getOwnerId()); payload.put("documentId", document.getId()); payload.put("taskId", document.getTranscriptionTaskId());
-            payload.put("chunkId", chunk.getId()); payload.put("segmentIds", segmentIds); payload.put("organizedDocumentBlockIds", blockIds);
+            payload.put("ownerId", document.getOwnerId()); payload.put("documentId", document.getId()); payload.put("indexVersionId", indexVersion.getId());
+            payload.put("chunkId", chunk.getId()); payload.put("topicIds", topicIds); payload.put("chunkIndex", chunk.getChunkIndex());
             payload.put("startMs", chunk.getStartMs()); payload.put("endMs", chunk.getEndMs());
-            payload.put("topic", chunk.getTopicTitle()); payload.put("speakerIds", speakerIds); payload.put("contextSegmentIds", contextSegmentIds);
+            payload.put("speakerIds", speakerIds);
+            payload.put("searchable", false);
             payload.put("tokenCount", chunk.getTokenCount()); payload.put("oversized", chunk.isOversized());
             Map<String, Object> point = Map.of(
                     "id", chunk.getId(),
@@ -81,8 +83,18 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
         catch (RuntimeException exception) { throw unavailable(exception); }
     }
 
+    @Override public void deleteIndexVersion(String ownerId, String indexVersionId) { deleteByFilter(ownerId, "indexVersionId", indexVersionId); }
+    @Override public void setVersionSearchable(String ownerId, String indexVersionId, boolean searchable) {
+        Map<String, Object> filter = filter(ownerId, "indexVersionId", indexVersionId);
+        try {
+            client.post().uri("/collections/{collection}/points/payload?wait=true", properties.getKnowledge().getCollection())
+                    .contentType(MediaType.APPLICATION_JSON).body(Map.of("payload", Map.of("searchable", searchable), "filter", filter)).retrieve().toBodilessEntity();
+        } catch (RestClientResponseException exception) { throw unavailable(exception); }
+        catch (RuntimeException exception) { throw unavailable(exception); }
+    }
+
     @Override public List<RetrievalHit> search(String ownerId, String query, List<Double> denseVector, int limit) {
-        Map<String, Object> body = searchBody(ownerId, query, denseVector, limit);
+        Map<String, Object> body = searchBody(ownerId, query, denseVector, limit, properties.getKnowledge().getRetrievalPrefetchLimit());
         try {
             JsonNode response = client.post().uri("/collections/{collection}/points/query", properties.getKnowledge().getCollection())
                     .contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(JsonNode.class);
@@ -91,7 +103,7 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
             java.util.ArrayList<RetrievalHit> hits = new java.util.ArrayList<>();
             for (JsonNode point : points) {
                 JsonNode payload = point.path("payload");
-                hits.add(new RetrievalHit(payload.path("chunkId").asText(), payload.path("documentId").asText(), payload.path("startMs").asLong(), payload.path("endMs").asLong(), point.path("score").asDouble()));
+                hits.add(new RetrievalHit(payload.path("chunkId").asText(), payload.path("documentId").asText(), payload.path("indexVersionId").asText(), payload.path("startMs").asLong(), payload.path("endMs").asLong(), point.path("score").asDouble()));
             }
             return hits;
         } catch (RestClientResponseException exception) { throw unavailable(exception); }
@@ -99,13 +111,27 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
     }
 
     static Map<String, Object> searchBody(String ownerId, String query, List<Double> denseVector, int limit) {
-        Map<String, Object> filter = Map.of("must", List.of(Map.of("key", "ownerId", "match", Map.of("value", ownerId))));
+        return searchBody(ownerId, query, denseVector, limit, 50);
+    }
+    static Map<String, Object> searchBody(String ownerId, String query, List<Double> denseVector, int limit, int prefetchLimit) {
+        Map<String, Object> filter = Map.of("must", List.of(Map.of("key", "ownerId", "match", Map.of("value", ownerId)), Map.of("key", "searchable", "match", Map.of("value", true))));
         Map<String, Object> bm25Query = Map.of("text", query, "model", "qdrant/bm25", "options", Map.of("language", "none", "tokenizer", "multilingual"));
         return Map.of(
                 "prefetch", List.of(
-                        Map.of("query", denseVector, "using", DENSE, "filter", filter, "limit", Math.max(limit * 3, 12)),
-                        Map.of("query", bm25Query, "using", BM25, "filter", filter, "limit", Math.max(limit * 3, 12))),
-                "query", Map.of("fusion", "rrf"), "limit", limit, "with_payload", true);
+                        Map.of("query", denseVector, "using", DENSE, "filter", filter, "limit", Math.max(limit, prefetchLimit)),
+                        Map.of("query", bm25Query, "using", BM25, "filter", filter, "limit", Math.max(limit, prefetchLimit))),
+                "query", Map.of("rrf", Map.of("k", 60)), "limit", limit, "with_payload", true);
+    }
+
+    private void deleteByFilter(String ownerId, String field, String value) {
+        try {
+            client.post().uri("/collections/{collection}/points/delete?wait=true", properties.getKnowledge().getCollection())
+                    .contentType(MediaType.APPLICATION_JSON).body(Map.of("filter", filter(ownerId, field, value))).retrieve().toBodilessEntity();
+        } catch (RestClientResponseException exception) { throw unavailable(exception); }
+        catch (RuntimeException exception) { throw unavailable(exception); }
+    }
+    private static Map<String, Object> filter(String ownerId, String field, String value) {
+        return Map.of("must", List.of(Map.of("key", "ownerId", "match", Map.of("value", ownerId)), Map.of("key", field, "match", Map.of("value", value))));
     }
 
     private void createPayloadIndex(String field) {

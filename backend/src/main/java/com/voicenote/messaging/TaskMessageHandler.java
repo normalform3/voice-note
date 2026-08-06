@@ -47,7 +47,7 @@ public class TaskMessageHandler {
         }
         if (event.getEventType() == EventType.ANALYSIS_REQUESTED) analyses.markQueued(event.getAggregateId());
         if (event.getEventType() == EventType.KNOWLEDGE_INDEX_REQUESTED) {
-            knowledgeDocuments.markQueued(event.getAggregateId());
+            knowledgeDocuments.markQueuedIndex(event.getAggregateId());
             afterCommit(() -> knowledgeIndexWorker.process(event.getAggregateId()));
         }
         if (event.getEventType() == EventType.KNOWLEDGE_RUN_REQUESTED) knowledgeRuns.markQueued(event.getAggregateId());

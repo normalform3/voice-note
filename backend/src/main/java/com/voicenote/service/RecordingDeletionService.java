@@ -27,6 +27,10 @@ public class RecordingDeletionService {
     private final OrganizedDocumentBlockRepository organizedBlocks;
     private final KnowledgeDocumentRepository knowledgeDocuments;
     private final KnowledgeChunkRepository knowledgeChunks;
+    private final KnowledgeIndexVersionRepository knowledgeIndexVersions;
+    private final KnowledgeIndexStageAttemptRepository knowledgeIndexStages;
+    private final KnowledgeTopicRepository knowledgeTopics;
+    private final KnowledgeChunkTopicRepository knowledgeChunkTopics;
     private final KnowledgeRunEvidenceRepository knowledgeEvidence;
     private final KnowledgeRunRepository knowledgeRuns;
     private final AnalysisRunRepository analysisRuns;
@@ -44,7 +48,9 @@ public class RecordingDeletionService {
                                     ProviderInvocationRepository providerInvocations, TaskStageAttemptRepository stages,
                                     TranscriptSegmentRepository segments, TranscriptSpeakerRepository transcriptSpeakers, RawTranscriptDocumentRepository rawTranscriptDocuments, OrganizedDocumentRepository organizedDocuments,
                                     OrganizedDocumentBlockRepository organizedBlocks, KnowledgeDocumentRepository knowledgeDocuments,
-                                    KnowledgeChunkRepository knowledgeChunks, KnowledgeRunEvidenceRepository knowledgeEvidence,
+                                    KnowledgeChunkRepository knowledgeChunks, KnowledgeIndexVersionRepository knowledgeIndexVersions,
+                                    KnowledgeIndexStageAttemptRepository knowledgeIndexStages, KnowledgeTopicRepository knowledgeTopics, KnowledgeChunkTopicRepository knowledgeChunkTopics,
+                                    KnowledgeRunEvidenceRepository knowledgeEvidence,
                                     KnowledgeRunRepository knowledgeRuns, AnalysisRunRepository analysisRuns,
                                     AnalysisEvidenceRepository analysisEvidence, AnalysisInvocationRepository analysisInvocations, OrganizationInvocationRepository organizationInvocations,
                                     OutboxEventRepository outbox, IdempotencyRecordRepository idempotencyRecords,
@@ -52,7 +58,8 @@ public class RecordingDeletionService {
                                     PlatformTransactionManager transactionManager) {
         this.tasks = tasks; this.blobs = blobs; this.attempts = attempts; this.providerInvocations = providerInvocations; this.stages = stages;
         this.segments = segments; this.transcriptSpeakers = transcriptSpeakers; this.rawTranscriptDocuments = rawTranscriptDocuments; this.organizedDocuments = organizedDocuments; this.organizedBlocks = organizedBlocks;
-        this.knowledgeDocuments = knowledgeDocuments; this.knowledgeChunks = knowledgeChunks; this.knowledgeEvidence = knowledgeEvidence;
+        this.knowledgeDocuments = knowledgeDocuments; this.knowledgeChunks = knowledgeChunks; this.knowledgeIndexVersions = knowledgeIndexVersions; this.knowledgeIndexStages = knowledgeIndexStages;
+        this.knowledgeTopics = knowledgeTopics; this.knowledgeChunkTopics = knowledgeChunkTopics; this.knowledgeEvidence = knowledgeEvidence;
         this.knowledgeRuns = knowledgeRuns; this.analysisRuns = analysisRuns; this.analysisEvidence = analysisEvidence;
         this.analysisInvocations = analysisInvocations; this.organizationInvocations = organizationInvocations; this.outbox = outbox; this.idempotencyRecords = idempotencyRecords;
         this.idempotency = idempotency; this.vectors = vectors; this.storage = storage;
@@ -100,7 +107,17 @@ public class RecordingDeletionService {
             outbox.deleteByAggregateTypeAndAggregateId("knowledge_run", runId);
         }
         for (KnowledgeDocument document : documents) {
+            List<KnowledgeIndexVersion> versions = knowledgeIndexVersions.findByKnowledgeDocumentIdOrderByGenerationDesc(document.getId());
+            List<String> chunkIds = knowledgeChunks.findByKnowledgeDocumentIdOrderByChunkIndex(document.getId()).stream().map(KnowledgeChunk::getId).toList();
+            if (!chunkIds.isEmpty()) knowledgeChunkTopics.deleteByKnowledgeChunkIdIn(chunkIds);
             knowledgeChunks.deleteByKnowledgeDocumentId(document.getId());
+            document.clearActiveIndexVersion(); knowledgeDocuments.save(document);
+            for (KnowledgeIndexVersion version : versions) {
+                knowledgeIndexStages.deleteByKnowledgeIndexVersionId(version.getId());
+                knowledgeTopics.deleteByKnowledgeIndexVersionId(version.getId());
+                outbox.deleteByAggregateTypeAndAggregateId("knowledge_index_version", version.getId());
+            }
+            knowledgeIndexVersions.deleteByKnowledgeDocumentId(document.getId());
             outbox.deleteByAggregateTypeAndAggregateId("knowledge_document", document.getId());
         }
         knowledgeDocuments.deleteByTranscriptionTaskId(taskId);

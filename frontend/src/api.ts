@@ -10,16 +10,18 @@ api.interceptors.request.use((config) => {
 export type PipelineStage = 'UPLOAD_COMPLETED' | 'ASR_SUBMIT' | 'ASR_POLL' | 'TRANSCRIPT_PERSIST' | 'RAW_DOCUMENT_READY' | 'DOCUMENT_ORGANIZATION' | 'FORMAL_DOCUMENT_READY' | 'KNOWLEDGE_PREPARE' | 'KNOWLEDGE_INDEX' | 'COMPLETED'
 export type PipelinePhase = 'TRANSCRIPTION' | 'RAW_DOCUMENT_REVIEW' | 'DOCUMENT_ORGANIZATION' | 'FORMAL_DOCUMENT_REVIEW' | 'KNOWLEDGE_BUILD' | 'COMPLETED'
 export type StageAttempt = { stage: PipelineStage; status: string; attemptNumber: number; queuedAt: string; startedAt?: string; completedAt?: string; waitDurationMs?: number; totalWaitDurationMs: number; nextRetryAt?: string; errorCode?: string; errorMessage?: string; modelId?: string }
+export type KnowledgeIndexStage = { stage: 'INGEST' | 'CHUNK' | 'INDEX'; status: string; attemptNumber?: number; progressPercent: number; completedCount: number; totalCount: number; errorMessage?: string }
+export type KnowledgeIndexBuild = { id: string; generation?: number; status: string; currentStage?: 'INGEST' | 'CHUNK' | 'INDEX'; progressPercent: number; topicCount: number; chunkCount: number; indexedChunkCount: number; failureMessage?: string; active?: boolean; stages: KnowledgeIndexStage[] }
+export type KnowledgeDocument = { id: string; transcriptionTaskId: string; title: string; status: string; failureMessage?: string; updatedAt: string; currentBuild?: KnowledgeIndexBuild }
 export type Task = {
   id: string; audioBlobId: string; status: string; currentPhase?: PipelinePhase; currentStage?: PipelineStage; progressPercent?: number; transcriptReady?: boolean
   currentAttemptNumber: number; transcriptVersion: number; failureCode?: string; failureMessage?: string; failedStage?: PipelineStage
-  retryableStages?: PipelineStage[]; stages?: StageAttempt[]; knowledgeDocument?: { id: string; title: string; status: string; failureMessage?: string }; organizedDocument?: { id: string; title: string; status: string; failureMessage?: string }
+  retryableStages?: PipelineStage[]; stages?: StageAttempt[]; knowledgeDocument?: { id: string; title: string; status: string; failureMessage?: string; currentBuild?: KnowledgeIndexBuild }; organizedDocument?: { id: string; title: string; status: string; failureMessage?: string }
 }
 export type Segment = { id: string; index: number; speakerId?: string; speaker?: string; role?: string; startMs: number; endMs: number; text: string }
 export type Speaker = { speakerId: string; suggestedRole: string; suggestedConfidence?: number; confirmedRole?: string; resolvedRole: string; displayName?: string }
 export type OrganizedBlock = { id: string; index: number; type: string; parentBlockId?: string; speaker?: string; speakerIds?: string; topic?: string; summary?: string; startMs: number; endMs: number; sourceSegmentIds: string; sourceFragments?: string; text: string }
 export type OrganizedDocumentDetail = { document: { id: string; taskId: string; title: string; summary?: string; organizationMode?: string; status: string; structureDocument?: string; plainText?: string; failureMessage?: string }; blocks: OrganizedBlock[] }
-export type KnowledgeDocument = { id: string; transcriptionTaskId: string; title: string; status: string; failureMessage?: string; updatedAt: string }
 export type KnowledgeRun = { id: string; status: string; toolCallsUsed: number; maxToolCalls: number; resultDocument?: string; failureMessage?: string }
 export type KnowledgeEvidence = { resultPath: string; documentId: string; chunkId: string; transcriptionTaskId?: string; segmentId: string; topic?: string; speakerId?: string; role?: string; speaker?: string; startMs?: number; endMs?: number; text?: string }
 export type KnowledgeRunDetail = { run: KnowledgeRun; evidence: KnowledgeEvidence[] }
@@ -74,7 +76,7 @@ export const timecode = (milliseconds: number) => {
   return `${String(Math.floor(seconds / 60)).padStart(2, '0')}:${String(seconds % 60).padStart(2, '0')}`
 }
 export const statusText = (status: string) => ({
-  PENDING: '等待调度', QUEUED: '等待处理', INDEXING: '建立索引', READY: '已收录', FAILED: '处理失败',
+  PENDING: '等待调度', QUEUED: '等待处理', INDEXING: '建立索引', INGESTING: '知识库入库', CHUNKING: '按主题切块', READY: '已收录', RETIRED: '已替换', FAILED: '处理失败',
   SUCCEEDED: '已完成', RUNNING: '处理中', PROVIDER_RUNNING: '转写中', SUBMITTING: '提交中', ORGANIZING: '整理中', CANCELLED: '已取消',
   WAITING_FOR_FORMAL_DOCUMENT: '等待生成正式文档', WAITING_FOR_KNOWLEDGE_BUILD: '等待建立知识库',
   FINAL_FAILED: '转写失败', RETRYABLE_FAILED: '自动重试中', SUBMISSION_UNKNOWN: '状态未知', BUDGET_EXHAUSTED: '额度已用尽',

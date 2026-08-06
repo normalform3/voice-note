@@ -120,7 +120,7 @@ npm run dev
 | --- | --- |
 | 启用异步 MQ 消费 | `ROCKETMQ_ENABLED=true`，并配置 `VOICENOTE_ROCKETMQ_NAMESRV`。 |
 | 启用 ASR、问答与向量 Embedding | `DASHSCOPE_ENABLED=true`，设置 `DASHSCOPE_API_KEY`，必要时调整模型名。 |
-| 启用知识文档索引 | `VOICENOTE_KNOWLEDGE_ENABLED=true`，并配置可访问的 `VOICENOTE_QDRANT_URL`。应用会在建立知识库前检查连通性。 |
+| 启用知识文档索引 | `VOICENOTE_KNOWLEDGE_ENABLED=true`，并配置可访问的 `VOICENOTE_QDRANT_URL`；若 Qdrant 启用了 API Key 认证，同时设置 `VOICENOTE_QDRANT_API_KEY`。应用会在建立知识库前检查连通性。 |
 
 `backend/.env.example` 列出了完整的变量、默认模型名和本地端口示例。外部能力关闭时，应用不会主动连接 DashScope 或 RocketMQ；知识构建需要 Qdrant 与 Embedding 同时可用。
 
@@ -151,7 +151,9 @@ Qdrant 由开发或部署环境单独运行。启动后可请求其 `/healthz` �
 
 ### 保留语义边界的知识切片
 
-知识块从整理文档的主题、问答对和叙述区块中生成，而非按固定字符数机械截断。每块保存主题、起止时间、来源转写段、说话人和前文上下文；当主题切换或达到模型返回的 Token 上限时切分，过大的原子单元再下钻到来源片段。这使检索结果能够回到具体的说话人和原文时间范围。
+知识块从整理文档的主题、问答对和叙述区块中生成，而非按固定字符数机械截断。默认一个 Topic 对应一个 Chunk；连续且都很短的 Topic 会合并，以减少过碎召回，同时仍保存全部 Topic 边界、说话人和来源转写段。过大的原子单元再下钻到来源片段，使检索结果能够回到具体的说话人和原文时间范围。
+
+每次建立或重建都创建独立的索引版本。MySQL 保存 Topic/Chunk 快照和“知识库入库、按主题切块、构建检索索引”三个阶段的进度；Qdrant 只保存版本化向量与过滤元数据。新版本写入并校验完成后才切换为可检索版本，旧版本随后下线。
 
 相关实现：
 

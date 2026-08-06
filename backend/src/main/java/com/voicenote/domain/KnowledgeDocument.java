@@ -14,6 +14,7 @@ public class KnowledgeDocument {
     @Column(name = "organized_document_id", columnDefinition = "CHAR(36)") private String organizedDocumentId;
     @Column(name = "transcript_version", nullable = false) private int transcriptVersion;
     @Column(name = "organized_document_version") private Integer organizedDocumentVersion;
+    @Column(name = "active_index_version_id", columnDefinition = "CHAR(36)") private String activeIndexVersionId;
     @Column(nullable = false) private String title;
     @Enumerated(EnumType.STRING) @Column(nullable = false) private KnowledgeDocumentStatus status;
     @Column(name = "failure_message") private String failureMessage;
@@ -36,6 +37,7 @@ public class KnowledgeDocument {
     public String getOrganizedDocumentId() { return organizedDocumentId; }
     public int getTranscriptVersion() { return transcriptVersion; }
     public Integer getOrganizedDocumentVersion() { return organizedDocumentVersion; }
+    public String getActiveIndexVersionId() { return activeIndexVersionId; }
     public String getTitle() { return title; }
     public KnowledgeDocumentStatus getStatus() { return status; }
     public String getFailureMessage() { return failureMessage; }
@@ -47,4 +49,7 @@ public class KnowledgeDocument {
     public void fail(String message) { status = KnowledgeDocumentStatus.FAILED; failureMessage = message; updatedAt = Instant.now(); }
     public boolean retry() { if (status != KnowledgeDocumentStatus.FAILED) return false; status = KnowledgeDocumentStatus.PENDING; failureMessage = null; updatedAt = Instant.now(); return true; }
     public boolean recover() { if (status != KnowledgeDocumentStatus.INDEXING) return false; status = KnowledgeDocumentStatus.QUEUED; updatedAt = Instant.now(); return true; }
+    public void activateIndexVersion(String indexVersionId) { activeIndexVersionId = indexVersionId; ready(); }
+    public boolean hasActiveIndexVersion() { return activeIndexVersionId != null; }
+    public void clearActiveIndexVersion() { activeIndexVersionId = null; updatedAt = Instant.now(); }
 }

@@ -154,4 +154,34 @@ class PipelineProgressServiceTest {
         verify(stages).save(saved.capture());
         assertThat(saved.getValue().getStatus()).isEqualTo(StageAttemptStatus.QUEUED);
     }
+
+    @Test
+    void opensANewKnowledgeStageAttemptWhenAFailedKnowledgeBuildIsRetried() {
+        TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class);
+        TaskStageAttemptRepository stages = mock(TaskStageAttemptRepository.class);
+        TranscriptionTask task = new TranscriptionTask("owner", "audio", "a".repeat(64), "pipeline");
+        task.advance(PipelineStage.KNOWLEDGE_INDEX, 90);
+        task.fail(TaskStatus.FAILED, "KNOWLEDGE_CHUNKS_EMPTY", "Formal document produced no semantic chunks");
+        TaskStageAttempt failed = new TaskStageAttempt(task.getId(), PipelineStage.KNOWLEDGE_INDEX, 1);
+        failed.start();
+        failed.fail("KNOWLEDGE_CHUNKS_EMPTY", "Formal document produced no semantic chunks", false);
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(stages.findTopByTranscriptionTaskIdAndStageOrderByAttemptNumberDesc(task.getId(), PipelineStage.KNOWLEDGE_INDEX))
+                .thenReturn(Optional.of(failed));
+        when(stages.save(any(TaskStageAttempt.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(tasks.save(any(TranscriptionTask.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        PipelineProgressService service = new PipelineProgressService(tasks, stages, mock(KnowledgeDocumentRepository.class),
+                mock(OrganizedDocumentRepository.class), mock(ProgressEventPublisher.class), mock(OutboxService.class), new AppProperties());
+
+        service.retryStage("owner", task.getId(), PipelineStage.KNOWLEDGE_INDEX);
+
+        ArgumentCaptor<TaskStageAttempt> created = ArgumentCaptor.forClass(TaskStageAttempt.class);
+        verify(stages).save(created.capture());
+        assertThat(created.getValue().getStage()).isEqualTo(PipelineStage.KNOWLEDGE_INDEX);
+        assertThat(created.getValue().getAttemptNumber()).isEqualTo(2);
+        assertThat(created.getValue().getStatus()).isEqualTo(StageAttemptStatus.QUEUED);
+        assertThat(task.getStatus()).isEqualTo(TaskStatus.RUNNING);
+        assertThat(task.getCurrentStage()).isEqualTo(PipelineStage.KNOWLEDGE_INDEX);
+        assertThat(task.getFailureMessage()).isNull();
+    }
 }

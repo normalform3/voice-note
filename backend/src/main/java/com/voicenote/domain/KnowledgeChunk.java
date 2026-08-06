@@ -9,6 +9,7 @@ import java.util.UUID;
 public class KnowledgeChunk {
     @Id @Column(columnDefinition = "CHAR(36)") private String id;
     @Column(name = "knowledge_document_id", nullable = false, columnDefinition = "CHAR(36)") private String knowledgeDocumentId;
+    @Column(name = "knowledge_index_version_id", columnDefinition = "CHAR(36)") private String knowledgeIndexVersionId;
     @Column(name = "chunk_index", nullable = false) private int chunkIndex;
     @Column(name = "start_ms", nullable = false) private long startMs;
     @Column(name = "end_ms", nullable = false) private long endMs;
@@ -40,8 +41,14 @@ public class KnowledgeChunk {
         this.topicTitle = topicTitle; this.speakerIds = speakerIds; this.sourceFragments = sourceFragments;
         this.contextSegmentIds = contextSegmentIds; this.tokenCount = tokenCount; this.oversized = oversized;
     }
+    public KnowledgeChunk(String documentId, String indexVersionId, int chunkIndex, long startMs, long endMs, String segmentIds, String blockIds, String topicTitle,
+                          String speakerIds, String sourceFragments, String contextSegmentIds, Integer tokenCount, boolean oversized, String textContent, String contentHash) {
+        this(documentId, chunkIndex, startMs, endMs, segmentIds, blockIds, topicTitle, speakerIds, sourceFragments, contextSegmentIds, tokenCount, oversized, textContent, contentHash);
+        this.knowledgeIndexVersionId = indexVersionId;
+    }
     public String getId() { return id; }
     public String getKnowledgeDocumentId() { return knowledgeDocumentId; }
+    public String getKnowledgeIndexVersionId() { return knowledgeIndexVersionId; }
     public int getChunkIndex() { return chunkIndex; }
     public long getStartMs() { return startMs; }
     public long getEndMs() { return endMs; }

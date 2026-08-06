@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { api, hashFile, key, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AnalysisEvidence, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeEvidence, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PipelineStage, type Segment, type Speaker, type Task, type WorkspaceSnapshot } from './api'
+import { api, hashFile, key, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AnalysisEvidence, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeEvidence, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PipelineStage, type Segment, type Speaker, type Task, type WorkspaceSnapshot } from './api'
 
 type AgentScope = 'CURRENT_DOCUMENT' | 'CROSS_DOCUMENT'
 type WorkspaceView = 'library' | 'document'
@@ -57,6 +57,7 @@ let clockTimer: number | null = null
 const isDocumentView = computed(() => workspaceView.value === 'document')
 const scope = computed<AgentScope>(() => isDocumentView.value ? 'CURRENT_DOCUMENT' : 'CROSS_DOCUMENT')
 const selectedDocument = computed(() => documents.value.find(document => document.transcriptionTaskId === selected.value?.id))
+const knowledgeBuild = computed<KnowledgeIndexBuild | undefined>(() => selectedDocument.value?.currentBuild || selected.value?.knowledgeDocument?.currentBuild)
 const organizedTopics = computed(() => organized.value?.blocks.filter(block => block.type === 'TOPIC') || [])
 const selectedTitle = computed(() => selected.value ? taskTitle(selected.value) : '从资料库选择一份听记')
 const canAnalyzeCurrent = computed(() => Boolean(selected.value?.transcriptReady))
@@ -384,6 +385,14 @@ async function retryDocument(document: Pick<KnowledgeDocument, 'id'>) {
   await api.post(`/knowledge-documents/${document.id}/retry`)
   await loadDocuments()
 }
+async function rebuildKnowledge(force = false) {
+  if (!selectedDocument.value) return
+  taskActionError.value = ''
+  try {
+    const { data } = await api.post<KnowledgeIndexBuild>(`/knowledge-documents/${selectedDocument.value.id}/rebuild`, undefined, { params: { force }, headers: { 'Idempotency-Key': key() } })
+    documents.value = documents.value.map(document => document.id === selectedDocument.value?.id ? { ...document, currentBuild: data } : document)
+  } catch (error: any) { taskActionError.value = error.response?.data?.message || '知识库重建没有启动，请稍后再试。' }
+}
 async function retryStage(stage: PipelineStage) {
   if (!selected.value) return
   retryingStage.value = stage
@@ -473,6 +482,7 @@ function applySnapshot(snapshot: WorkspaceSnapshot) {
 function handleProgressEvent(name: string, payload: any) {
   if (name === 'snapshot') { applySnapshot(payload as WorkspaceSnapshot); return }
   if (name === 'task-stage-settled' && payload.task) { upsertTask(payload.task as Task); return }
+  if (name === 'knowledge-index-progress') { void loadDocuments(); return }
   if (name === 'knowledge-run-settled' && payload.run) { void loadKnowledgeDetail(payload.run.id); return }
   if (name === 'analysis-run-settled' && payload.run) {
     const run = payload.run as AnalysisRun
@@ -539,6 +549,9 @@ function stageDurationText(stage: { stage: PipelineStage; status: string; queued
 function canRetryStage(stage: PipelineStage) {
   return (stage === 'ASR_SUBMIT' || stage === 'ASR_POLL' || stage === 'DOCUMENT_ORGANIZATION' || stage === 'KNOWLEDGE_INDEX')
     && Boolean(selected.value?.retryableStages?.includes(stage))
+}
+function knowledgeStageText(stage: KnowledgeIndexBuild['stages'][number]['stage']) {
+  return ({ INGEST: '知识库入库', CHUNK: '按主题切块', INDEX: '构建检索索引' } as const)[stage]
 }
 function retryStageLabel(stage: PipelineStage) {
   if (stage === 'ASR_SUBMIT') return '重新提交转写'
@@ -648,7 +661,7 @@ onBeforeUnmount(() => {
         <nav class="breadcrumb" aria-label="当前位置"><button type="button" @click="showLibrary">音频资料库</button><span>/</span><b>{{ selectedTitle }}</b></nav>
         <header class="document-head">
           <div><p class="eyebrow">DOCUMENT LISTENING</p><h2>{{ selectedTitle }}</h2></div>
-          <div v-if="selected" class="document-actions"><span class="state-pill">{{ selected.progressPercent || 0 }}% · {{ stageText(selected.currentStage) }}</span><button v-if="canCreateFormalDocument" class="stage-retry" :disabled="startingFormalDocument" @click="createFormalDocument">{{ startingFormalDocument ? '正在开始…' : '生成正式文档' }}</button><button v-if="canCreateKnowledgeBuild" class="stage-retry" :disabled="startingKnowledgeBuild" @click="createKnowledgeBuild">{{ startingKnowledgeBuild ? '正在开始…' : '建立知识库' }}</button><button v-if="canCancelTask" class="text-action" @click="cancelTask">取消任务</button><button v-if="canResubmitTask" class="stage-retry resubmit-task" :disabled="resubmittingTask" @click="resubmitTask">{{ resubmittingTask ? '正在重新提交…' : '重新提交转写' }}</button><button class="text-action danger" @click="deleteTask">删除录音</button><p v-if="taskActionError" class="task-action-error" role="alert">{{ taskActionError }}</p></div>
+          <div v-if="selected" class="document-actions"><span class="state-pill">{{ selected.progressPercent || 0 }}% · {{ stageText(selected.currentStage) }}</span><button v-if="canCreateFormalDocument" class="stage-retry" :disabled="startingFormalDocument" @click="createFormalDocument">{{ startingFormalDocument ? '正在开始…' : '生成正式文档' }}</button><button v-if="canCreateKnowledgeBuild" class="stage-retry" :disabled="startingKnowledgeBuild" @click="createKnowledgeBuild">{{ startingKnowledgeBuild ? '正在开始…' : '建立知识库' }}</button><button v-else-if="selectedDocument && selected.organizedDocument?.status === 'READY'" class="text-action" @click="rebuildKnowledge(true)">重建知识库</button><button v-if="canCancelTask" class="text-action" @click="cancelTask">取消任务</button><button v-if="canResubmitTask" class="stage-retry resubmit-task" :disabled="resubmittingTask" @click="resubmitTask">{{ resubmittingTask ? '正在重新提交…' : '重新提交转写' }}</button><button class="text-action danger" @click="deleteTask">删除录音</button><p v-if="taskActionError" class="task-action-error" role="alert">{{ taskActionError }}</p></div>
         </header>
 
         <section v-if="selected" class="player-surface" aria-label="音频播放">
@@ -668,6 +681,12 @@ onBeforeUnmount(() => {
                 <button v-if="canRetryStage(stage.stage)" class="stage-retry" :disabled="retryingStage === stage.stage" @click="retryStage(stage.stage)">{{ retryingStage === stage.stage ? '正在重新提交…' : retryStageLabel(stage.stage) }}</button>
               </li>
             </ol>
+            <section v-if="knowledgeBuild" class="knowledge-build-progress" aria-label="知识库构建进度">
+              <header><span>知识库构建</span><b>{{ knowledgeBuild.progressPercent }}% · {{ statusText(knowledgeBuild.status) }}</b></header>
+              <ol class="pipeline-stages">
+                <li v-for="stage in knowledgeBuild.stages" :key="stage.stage" :class="stage.status.toLowerCase()"><i></i><div><b>{{ knowledgeStageText(stage.stage) }}</b><small><span class="stage-status">{{ statusText(stage.status) }}</span> · {{ stage.progressPercent }}%</small><small v-if="stage.stage === 'INDEX'">已索引 {{ stage.completedCount }} / {{ stage.totalCount || knowledgeBuild.chunkCount }} 个 Chunk</small><small v-else-if="stage.stage === 'INGEST'">已入库 {{ stage.completedCount }} / {{ stage.totalCount || knowledgeBuild.topicCount }} 个 Topic</small><small v-else-if="stage.stage === 'CHUNK'">已生成 {{ stage.completedCount }} / {{ stage.totalCount || knowledgeBuild.chunkCount }} 个 Chunk</small><small v-if="stage.errorMessage" class="error">{{ stage.errorMessage }}</small></div></li>
+              </ol>
+            </section>
             <p v-if="stageRetryError" class="retry-feedback" role="alert">{{ stageRetryError }}</p>
           </details>
 
