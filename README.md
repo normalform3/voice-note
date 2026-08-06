@@ -1,10 +1,10 @@
-# voicenote
+# voice note
 
-> 开发中 · 面向会议、面试与访谈的 AI 听记和个人知识库
+> 面向会议、面试与访谈的 AI 听记和个人知识库
 
 voicenote 将上传的音频保存为带时间轴的听记记录，并把完成的转写整理为可阅读、可追溯的文档。它面向“录了很多、回看很难”的场景：既能回到具体音频片段核对原文，也能围绕单份听记或已收录的资料库提问。
 
-当前版本的主链路是：上传音频 → 异步转写 → 原始文档（完整转写）→ 手动生成正式文档 → 可选 AI 摘要 → 手动建立知识索引 → 证据可回跳的问答。项目正在持续开发，外部 ASR、向量检索和模型能力需要按环境单独启用。
+当前版本的主链路是：上传音频 → 异步转写 → 原始文档（完整转写）→ 手动生成正式文档 → 可选 AI 摘要 → 手动建立或重建版本化知识索引 → 证据可回跳的问答。项目正在持续开发，外部 ASR、向量检索和模型能力需要按环境单独启用。
 
 ![录音处理进度、原始音频播放与当前文档问答](docs/images/recording-processing-and-current-document-qa.png)
 
@@ -21,9 +21,9 @@ voicenote 将上传的音频保存为带时间轴的听记记录，并把完成�
 | 正式文档 | 用户确认后生成按主题组织的清洗文档，内容区分对话与问答对，保留来源转写段和可播放的时间位置。 |
 | AI 摘要 | 正式文档完成后可按需生成摘要，呈现核心结论和分项要点；每项可通过“回到原文”定位其依据。 |
 | 当前文档问答 | 在录音详情页提问时，模型只阅读当前音频的听记内容；回答和发现均附带可回跳的原文证据。 |
-| 私有知识库 | 用户确认后，为正式文档生成带主题、说话人、时间戳与来源片段的知识块，并写入 Qdrant。 |
-| 跨文档问答 | 在资料库视图提问时，Agent 检索并读取已收录的音频资料；答案中的每条证据都会校验为它实际读取过的转写段。 |
-| 实时进度 | 工作台通过认证后的 SSE 接收阶段完成、索引完成和知识任务完成通知。 |
+| 私有知识库 | 用户确认后，系统从正式文档快照生成 Topic 和知识块，并建立独立索引版本。每个版本分别记录入库、切块和索引进度；只有激活版本可供检索。 |
+| 跨文档问答 | 在资料库视图提问时，系统以 Dense 语义检索和 BM25 关键词检索融合候选，再读取同一 Topic 内的邻近上下文；答案中的每条证据都会校验为它实际读取过的转写段。 |
+| 实时进度 | 工作台通过认证后的 SSE 接收听记阶段、三阶段知识索引构建和知识任务完成通知。 |
 
 > **当前边界：**账号密码登录与 JWT 用户隔离已经实现；这不是一个具备组织、角色或权限管理的多租户后台。启用 `DASHSCOPE_ENABLED` 后才会调用 ASR、Embedding 和对话模型；启用 `VOICENOTE_KNOWLEDGE_ENABLED` 后才会执行向量知识构建。
 
@@ -33,7 +33,7 @@ voicenote 将上传的音频保存为带时间轴的听记记录，并把完成�
 flowchart LR
     Browser["Vue 工作台"] -->|"HTTP / SSE"| Api["Spring Boot API"]
     Api --> Auth["JWT 与用户归属校验"]
-    Api --> Mysql["MySQL：音频元数据、任务、阶段、Outbox / Inbox"]
+    Api --> Mysql["MySQL：音频元数据、任务、阶段、Outbox / Inbox、知识快照"]
     Api --> Storage["MinIO：原始音频"]
 
     Mysql --> Outbox["事务 Outbox"]
@@ -44,17 +44,21 @@ flowchart LR
     Workers --> Asr["DashScope ASR（可选）"]
     Workers --> Organizer["文档整理"]
     Organizer --> Mysql
-    Workers --> Indexer["知识切片 / 索引（可选）"]
+    Workers --> Indexer["版本化知识索引 Worker（可选）"]
+    Indexer --> Mysql
     Indexer --> Embed["DashScope Embedding（可选）"]
-    Indexer --> Qdrant["Qdrant：Dense + BM25"]
+    Indexer --> Qdrant["Qdrant：版本化 Dense + BM25"]
 
     Api --> Agent["知识任务 Agent"]
-    Agent --> Qdrant
+    Agent --> Search["混合检索与同 Topic 上下文扩展"]
+    Search --> Embed
+    Search --> Qdrant
+    Search --> Mysql
     Agent --> Chat["DashScope Chat（可选）"]
     Api -->|"任务与进度通知"| Browser
 ```
 
-任务的权威状态在 MySQL；RocketMQ 按至少一次投递处理，而不是作为状态来源。RocketMQ 未启用时，应用仍可使用进程内消息发布器驱动开发环境的 Worker。
+任务的权威状态在 MySQL；RocketMQ 按至少一次投递处理，而不是作为状态来源。RocketMQ 未启用时，应用仍可使用进程内消息发布器驱动开发环境的 Worker。知识索引的 Topic、Chunk、阶段尝试和活动版本指针也持久化在 MySQL；Qdrant 仅存放带版本、用户与可检索标记的向量及过滤元数据。
 
 ## 从音频到答案
 
@@ -63,7 +67,8 @@ flowchart LR
 3. 原始文档准备好后，按时间轴浏览完整转写；为识别出的说话人填写名称，或点击任一段落回听相应原声。
 4. 点击“生成正式文档”，系统将转写清洗并按主题、对话或问答对组织；每个主题仍保留可播放的起始时间。
 5. 在正式文档完成后，可选生成 AI 摘要，并在详情页右侧对当前文档提问。摘要和问答的证据链接会回到对应原文段落。
-6. 需要跨录音检索时，点击“建立知识库”。索引完成后，从资料库视图提出问题，系统只在当前用户已收录的文档中检索与回答。
+6. 需要跨录音检索时，点击“建立知识库”。系统按“知识库入库 → 按主题切块 → 构建检索索引”创建一个新的索引版本。所有新点写入成功并标记为可检索后，才切换 MySQL 中的活动版本；已有活动版本在切换前继续服务查询。对于已收录文档，重建失败不会替换原有活动版本。
+7. 在资料库视图提出问题时，系统仅在当前用户的活动索引版本中检索、读取和回答；证据链接仍会回到原始转写段和对应音频时间。
 
 ## 界面流程
 
@@ -126,6 +131,18 @@ npm run dev
 
 Qdrant 由开发或部署环境单独运行。启动后可请求其 `/healthz` 端点确认可用；若不可用，页面会保留正式文档并提示修复 Qdrant 后再点击“建立知识库”。
 
+### 调整知识索引与检索参数
+
+正式文档索引按模型报告的 Token 用量控制切块，而不是按固定字符数截断。以下变量均有 `backend/.env.example` 中的默认值；它们会影响新建索引版本，修改后需要再次发起“重建知识库”。
+
+| 目的 | 有效配置与默认值 |
+| --- | --- |
+| Topic 合并与切块大小 | `VOICENOTE_KNOWLEDGE_SHORT_TOPIC_TOKENS=200`、`VOICENOTE_KNOWLEDGE_CHUNK_TARGET_TOKENS=800`、`VOICENOTE_KNOWLEDGE_CHUNK_MAX_TOKENS=1200`。连续短 Topic 会在不超过目标值时合并；单个超大 Topic 再向来源片段下钻。 |
+| 混合检索候选 | `VOICENOTE_KNOWLEDGE_RETRIEVAL_PREFETCH_LIMIT=50`。Dense 与 BM25 分别取候选，再由 RRF 融合。 |
+| 送入问答的上下文 | `VOICENOTE_KNOWLEDGE_RETRIEVAL_SEED_LIMIT=4`、`VOICENOTE_KNOWLEDGE_CONTEXT_MAX_CHUNKS=12`、`VOICENOTE_KNOWLEDGE_CONTEXT_MAX_TOKENS=10000`。每个种子最多扩展同一 Topic 中相邻的一个 Chunk，随后受总数和 Token 上限约束。 |
+
+`VOICENOTE_KNOWLEDGE_CHUNK_CHARACTERS` 仅为旧版原始转写兼容路径保留；当前正式文档的知识构建使用上述 Topic 和 Token 配置。
+
 ## 关键设计
 
 ### 三层幂等，避免重复转写
@@ -149,27 +166,37 @@ Qdrant 由开发或部署环境单独运行。启动后可请求其 `/healthz` �
 - [PipelineProgressService](backend/src/main/java/com/voicenote/service/PipelineProgressService.java)：维护阶段状态、进度和阶段级重试。
 - [PipelineRecoveryCoordinator](backend/src/main/java/com/voicenote/service/PipelineRecoveryCoordinator.java)：定期恢复可继续执行的任务。
 
-### 保留语义边界的知识切片
+### 按 Topic 快照保留语义边界
 
-知识块从整理文档的主题、问答对和叙述区块中生成，而非按固定字符数机械截断。默认一个 Topic 对应一个 Chunk；连续且都很短的 Topic 会合并，以减少过碎召回，同时仍保存全部 Topic 边界、说话人和来源转写段。过大的原子单元再下钻到来源片段，使检索结果能够回到具体的说话人和原文时间范围。
-
-每次建立或重建都创建独立的索引版本。MySQL 保存 Topic/Chunk 快照和“知识库入库、按主题切块、构建检索索引”三个阶段的进度；Qdrant 只保存版本化向量与过滤元数据。新版本写入并校验完成后才切换为可检索版本，旧版本随后下线。
+知识构建先从正式文档提取并持久化 Topic 快照；每个快照包含来源区块、说话人、转写段、时间范围和文本。知识块从这些快照生成，而非按固定字符数机械截断。默认一个 Topic 对应一个 Chunk；连续且都很短的 Topic 会合并，以减少过碎召回，同时通过关联表保留每个 Chunk 覆盖的全部 Topic。过大的 Topic 再向来源片段下钻；是否需要切分由 Embedding 提供方返回的 Token 用量和目标/最大 Token 配置共同决定。
 
 相关实现：
 
-- [KnowledgeChunker](backend/src/main/java/com/voicenote/service/KnowledgeChunker.java)：按主题与模型 Token 用量生成带来源片段的知识块。
-- [KnowledgeIndexWorker](backend/src/main/java/com/voicenote/service/KnowledgeIndexWorker.java)：在整理文档就绪后构建并写入知识索引。
-- [QdrantKnowledgeVectorStore](backend/src/main/java/com/voicenote/service/QdrantKnowledgeVectorStore.java)：维护 Dense 与 BM25 的混合检索请求。
+- [KnowledgeChunker](backend/src/main/java/com/voicenote/service/KnowledgeChunker.java)：从整理文档创建 Topic 快照、合并短 Topic，并按模型 Token 用量生成带来源片段的知识块。
+- [V11 知识索引迁移](backend/src/main/resources/db/migration/V11__add_versioned_knowledge_index.sql)：定义 Topic、Chunk–Topic 关联和版本化索引表。
 
-### Agent 只在开放任务中使用工具
+### 版本化构建与逻辑切换
 
-转写、文档整理、切片与索引是由阶段流水线编排的固定流程；开放式问答才创建独立的 Agent 任务。Agent 具有最多四次工具调用额度，读取到的知识块会进入允许引用的集合；服务端拒绝引用未读片段或没有证据的结果。这个边界将核心处理链路的可恢复性与问答任务的灵活性分开。
+每次建立或重建都会创建独立的 generation：它记录正式文档版本，并将切块策略、Embedding 模型和向量维度写入配置哈希。MySQL 保存该 generation 的 Topic/Chunk 快照，以及“知识库入库、按主题切块、构建检索索引”三个阶段的尝试和进度。Worker 先以 `searchable=false` 写入新版本的全部 Qdrant 点；写入成功后才开启新版本的可检索标记并更新知识文档的活动版本指针。查询还会在 MySQL 中复核 Chunk 所属的活动版本，因此新旧版本的短暂并存不会混入同一次回答；被替换版本随后下线。
 
 相关实现：
 
-- [KnowledgeAgentWorker](backend/src/main/java/com/voicenote/service/KnowledgeAgentWorker.java)：执行检索与阅读工具循环。
-- [KnowledgeAgentService](backend/src/main/java/com/voicenote/service/KnowledgeAgentService.java)：限制工具预算并校验证据。
-- [KnowledgeSearchService](backend/src/main/java/com/voicenote/service/KnowledgeSearchService.java)：按当前用户筛选检索命中并还原可读知识块。
+- [KnowledgeDocumentService](backend/src/main/java/com/voicenote/service/KnowledgeDocumentService.java)：创建 generation、保存阶段进度并切换活动版本。
+- [KnowledgeIndexWorker](backend/src/main/java/com/voicenote/service/KnowledgeIndexWorker.java)：写入向量、开启新版本检索并下线旧版本。
+- [KnowledgeDocumentController](backend/src/main/java/com/voicenote/web/KnowledgeDocumentController.java)：提供重建和索引版本查询接口。
+
+### 双路检索、同 Topic 上下文与证据边界
+
+转写、文档整理、切片与索引由阶段流水线编排；跨文档问答才创建独立的知识任务。检索时 Qdrant 对同一问题同时执行 Dense 向量和 BM25 稀疏检索，以 RRF 融合结果，并以 `ownerId` 与 `searchable=true` 过滤。服务端随后验证命中 Chunk、文档所有者和活动索引版本，再从最多四个种子向同一 Topic 内扩展相邻 Chunk，受最大 Chunk 数和 Token 总量限制。
+
+当前知识任务 Worker 固定执行“检索、读取扩展上下文”两步，并记录在最多四次的工具预算内；模型不会获得任意外部工具。只有实际读取的 Chunk 会进入提示上下文，服务端拒绝引用未读取的 Chunk、缺失证据或不属于该 Chunk 的转写段。这将可恢复的索引流水线与受控的开放式问答分开。
+
+相关实现：
+
+- [QdrantKnowledgeVectorStore](backend/src/main/java/com/voicenote/service/QdrantKnowledgeVectorStore.java)：维护 Dense + BM25 的 RRF 查询，以及版本化可检索过滤。
+- [KnowledgeSearchService](backend/src/main/java/com/voicenote/service/KnowledgeSearchService.java)：复核活动版本、按 Topic 扩展邻近上下文并施加上下文上限。
+- [KnowledgeAgentWorker](backend/src/main/java/com/voicenote/service/KnowledgeAgentWorker.java)：执行固定的检索与读取步骤，再将已读上下文交给模型。
+- [KnowledgeAgentService](backend/src/main/java/com/voicenote/service/KnowledgeAgentService.java)：限制工具预算并校验结果中的转写段证据。
 
 ## 项目结构
 
