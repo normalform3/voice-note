@@ -1,5 +1,7 @@
 package com.voicenote.service;
 
+import com.fasterxml.jackson.core.type.TypeReference;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.voicenote.domain.*;
 import com.voicenote.config.AppProperties;
 import com.voicenote.repository.KnowledgeDocumentRepository;
@@ -17,6 +19,9 @@ import java.util.*;
 
 @Service
 public class PipelineProgressService {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(PipelineProgressService.class);
+    private static final ObjectMapper JSON = new ObjectMapper();
+    private static final TypeReference<List<String>> STRING_LIST = new TypeReference<>() { };
     private final TranscriptionTaskRepository tasks;
     private final TaskStageAttemptRepository stages;
     private final KnowledgeDocumentRepository documents;
@@ -62,6 +67,11 @@ public class PipelineProgressService {
         TranscriptionTask task = tasks.findById(taskId).orElseThrow();
         if (isTerminal(task)) return false;
         TaskStageAttempt attempt = latestOrCreate(taskId, stage);
+        if (stage == PipelineStage.KNOWLEDGE_PREPARE && task.getStatus() == TaskStatus.WAITING_FOR_KNOWLEDGE_BUILD
+                && attempt.getStatus() != StageAttemptStatus.QUEUED && attempt.getStatus() != StageAttemptStatus.RUNNING
+                && attempt.getStatus() != StageAttemptStatus.RETRY_WAIT) {
+            attempt = stages.save(new TaskStageAttempt(taskId, stage, attempt.getAttemptNumber() + 1));
+        }
         if (!attempt.start()) return false;
         task.advance(stage, progressFor(stage)); task.mark(statusFor(stage));
         stages.save(attempt); tasks.save(task); notifyTask(task); return true;
@@ -71,8 +81,12 @@ public class PipelineProgressService {
     @Transactional
     public boolean queue(String taskId, PipelineStage stage) {
         TranscriptionTask task = tasks.findById(taskId).orElseThrow();
-        if (isTerminal(task) || stages.findTopByTranscriptionTaskIdAndStageOrderByAttemptNumberDesc(taskId, stage).isPresent()) return false;
-        stages.save(new TaskStageAttempt(taskId, stage, 1));
+        if (isTerminal(task)) return false;
+        TaskStageAttempt prior = stages.findTopByTranscriptionTaskIdAndStageOrderByAttemptNumberDesc(taskId, stage).orElse(null);
+        if (prior != null && !(stage == PipelineStage.DOCUMENT_ORGANIZATION && task.getStatus() == TaskStatus.WAITING_FOR_FORMAL_DOCUMENT
+                && prior.getStatus() != StageAttemptStatus.QUEUED && prior.getStatus() != StageAttemptStatus.RUNNING
+                && prior.getStatus() != StageAttemptStatus.RETRY_WAIT)) return false;
+        stages.save(new TaskStageAttempt(taskId, stage, prior == null ? 1 : prior.getAttemptNumber() + 1));
         task.advance(stage, progressFor(stage));
         task.mark(statusFor(stage));
         tasks.save(task);
@@ -99,8 +113,10 @@ public class PipelineProgressService {
         if (attempt.getStatus() != StageAttemptStatus.SUCCEEDED) { attempt.succeed(snapshot); stages.save(attempt); }
         if (stage == PipelineStage.TRANSCRIPT_PERSIST) task.transcriptPersisted();
         if (next != null) {
-            if (stages.findTopByTranscriptionTaskIdAndStageOrderByAttemptNumberDesc(taskId, next).isEmpty()) {
-                stages.save(new TaskStageAttempt(taskId, next, 1));
+            TaskStageAttempt prior = stages.findTopByTranscriptionTaskIdAndStageOrderByAttemptNumberDesc(taskId, next).orElse(null);
+            if (prior == null || (task.getCurrentStage() == stage && prior.getStatus() != StageAttemptStatus.QUEUED
+                    && prior.getStatus() != StageAttemptStatus.RUNNING && prior.getStatus() != StageAttemptStatus.RETRY_WAIT)) {
+                stages.save(new TaskStageAttempt(taskId, next, prior == null ? 1 : prior.getAttemptNumber() + 1));
             }
             task.advance(next, progressFor(next));
             task.mark(statusFor(next));
@@ -129,6 +145,13 @@ public class PipelineProgressService {
         TranscriptionTask task = tasks.findById(taskId).orElseThrow();
         if (task.isCancelled()) return;
         task.awaitKnowledgeBuild(); tasks.save(task); notifyTask(task);
+    }
+
+    @Transactional
+    public int invalidateForSpeakerCorrection(String taskId) {
+        TranscriptionTask task = tasks.findById(taskId).orElseThrow();
+        task.speakerCorrectionApplied(); tasks.save(task); notifyTask(task);
+        return task.getSpeakerCorrectionRevision();
     }
 
     @Transactional
@@ -284,7 +307,19 @@ public class PipelineProgressService {
                 .map(value -> new OrganizedDocumentView(value.getId(), value.getTitle(), value.getStatus().name(), value.getFailureMessage())).orElse(null);
         List<PipelineStage> retryable = stageViews.stream().filter(stage -> stage.status() == StageAttemptStatus.FAILED || stage.status() == StageAttemptStatus.UNKNOWN || stage.status() == StageAttemptStatus.RETRY_WAIT).map(StageView::stage).toList();
         return new TaskProgressView(task.getId(), task.getAudioBlobId(), task.getStatus(), task.getCurrentPhase(), task.getCurrentStage(), task.getProgressPercent(), task.isTranscriptReady(),
-                task.getCurrentAttemptNumber(), task.getTranscriptVersion(), task.getFailureCode(), task.getFailureMessage(), task.getFailedStage(), retryable, stageViews, document, organized);
+                task.getCreatedAt(), tasks.findDurationMs(task.getId(), task.getTranscriptVersion()),
+                task.getOccurredAt(), task.getSceneType(), task.getSubject(), parseTags(task),
+                task.getCurrentAttemptNumber(), task.getTranscriptVersion(), task.getSpeakerCorrectionRevision(), task.getFailureCode(), task.getFailureMessage(), task.getFailedStage(), retryable, stageViews, document, organized);
+    }
+
+    private static List<String> parseTags(TranscriptionTask task) {
+        String tags = task.getTags();
+        if (tags == null || tags.isBlank()) return List.of();
+        try { return List.copyOf(JSON.readValue(tags, STRING_LIST)); }
+        catch (Exception exception) {
+            log.warn("Ignoring invalid tags JSON for transcription task {}", task.getId());
+            return List.of();
+        }
     }
 
     private TaskStageAttempt latest(String taskId, PipelineStage stage) { return stages.findTopByTranscriptionTaskIdAndStageOrderByAttemptNumberDesc(taskId, stage).orElseThrow(); }
@@ -325,7 +360,9 @@ public class PipelineProgressService {
     public record StageView(PipelineStage stage, StageAttemptStatus status, int attemptNumber, Instant queuedAt, Instant startedAt, Instant completedAt,
                             Long waitDurationMs, long totalWaitDurationMs, Instant nextRetryAt, String errorCode, String errorMessage, String modelId) { }
     public record TaskProgressView(String id, String audioBlobId, TaskStatus status, PipelinePhase currentPhase, PipelineStage currentStage, int progressPercent, boolean transcriptReady,
-                                   int currentAttemptNumber, int transcriptVersion, String failureCode, String failureMessage, PipelineStage failedStage,
+                                   Instant createdAt, Long durationMs,
+                                   Instant occurredAt, SceneType sceneType, String subject, List<String> tags,
+                                   int currentAttemptNumber, int transcriptVersion, int speakerCorrectionRevision, String failureCode, String failureMessage, PipelineStage failedStage,
                                    List<PipelineStage> retryableStages, List<StageView> stages, KnowledgeDocumentView knowledgeDocument, OrganizedDocumentView organizedDocument) { }
     public record RetryWork(String stageAttemptId, String taskId, PipelineStage stage) { }
 }

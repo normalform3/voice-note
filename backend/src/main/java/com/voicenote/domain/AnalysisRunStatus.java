@@ -1,3 +1,3 @@
 package com.voicenote.domain;
 
-public enum AnalysisRunStatus { QUEUED, RUNNING, SUCCEEDED, FAILED, BUDGET_EXHAUSTED }
+public enum AnalysisRunStatus { QUEUED, RUNNING, SUCCEEDED, FAILED, BUDGET_EXHAUSTED, STALE }

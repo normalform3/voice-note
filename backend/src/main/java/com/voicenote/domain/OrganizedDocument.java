@@ -41,12 +41,13 @@ public class OrganizedDocument {
     public String getPlainText() { return plainText; }
     public String getFailureMessage() { return failureMessage; }
     public Instant getUpdatedAt() { return updatedAt; }
-    public void queue() { if (status == OrganizedDocumentStatus.PENDING || status == OrganizedDocumentStatus.FAILED) { status = OrganizedDocumentStatus.QUEUED; failureMessage = null; updatedAt = Instant.now(); } }
+    public void queue() { if (status == OrganizedDocumentStatus.PENDING || status == OrganizedDocumentStatus.FAILED || status == OrganizedDocumentStatus.STALE) { status = OrganizedDocumentStatus.QUEUED; failureMessage = null; updatedAt = Instant.now(); } }
     public boolean begin() { if (status != OrganizedDocumentStatus.QUEUED) return false; status = OrganizedDocumentStatus.ORGANIZING; updatedAt = Instant.now(); return true; }
     public void ready(String structure, String text) { status = OrganizedDocumentStatus.READY; structureDocument = structure; plainText = text; failureMessage = null; updatedAt = Instant.now(); }
     public void ready(String title, String summary, String mode, String structure, String text) {
         this.title = title; this.summaryText = summary; this.organizationMode = mode; ready(structure, text);
     }
     public void fail(String message) { status = OrganizedDocumentStatus.FAILED; failureMessage = message; updatedAt = Instant.now(); }
+    public void stale() { status = OrganizedDocumentStatus.STALE; failureMessage = null; updatedAt = Instant.now(); }
     public boolean recover() { if (status != OrganizedDocumentStatus.ORGANIZING) return false; status = OrganizedDocumentStatus.QUEUED; updatedAt = Instant.now(); return true; }
 }

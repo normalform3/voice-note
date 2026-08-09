@@ -13,6 +13,7 @@ public interface KnowledgeVectorStore {
     void deleteIndexVersion(String ownerId, String indexVersionId);
     void setVersionSearchable(String ownerId, String indexVersionId, boolean searchable);
     List<RetrievalHit> search(String ownerId, String query, List<Double> denseVector, int limit);
+    List<RetrievalHit> searchScoped(String ownerId, String documentId, String indexVersionId, String query, List<Double> denseVector, int limit);
 
     record RetrievalHit(String chunkId, String documentId, String indexVersionId, long startMs, long endMs, double score) { }
 }

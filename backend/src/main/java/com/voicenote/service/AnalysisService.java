@@ -37,7 +37,7 @@ public class AnalysisService {
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "TASK_NOT_FOUND", "Transcription task was not found"));
         if (!task.isTranscriptReady()) throw new ApiException(HttpStatus.CONFLICT, "TRANSCRIPT_NOT_READY", "Analysis requires a persisted transcription");
         List<TranscriptSegment> source = segments.findByTranscriptionTaskIdAndTranscriptVersionOrderBySegmentIndex(task.getId(), task.getTranscriptVersion());
-        String snapshotHash = Hashing.canonicalJsonHash(source.stream().map(segment -> Map.of("id", segment.getId(), "text", segment.getTextContent(), "start", segment.getStartMs(), "end", segment.getEndMs())).toList());
+        String snapshotHash = Hashing.canonicalJsonHash(source.stream().map(segment -> Map.of("id", segment.getId(), "speaker", segment.getEffectiveSpeakerId(), "text", segment.getTextContent(), "start", segment.getStartMs(), "end", segment.getEndMs())).toList());
         String mode = command.mode() == null || command.mode().isBlank() ? "custom" : command.mode().trim().toLowerCase();
         String goal = command.goal().trim();
         String semanticHash = Hashing.canonicalJsonHash(Map.of("snapshot", snapshotHash, "mode", mode, "goal", goal, "template", "analysis-v1", "model", properties.getDashscope().getChatModel()));
@@ -162,7 +162,7 @@ public class AnalysisService {
     public record StageAction(boolean cached, String value) { static StageAction cached(String response) { return new StageAction(true, response); } static StageAction call(String prompt) { return new StageAction(false, prompt); } }
     static List<String> chunk(List<TranscriptSegment> source) {
         List<String> output = new ArrayList<>(); StringBuilder current = new StringBuilder();
-        for (TranscriptSegment segment : source) { String line = "[" + segment.getId() + "] " + segment.getStartMs() + "-" + segment.getEndMs() + "ms: " + segment.getTextContent() + "\n"; if (current.length() > 0 && current.length() + line.length() > 8000) { output.add(current.toString()); current = new StringBuilder(); } current.append(line); }
+        for (TranscriptSegment segment : source) { String line = "[" + segment.getId() + "] " + segment.getEffectiveSpeakerId() + " " + segment.getStartMs() + "-" + segment.getEndMs() + "ms: " + segment.getTextContent() + "\n"; if (current.length() > 0 && current.length() + line.length() > 8000) { output.add(current.toString()); current = new StringBuilder(); } current.append(line); }
         if (!current.isEmpty()) output.add(current.toString()); return output;
     }
     private List<String> chunkOrganized(List<OrganizedDocumentBlock> source) {

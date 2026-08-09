@@ -6,5 +6,6 @@ public enum KnowledgeRunStatus {
     RUNNING,
     SUCCEEDED,
     FAILED,
-    BUDGET_EXHAUSTED
+    BUDGET_EXHAUSTED,
+    TIMED_OUT
 }

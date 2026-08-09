@@ -49,6 +49,7 @@ public class AnalysisRun {
     public boolean start() { if (status != AnalysisRunStatus.QUEUED) return false; status = AnalysisRunStatus.RUNNING; updatedAt = Instant.now(); return true; }
     public void useOrganizedDocument(String documentId) { organizedDocumentId = documentId; updatedAt = Instant.now(); }
     public boolean consumeCall() { if (callsUsed >= maxCalls) { status = AnalysisRunStatus.BUDGET_EXHAUSTED; updatedAt = Instant.now(); return false; } callsUsed++; updatedAt = Instant.now(); return true; }
-    public void succeed(String result, String qualityStatus) { this.status = AnalysisRunStatus.SUCCEEDED; this.resultDocument = result; this.qualityStatus = qualityStatus; this.updatedAt = Instant.now(); }
-    public void fail(String message) { this.status = AnalysisRunStatus.FAILED; this.failureMessage = message; this.updatedAt = Instant.now(); }
+    public void succeed(String result, String qualityStatus) { if (status == AnalysisRunStatus.STALE) return; this.status = AnalysisRunStatus.SUCCEEDED; this.resultDocument = result; this.qualityStatus = qualityStatus; this.updatedAt = Instant.now(); }
+    public void fail(String message) { if (status == AnalysisRunStatus.STALE) return; this.status = AnalysisRunStatus.FAILED; this.failureMessage = message; this.updatedAt = Instant.now(); }
+    public void stale() { this.status = AnalysisRunStatus.STALE; this.updatedAt = Instant.now(); }
 }

@@ -2,6 +2,7 @@ package com.voicenote.service;
 
 import com.voicenote.config.AppProperties;
 import com.voicenote.domain.PipelineStage;
+import com.voicenote.domain.SceneType;
 import com.voicenote.domain.StageAttemptStatus;
 import com.voicenote.domain.TaskStageAttempt;
 import com.voicenote.domain.TaskStatus;
@@ -15,6 +16,8 @@ import com.voicenote.repository.TranscriptionTaskRepository;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.time.Instant;
+import java.util.List;
 import java.util.Optional;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -24,6 +27,29 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class PipelineProgressServiceTest {
+    @Test
+    void exposesMetadataTagsAsAnArrayInsteadOfRawJson() {
+        TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class);
+        TaskStageAttemptRepository stages = mock(TaskStageAttemptRepository.class);
+        KnowledgeDocumentRepository documents = mock(KnowledgeDocumentRepository.class);
+        OrganizedDocumentRepository organizedDocuments = mock(OrganizedDocumentRepository.class);
+        TranscriptionTask task = new TranscriptionTask("owner", "audio", "a".repeat(64), "pipeline");
+        task.updateMetadata(Instant.now(), SceneType.INTERVIEW, "candidate", "[\"Java\",\"backend\"]");
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(stages.findByTranscriptionTaskIdOrderByQueuedAtAsc(task.getId())).thenReturn(List.of());
+        when(tasks.findDurationMs(task.getId(), task.getTranscriptVersion())).thenReturn(125_000L);
+        when(documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion("owner", task.getId(), task.getTranscriptVersion())).thenReturn(Optional.empty());
+        when(organizedDocuments.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion("owner", task.getId(), task.getTranscriptVersion())).thenReturn(Optional.empty());
+        PipelineProgressService service = new PipelineProgressService(tasks, stages, documents, organizedDocuments,
+                mock(ProgressEventPublisher.class), mock(OutboxService.class), new AppProperties());
+
+        PipelineProgressService.TaskProgressView view = service.ownedView("owner", task.getId());
+
+        assertThat(view.tags()).containsExactly("Java", "backend");
+        assertThat(view.createdAt()).isEqualTo(task.getCreatedAt());
+        assertThat(view.durationMs()).isEqualTo(125_000L);
+    }
+
     @Test
     void marksTranscriptionAsFailedAndPreventsFurtherWorkWhenDeliveryFails() {
         TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class);
@@ -153,6 +179,29 @@ class PipelineProgressServiceTest {
         ArgumentCaptor<TaskStageAttempt> saved = ArgumentCaptor.forClass(TaskStageAttempt.class);
         verify(stages).save(saved.capture());
         assertThat(saved.getValue().getStatus()).isEqualTo(StageAttemptStatus.QUEUED);
+    }
+
+    @Test
+    void createsANewFormalDocumentAttemptAfterSpeakerCorrection() {
+        TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class);
+        TaskStageAttemptRepository stages = mock(TaskStageAttemptRepository.class);
+        TranscriptionTask task = new TranscriptionTask("owner", "audio", "a".repeat(64), "pipeline");
+        task.awaitFormalDocument();
+        TaskStageAttempt completed = new TaskStageAttempt(task.getId(), PipelineStage.DOCUMENT_ORGANIZATION, 1);
+        completed.start(); completed.succeed("{}");
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(stages.findTopByTranscriptionTaskIdAndStageOrderByAttemptNumberDesc(task.getId(), PipelineStage.DOCUMENT_ORGANIZATION))
+                .thenReturn(Optional.of(completed));
+        when(stages.save(any(TaskStageAttempt.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        PipelineProgressService service = new PipelineProgressService(tasks, stages, mock(KnowledgeDocumentRepository.class),
+                mock(OrganizedDocumentRepository.class), mock(ProgressEventPublisher.class), mock(OutboxService.class), new AppProperties());
+
+        assertThat(service.queue(task.getId(), PipelineStage.DOCUMENT_ORGANIZATION)).isTrue();
+
+        ArgumentCaptor<TaskStageAttempt> created = ArgumentCaptor.forClass(TaskStageAttempt.class);
+        verify(stages).save(created.capture());
+        assertThat(created.getValue().getAttemptNumber()).isEqualTo(2);
+        assertThat(created.getValue().getStatus()).isEqualTo(StageAttemptStatus.QUEUED);
     }
 
     @Test

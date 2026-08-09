@@ -35,14 +35,14 @@ public class DocumentOrganizationService {
 
     @Transactional
     public OrganizedDocument createForTranscript(TranscriptionTask task, AudioBlob audio) {
-        return documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(task.getOwnerId(), task.getId(), task.getTranscriptVersion())
-                .orElseGet(() -> {
-                    OrganizedDocument document = documents.save(new OrganizedDocument(task.getOwnerId(), task.getId(), task.getTranscriptVersion(), titleFor(audio.getOriginalFilename())));
-                    outbox.enqueue("organized_document", document.getId(), EventType.DOCUMENT_ORGANIZATION_REQUESTED,
-                            "{\"taskId\":\"" + task.getId() + "\",\"stage\":\"DOCUMENT_ORGANIZATION\",\"documentId\":\"" + document.getId() + "\"}",
-                            "task:" + task.getId() + ":document:" + document.getId());
-                    return document;
-                });
+        OrganizedDocument document = documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(task.getOwnerId(), task.getId(), task.getTranscriptVersion())
+                .orElseGet(() -> documents.save(new OrganizedDocument(task.getOwnerId(), task.getId(), task.getTranscriptVersion(), titleFor(audio.getOriginalFilename()))));
+        if (document.getStatus() == OrganizedDocumentStatus.STALE || document.getStatus() == OrganizedDocumentStatus.PENDING) {
+            outbox.enqueue("organized_document", document.getId(), EventType.DOCUMENT_ORGANIZATION_REQUESTED,
+                    "{\"taskId\":\"" + task.getId() + "\",\"stage\":\"DOCUMENT_ORGANIZATION\",\"documentId\":\"" + document.getId() + "\"}",
+                    "task:" + task.getId() + ":document:" + document.getId() + ":speaker-revision:" + task.getSpeakerCorrectionRevision());
+        }
+        return document;
     }
 
     @Transactional public void markQueued(String documentId) { documents.findById(documentId).orElseThrow().queue(); }
@@ -67,6 +67,9 @@ public class DocumentOrganizationService {
         OrganizationInvocation invocation = invocations.findByOrganizedDocumentIdAndStageName(work.document().getId(), STRUCTURE_STAGE)
                 .orElseGet(() -> invocations.save(new OrganizationInvocation(work.document().getId(), STRUCTURE_STAGE, hash)));
         if (invocation.getStatus() == InvocationStatus.SUCCEEDED) return ModelAction.cached(invocation.getResponseDocument());
+        if (invocation.getStatus() == InvocationStatus.FALLBACK) {
+            throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "DOCUMENT_ORGANIZATION_FALLBACK", "A prior model call already fell back to deterministic organization");
+        }
         if (invocation.getStatus() == InvocationStatus.IN_FLIGHT || invocation.getStatus() == InvocationStatus.UNKNOWN) {
             throw new IllegalStateException("An earlier document-organization model call has an unknown outcome");
         }
@@ -80,6 +83,9 @@ public class DocumentOrganizationService {
     }
     @Transactional public void markSemanticUnknown(String documentId) {
         invocations.findByOrganizedDocumentIdAndStageName(documentId, STRUCTURE_STAGE).ifPresent(value -> { value.unknown(); invocations.save(value); });
+    }
+    @Transactional public void markSemanticFallback(String documentId) {
+        invocations.findByOrganizedDocumentIdAndStageName(documentId, STRUCTURE_STAGE).ifPresent(value -> { value.fallback(); invocations.save(value); });
     }
 
     public OrganizationResult organizeSemantic(OrganizationWork work, String rawResponse) {
@@ -116,7 +122,7 @@ public class DocumentOrganizationService {
             String summary = optionalBounded(root.path("summary").asText(null), 8_000);
             if (summary == null) summary = topicResults.stream().map(Topic::summary).filter(Objects::nonNull).collect(Collectors.joining(" "));
             Set<String> knownSpeakerIds = source.values().stream()
-                    .map(TranscriptSegment::getAsrSpeakerId)
+                    .map(TranscriptSegment::getEffectiveSpeakerId)
                     .filter(Objects::nonNull)
                     .collect(Collectors.toSet());
             List<RoleSuggestion> suggestions = roleSuggestions(root.path("roleSuggestions"), knownSpeakerIds);
@@ -175,7 +181,7 @@ public class DocumentOrganizationService {
         List<Turn> output = new ArrayList<>(); TurnBuilder current = null;
         for (TranscriptSegment segment : source) {
             String text = clean(segment.getTextContent()); if (text.isBlank()) continue;
-            String speakerId = segment.getAsrSpeakerId() == null || segment.getAsrSpeakerId().isBlank() ? "SPEAKER_UNKNOWN" : segment.getAsrSpeakerId();
+            String speakerId = segment.getEffectiveSpeakerId() == null || segment.getEffectiveSpeakerId().isBlank() ? "SPEAKER_UNKNOWN" : segment.getEffectiveSpeakerId();
             String speaker = speakerNames.getOrDefault(speakerId, speakerId);
             if (current != null && current.speaker.equals(speaker) && segment.getStartMs() - current.endMs <= 5_000 && current.characterCount() + text.length() <= 2_400) current.append(segment, text);
             else { if (current != null) output.add(current.build()); current = new TurnBuilder(speaker, segment, text); }
@@ -239,7 +245,7 @@ public class DocumentOrganizationService {
     }
     private static Span span(List<String> ids, Map<String, TranscriptSegment> source) {
         if (ids.isEmpty()) throw invalid("Source segment IDs cannot be empty");
-        List<String> speakers = ids.stream().map(source::get).map(TranscriptSegment::getAsrSpeakerId).distinct().toList();
+        List<String> speakers = ids.stream().map(source::get).map(TranscriptSegment::getEffectiveSpeakerId).distinct().toList();
         return new Span(source.get(ids.get(0)).getStartMs(), source.get(ids.get(ids.size() - 1)).getEndMs(), speakers);
     }
     private String json(Object value) throws Exception { return mapper.writeValueAsString(value); }
@@ -254,7 +260,7 @@ public class DocumentOrganizationService {
     }
     private String fragments(List<String> ids, Map<String, TranscriptSegment> source) throws Exception {
         List<Map<String, Object>> output = new ArrayList<>();
-        for (String id : ids) { TranscriptSegment segment = source.get(id); output.add(Map.of("segmentId", id, "speakerId", segment.getAsrSpeakerId(), "startMs", segment.getStartMs(), "endMs", segment.getEndMs(), "text", segment.getTextContent())); }
+        for (String id : ids) { TranscriptSegment segment = source.get(id); output.add(Map.of("segmentId", id, "speakerId", segment.getEffectiveSpeakerId(), "startMs", segment.getStartMs(), "endMs", segment.getEndMs(), "text", segment.getTextContent())); }
         return mapper.writeValueAsString(output);
     }
     private static String bounded(String value, int limit, String label) { if (value == null || value.isBlank() || value.length() > limit) throw invalid(label + " is missing or too long"); return value.trim(); }

@@ -6,18 +6,24 @@ import java.io.IOException;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.function.Supplier;
 
 @Component
 public class ProgressSseHub {
     private final ConcurrentHashMap<String, CopyOnWriteArrayList<SseEmitter>> subscribers = new ConcurrentHashMap<>();
+    private final Supplier<SseEmitter> emitterFactory;
+
+    public ProgressSseHub() { this(() -> new SseEmitter(0L)); }
+    ProgressSseHub(Supplier<SseEmitter> emitterFactory) { this.emitterFactory = emitterFactory; }
 
     public SseEmitter subscribe(String ownerId, Object snapshot) {
-        SseEmitter emitter = new SseEmitter(0L);
+        SseEmitter emitter = emitterFactory.get();
         subscribers.computeIfAbsent(ownerId, ignored -> new CopyOnWriteArrayList<>()).add(emitter);
         emitter.onCompletion(() -> remove(ownerId, emitter));
         emitter.onTimeout(() -> remove(ownerId, emitter));
+        emitter.onError(ignored -> remove(ownerId, emitter));
         try { emitter.send(SseEmitter.event().name("snapshot").data(snapshot)); }
-        catch (IOException exception) { remove(ownerId, emitter); emitter.completeWithError(exception); }
+        catch (IOException | IllegalStateException exception) { remove(ownerId, emitter); }
         return emitter;
     }
 
@@ -25,7 +31,7 @@ public class ProgressSseHub {
         List<SseEmitter> ownerSubscribers = subscribers.get(ownerId); if (ownerSubscribers == null) return;
         for (SseEmitter emitter : ownerSubscribers) {
             try { emitter.send(SseEmitter.event().name(eventName).data(payload)); }
-            catch (IOException | IllegalStateException exception) { remove(ownerId, emitter); emitter.complete(); }
+            catch (IOException | IllegalStateException exception) { remove(ownerId, emitter); }
         }
     }
 

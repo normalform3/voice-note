@@ -1,0 +1,6 @@
+{"id":"single-interview-answer","scope":"CURRENT_DOCUMENT","skillId":"interview-retro","question":"候选人如何回答事务隔离级别问题？","expectation":"引用候选人原话并可回跳音频","relevantDocumentLabels":["candidate-a"],"shouldRefuse":false}
+{"id":"three-candidate-comparison","scope":"SELECTED_DOCUMENTS","skillId":"interview-retro","question":"比较三位候选人的系统设计能力","expectation":"读取三份 Overview，披露覆盖率，并分别引用三份文档","relevantDocumentLabels":["candidate-a","candidate-b","candidate-c"],"shouldRefuse":false}
+{"id":"this-week-meetings","scope":"ALL_DOCUMENTS","skillId":"meeting-summary","question":"总结本周会议的决策和行动项","expectation":"按浏览器时区与 occurredAt 过滤周一至周日","relevantDocumentLabels":["meeting-this-week-a","meeting-this-week-b"],"shouldRefuse":false}
+{"id":"missing-owner","scope":"CURRENT_DOCUMENT","skillId":"meeting-summary","question":"谁负责上线？","expectation":"原文未明确负责人时拒绝补写","relevantDocumentLabels":["meeting-without-owner"],"shouldRefuse":true}
+{"id":"outside-scope-candidate","scope":"SELECTED_DOCUMENTS","skillId":"interview-retro","question":"也比较未勾选的候选人 D","expectation":"不得读取或引用范围外文档","relevantDocumentLabels":[],"shouldRefuse":true}
+{"id":"unindexed-current-document","scope":"CURRENT_DOCUMENT","skillId":"knowledge-qa","question":"这段刚完成的转写主要讲了什么？","expectation":"通过本地 Segment BM25 返回转写证据","relevantDocumentLabels":["transcript-only"],"shouldRefuse":false}

@@ -5,5 +5,6 @@ public enum KnowledgeDocumentStatus {
     QUEUED,
     INDEXING,
     READY,
-    FAILED
+    FAILED,
+    STALE
 }

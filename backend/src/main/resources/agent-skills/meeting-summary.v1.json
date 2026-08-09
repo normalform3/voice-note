@@ -1,0 +1,10 @@
+{
+  "id": "meeting-summary",
+  "version": "v1",
+  "displayName": "会议总结",
+  "description": "汇总会议主题、决策、行动项、负责人和未决事项。",
+  "routingExamples": ["总结本周会议", "有哪些行动项", "会议做了什么决定"],
+  "instructions": "分别识别主题、明确决策、行动项、负责人和未决事项。没有明确负责人或期限时标记为未明确，不得补写。多会议总结前必须读取每份文档概览。",
+  "allowedTools": ["document_list", "document_overview", "knowledge_search", "transcript_context", "finalize_answer"],
+  "requireOverviewForMultipleDocuments": true
+}

@@ -4,10 +4,13 @@ import com.voicenote.config.AppProperties;
 import com.voicenote.domain.PipelineStage;
 import com.voicenote.provider.AnalysisModelClient;
 import com.voicenote.provider.ProviderException;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 @Component
 public class OrganizedDocumentWorker {
+    private static final Logger log = LoggerFactory.getLogger(OrganizedDocumentWorker.class);
     private final AppProperties properties;
     private final DocumentOrganizationService documents;
     private final PipelineProgressService pipeline;
@@ -55,8 +58,14 @@ public class OrganizedDocumentWorker {
             return documents.organizeSemantic(work, response);
         } catch (ProviderException exception) {
             if (exception.getKind() == ProviderException.Kind.AMBIGUOUS_SUBMISSION) documents.markSemanticUnknown(work.document().getId());
+            else documents.markSemanticFallback(work.document().getId());
+            log.warn("Document organization used deterministic fallback: documentId={}, code={}, kind={}",
+                    work.document().getId(), exception.getCode(), exception.getKind());
             return DocumentOrganizationService.fallbackFor(work);
         } catch (RuntimeException exception) {
+            documents.markSemanticFallback(work.document().getId());
+            log.warn("Document organization used deterministic fallback after local processing error: documentId={}, exceptionType={}",
+                    work.document().getId(), exception.getClass().getSimpleName());
             return DocumentOrganizationService.fallbackFor(work);
         }
     }

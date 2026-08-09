@@ -95,6 +95,19 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
 
     @Override public List<RetrievalHit> search(String ownerId, String query, List<Double> denseVector, int limit) {
         Map<String, Object> body = searchBody(ownerId, query, denseVector, limit, properties.getKnowledge().getRetrievalPrefetchLimit());
+        return executeSearch(body);
+    }
+
+    @Override public List<RetrievalHit> searchScoped(String ownerId, String documentId, String indexVersionId, String query, List<Double> denseVector, int limit) {
+        Map<String, Object> filter = Map.of("must", List.of(
+                Map.of("key", "ownerId", "match", Map.of("value", ownerId)),
+                Map.of("key", "documentId", "match", Map.of("value", documentId)),
+                Map.of("key", "indexVersionId", "match", Map.of("value", indexVersionId))));
+        Map<String, Object> body = searchBody(query, denseVector, limit, Math.max(limit, 8), filter);
+        return executeSearch(body);
+    }
+
+    private List<RetrievalHit> executeSearch(Map<String, Object> body) {
         try {
             JsonNode response = client.post().uri("/collections/{collection}/points/query", properties.getKnowledge().getCollection())
                     .contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(JsonNode.class);
@@ -115,6 +128,9 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
     }
     static Map<String, Object> searchBody(String ownerId, String query, List<Double> denseVector, int limit, int prefetchLimit) {
         Map<String, Object> filter = Map.of("must", List.of(Map.of("key", "ownerId", "match", Map.of("value", ownerId)), Map.of("key", "searchable", "match", Map.of("value", true))));
+        return searchBody(query, denseVector, limit, prefetchLimit, filter);
+    }
+    static Map<String, Object> searchBody(String query, List<Double> denseVector, int limit, int prefetchLimit, Map<String, Object> filter) {
         Map<String, Object> bm25Query = Map.of("text", query, "model", "qdrant/bm25", "options", Map.of("language", "none", "tokenizer", "multilingual"));
         return Map.of(
                 "prefetch", List.of(

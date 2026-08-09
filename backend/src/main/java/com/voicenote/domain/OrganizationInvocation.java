@@ -25,5 +25,6 @@ public class OrganizationInvocation {
     public String getResponseDocument() { return responseDocument; }
     public void start() { status = InvocationStatus.IN_FLIGHT; updatedAt = Instant.now(); }
     public void succeed(String response) { status = InvocationStatus.SUCCEEDED; responseDocument = response; updatedAt = Instant.now(); }
+    public void fallback() { if (status == InvocationStatus.IN_FLIGHT) { status = InvocationStatus.FALLBACK; updatedAt = Instant.now(); } }
     public void unknown() { status = InvocationStatus.UNKNOWN; updatedAt = Instant.now(); }
 }

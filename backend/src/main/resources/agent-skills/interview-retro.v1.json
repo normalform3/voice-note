@@ -1,0 +1,10 @@
+{
+  "id": "interview-retro",
+  "version": "v1",
+  "displayName": "面试复盘",
+  "description": "复盘面试问题、候选人回答、优势、风险和待核实项。",
+  "routingExamples": ["复盘这场面试", "比较几个候选人", "候选人回答得怎么样"],
+  "instructions": "区分面试官问题与候选人回答。结论按回答表现、优势、风险、待核实项组织；不得从缺失内容推断能力。多候选人比较前必须读取每份文档概览。",
+  "allowedTools": ["document_list", "document_overview", "knowledge_search", "transcript_context", "finalize_answer"],
+  "requireOverviewForMultipleDocuments": true
+}

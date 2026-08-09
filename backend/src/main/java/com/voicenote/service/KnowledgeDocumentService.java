@@ -52,6 +52,10 @@ public class KnowledgeDocumentService {
         KnowledgeDocument document = documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(source.getOwnerId(), source.getTranscriptionTaskId(), source.getTranscriptVersion())
                 .orElseGet(() -> documents.save(new KnowledgeDocument(source.getOwnerId(), source.getTranscriptionTaskId(), source.getTranscriptVersion(),
                         source.getTitle(), source.getId(), Math.toIntExact(source.getVersion()))));
+        if (document.getStatus() == KnowledgeDocumentStatus.STALE) {
+            document.refreshSource(source.getId(), Math.toIntExact(source.getVersion()), source.getTitle());
+            document = documents.save(document);
+        }
         requestIndex(document, source, false);
         return document;
     }
@@ -131,6 +135,22 @@ public class KnowledgeDocumentService {
                         mapper.writeValueAsString(segmentIds.stream().distinct().toList()), mapper.writeValueAsString(fragments), mapper.writeValueAsString(snapshot.units()), start, end)));
             }
         } catch (Exception exception) { throw new IllegalStateException("Cannot persist knowledge topic snapshot", exception); }
+        try {
+            List<Map<String, Object>> overviewTopics = new ArrayList<>();
+            for (KnowledgeTopic topic : stored) {
+                Map<String, Object> value = new LinkedHashMap<>();
+                value.put("topicId", topic.getId()); value.put("title", topic.getTitle()); value.put("content", topic.getTextContent());
+                value.put("startMs", topic.getStartMs()); value.put("endMs", topic.getEndMs());
+                value.put("speakerIds", mapper.readTree(topic.getSpeakerIds() == null ? "[]" : topic.getSpeakerIds()));
+                value.put("segmentIds", mapper.readTree(topic.getSourceSegmentIds()));
+                value.put("sourceFragments", mapper.readTree(topic.getSourceFragments() == null ? "[]" : topic.getSourceFragments()));
+                overviewTopics.add(value);
+            }
+            index.overviewBuilt(mapper.writeValueAsString(Map.of(
+                    "title", document.getTitle(),
+                    "summary", source.getSummaryText() == null ? "" : source.getSummaryText(),
+                    "topics", overviewTopics)));
+        } catch (Exception exception) { throw new IllegalStateException("Cannot persist knowledge overview snapshot", exception); }
         index.topicsCreated(stored.size()); versions.save(index); completeStage(index, KnowledgeIndexStage.INGEST, stored.size(), stored.size(), "{\"topicCount\":" + stored.size() + "}"); publish(document.getOwnerId(), indexVersionId);
         return stored;
     }

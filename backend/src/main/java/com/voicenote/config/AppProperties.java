@@ -10,6 +10,8 @@ public class AppProperties {
     private final Dashscope dashscope = new Dashscope();
     private final Workers workers = new Workers();
     private final Knowledge knowledge = new Knowledge();
+    private final Agent agent = new Agent();
+    private final Mcp mcp = new Mcp();
 
     public Security getSecurity() { return security; }
     public Storage getStorage() { return storage; }
@@ -17,6 +19,8 @@ public class AppProperties {
     public Dashscope getDashscope() { return dashscope; }
     public Workers getWorkers() { return workers; }
     public Knowledge getKnowledge() { return knowledge; }
+    public Agent getAgent() { return agent; }
+    public Mcp getMcp() { return mcp; }
 
     public static class Security {
         private String jwtSecret;
@@ -121,6 +125,8 @@ public class AppProperties {
         private int retrievalSeedLimit = 4;
         private int retrievalContextMaxChunks = 12;
         private int retrievalContextMaxTokens = 10_000;
+        private boolean rerankEnabled;
+        private String rerankModel = "qwen3-rerank";
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
         public String getQdrantUrl() { return qdrantUrl; }
@@ -145,5 +151,45 @@ public class AppProperties {
         public void setRetrievalContextMaxChunks(int retrievalContextMaxChunks) { this.retrievalContextMaxChunks = retrievalContextMaxChunks; }
         public int getRetrievalContextMaxTokens() { return retrievalContextMaxTokens; }
         public void setRetrievalContextMaxTokens(int retrievalContextMaxTokens) { this.retrievalContextMaxTokens = retrievalContextMaxTokens; }
+        public boolean isRerankEnabled() { return rerankEnabled; }
+        public void setRerankEnabled(boolean rerankEnabled) { this.rerankEnabled = rerankEnabled; }
+        public String getRerankModel() { return rerankModel; }
+        public void setRerankModel(String rerankModel) { this.rerankModel = rerankModel; }
+    }
+
+    public static class Agent {
+        private boolean enabled;
+        private int maxScopeDocuments = 50;
+        private int maxModelCalls = 7;
+        private int maxTurns = 6;
+        private int maxToolCalls = 10;
+        private int timeoutSeconds = 120;
+        private int maxToolOutputBytes = 32_768;
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public int getMaxScopeDocuments() { return maxScopeDocuments; }
+        public void setMaxScopeDocuments(int maxScopeDocuments) { this.maxScopeDocuments = maxScopeDocuments; }
+        public int getMaxModelCalls() { return maxModelCalls; }
+        public void setMaxModelCalls(int maxModelCalls) { this.maxModelCalls = maxModelCalls; }
+        public int getMaxTurns() { return maxTurns; }
+        public void setMaxTurns(int maxTurns) { this.maxTurns = maxTurns; }
+        public int getMaxToolCalls() { return maxToolCalls; }
+        public void setMaxToolCalls(int maxToolCalls) { this.maxToolCalls = maxToolCalls; }
+        public int getTimeoutSeconds() { return timeoutSeconds; }
+        public void setTimeoutSeconds(int timeoutSeconds) { this.timeoutSeconds = timeoutSeconds; }
+        public int getMaxToolOutputBytes() { return maxToolOutputBytes; }
+        public void setMaxToolOutputBytes(int maxToolOutputBytes) { this.maxToolOutputBytes = maxToolOutputBytes; }
+    }
+
+    public static class Mcp {
+        private boolean enabled;
+        private String servers = "[]";
+        private int requestTimeoutSeconds = 10;
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public String getServers() { return servers; }
+        public void setServers(String servers) { this.servers = servers; }
+        public int getRequestTimeoutSeconds() { return requestTimeoutSeconds; }
+        public void setRequestTimeoutSeconds(int requestTimeoutSeconds) { this.requestTimeoutSeconds = requestTimeoutSeconds; }
     }
 }

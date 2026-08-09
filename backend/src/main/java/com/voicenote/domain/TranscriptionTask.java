@@ -21,6 +21,11 @@ public class TranscriptionTask {
     @Column(name = "transcript_ready", nullable = false) private boolean transcriptReady;
     @Column(name = "current_attempt_number", nullable = false) private int currentAttemptNumber;
     @Column(name = "transcript_version", nullable = false) private int transcriptVersion;
+    @Column(name = "speaker_correction_revision", nullable = false) private int speakerCorrectionRevision;
+    @Column(name = "occurred_at", nullable = false) private Instant occurredAt;
+    @Enumerated(EnumType.STRING) @Column(name = "scene_type", nullable = false) private SceneType sceneType;
+    @Column(name = "subject", length = 512) private String subject;
+    @Column(columnDefinition = "json") private String tags;
     @Column(name = "failure_code") private String failureCode;
     @Column(name = "failure_message") private String failureMessage;
     @Enumerated(EnumType.STRING) @Column(name = "failed_stage") private PipelineStage failedStage;
@@ -36,7 +41,7 @@ public class TranscriptionTask {
         this.id = UUID.randomUUID().toString(); this.ownerId = ownerId; this.audioBlobId = audioBlobId;
         this.asrConfigHash = asrConfigHash; this.asrConfig = asrConfig; this.pipelineVersion = pipelineVersion; this.status = TaskStatus.QUEUED;
         this.currentStage = PipelineStage.ASR_SUBMIT; this.currentPhase = PipelinePhase.TRANSCRIPTION;
-        this.createdAt = Instant.now(); this.updatedAt = createdAt;
+        this.createdAt = Instant.now(); this.updatedAt = createdAt; this.occurredAt = createdAt; this.sceneType = SceneType.OTHER; this.tags = "[]";
     }
     public String getId() { return id; }
     public String getOwnerId() { return ownerId; }
@@ -50,6 +55,13 @@ public class TranscriptionTask {
     public boolean isTranscriptReady() { return transcriptReady; }
     public int getCurrentAttemptNumber() { return currentAttemptNumber; }
     public int getTranscriptVersion() { return transcriptVersion; }
+    public int getSpeakerCorrectionRevision() { return speakerCorrectionRevision; }
+    public Instant getOccurredAt() { return occurredAt; }
+    public SceneType getSceneType() { return sceneType; }
+    public String getSubject() { return subject; }
+    public String getTags() { return tags; }
+    public Instant getCreatedAt() { return createdAt; }
+    public Instant getUpdatedAt() { return updatedAt; }
     public String getFailureCode() { return failureCode; }
     public String getFailureMessage() { return failureMessage; }
     public PipelineStage getFailedStage() { return failedStage; }
@@ -71,6 +83,13 @@ public class TranscriptionTask {
     public void completePipeline() { this.status = TaskStatus.SUCCEEDED; this.currentStage = PipelineStage.COMPLETED; this.currentPhase = PipelinePhase.COMPLETED; this.progressPercent = 100; this.failedStage = null; this.failureCode = null; this.failureMessage = null; this.updatedAt = Instant.now(); }
     public void fail(TaskStatus status, String code, String message) { this.status = status; this.failureCode = code; this.failureMessage = message; this.failedStage = currentStage; this.updatedAt = Instant.now(); }
     public int nextTranscriptVersion() { transcriptVersion += 1; updatedAt = Instant.now(); return transcriptVersion; }
+    public void speakerCorrectionApplied() {
+        speakerCorrectionRevision += 1;
+        awaitFormalDocument();
+    }
+    public void updateMetadata(Instant occurredAt, SceneType sceneType, String subject, String tags) {
+        this.occurredAt = occurredAt; this.sceneType = sceneType; this.subject = subject; this.tags = tags; this.updatedAt = Instant.now();
+    }
     public boolean cancel() {
         if (status == TaskStatus.SUCCEEDED || status == TaskStatus.CANCELLED) return false;
         status = TaskStatus.CANCELLED; cancelRequestedAt = Instant.now(); updatedAt = cancelRequestedAt; return true;

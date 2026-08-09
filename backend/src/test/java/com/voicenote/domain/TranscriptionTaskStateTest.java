@@ -30,4 +30,17 @@ class TranscriptionTaskStateTest {
         assertThat(task.getStatus()).isEqualTo(TaskStatus.WAITING_FOR_KNOWLEDGE_BUILD);
         assertThat(task.getCurrentStage()).isEqualTo(PipelineStage.FORMAL_DOCUMENT_READY);
     }
+
+    @Test
+    void speakerCorrectionCreatesANewRevisionAndReturnsToRawDocumentReview() {
+        TranscriptionTask task = new TranscriptionTask("owner", "audio", "a".repeat(64), "manual-gates-v2");
+        task.completePipeline();
+
+        task.speakerCorrectionApplied();
+
+        assertThat(task.getSpeakerCorrectionRevision()).isEqualTo(1);
+        assertThat(task.getStatus()).isEqualTo(TaskStatus.WAITING_FOR_FORMAL_DOCUMENT);
+        assertThat(task.getCurrentPhase()).isEqualTo(PipelinePhase.RAW_DOCUMENT_REVIEW);
+        assertThat(task.getCurrentStage()).isEqualTo(PipelineStage.RAW_DOCUMENT_READY);
+    }
 }

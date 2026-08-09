@@ -19,4 +19,5 @@ public class DisabledKnowledgeVectorStore implements KnowledgeVectorStore {
     @Override public void deleteIndexVersion(String ownerId, String indexVersionId) { }
     @Override public void setVersionSearchable(String ownerId, String indexVersionId, boolean searchable) { }
     @Override public List<RetrievalHit> search(String ownerId, String query, List<Double> denseVector, int limit) { throw disabled(); }
+    @Override public List<RetrievalHit> searchScoped(String ownerId, String documentId, String indexVersionId, String query, List<Double> denseVector, int limit) { throw disabled(); }
 }

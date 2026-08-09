@@ -32,6 +32,9 @@ public class RecordingDeletionService {
     private final KnowledgeTopicRepository knowledgeTopics;
     private final KnowledgeChunkTopicRepository knowledgeChunkTopics;
     private final KnowledgeRunEvidenceRepository knowledgeEvidence;
+    private final KnowledgeRunDocumentRepository knowledgeRunDocuments;
+    private final KnowledgeRunStepRepository knowledgeRunSteps;
+    private final KnowledgeRunSourceRepository knowledgeRunSources;
     private final KnowledgeRunRepository knowledgeRuns;
     private final AnalysisRunRepository analysisRuns;
     private final AnalysisEvidenceRepository analysisEvidence;
@@ -50,7 +53,8 @@ public class RecordingDeletionService {
                                     OrganizedDocumentBlockRepository organizedBlocks, KnowledgeDocumentRepository knowledgeDocuments,
                                     KnowledgeChunkRepository knowledgeChunks, KnowledgeIndexVersionRepository knowledgeIndexVersions,
                                     KnowledgeIndexStageAttemptRepository knowledgeIndexStages, KnowledgeTopicRepository knowledgeTopics, KnowledgeChunkTopicRepository knowledgeChunkTopics,
-                                    KnowledgeRunEvidenceRepository knowledgeEvidence,
+                                    KnowledgeRunEvidenceRepository knowledgeEvidence, KnowledgeRunDocumentRepository knowledgeRunDocuments,
+                                    KnowledgeRunStepRepository knowledgeRunSteps, KnowledgeRunSourceRepository knowledgeRunSources,
                                     KnowledgeRunRepository knowledgeRuns, AnalysisRunRepository analysisRuns,
                                     AnalysisEvidenceRepository analysisEvidence, AnalysisInvocationRepository analysisInvocations, OrganizationInvocationRepository organizationInvocations,
                                     OutboxEventRepository outbox, IdempotencyRecordRepository idempotencyRecords,
@@ -60,6 +64,7 @@ public class RecordingDeletionService {
         this.segments = segments; this.transcriptSpeakers = transcriptSpeakers; this.rawTranscriptDocuments = rawTranscriptDocuments; this.organizedDocuments = organizedDocuments; this.organizedBlocks = organizedBlocks;
         this.knowledgeDocuments = knowledgeDocuments; this.knowledgeChunks = knowledgeChunks; this.knowledgeIndexVersions = knowledgeIndexVersions; this.knowledgeIndexStages = knowledgeIndexStages;
         this.knowledgeTopics = knowledgeTopics; this.knowledgeChunkTopics = knowledgeChunkTopics; this.knowledgeEvidence = knowledgeEvidence;
+        this.knowledgeRunDocuments = knowledgeRunDocuments; this.knowledgeRunSteps = knowledgeRunSteps; this.knowledgeRunSources = knowledgeRunSources;
         this.knowledgeRuns = knowledgeRuns; this.analysisRuns = analysisRuns; this.analysisEvidence = analysisEvidence;
         this.analysisInvocations = analysisInvocations; this.organizationInvocations = organizationInvocations; this.outbox = outbox; this.idempotencyRecords = idempotencyRecords;
         this.idempotency = idempotency; this.vectors = vectors; this.storage = storage;
@@ -98,11 +103,15 @@ public class RecordingDeletionService {
 
         List<KnowledgeDocument> documents = knowledgeDocuments.findByTranscriptionTaskId(taskId);
         Set<String> relatedKnowledgeRuns = new LinkedHashSet<>();
+        knowledgeRunDocuments.findByTranscriptionTaskId(taskId).forEach(document -> relatedKnowledgeRuns.add(document.getKnowledgeRunId()));
         for (KnowledgeDocument document : documents) {
             knowledgeEvidence.findByKnowledgeDocumentId(document.getId()).forEach(evidence -> relatedKnowledgeRuns.add(evidence.getKnowledgeRunId()));
         }
         for (String runId : relatedKnowledgeRuns) {
             knowledgeEvidence.deleteByKnowledgeRunId(runId);
+            knowledgeRunSources.deleteByKnowledgeRunId(runId);
+            knowledgeRunSteps.deleteByKnowledgeRunId(runId);
+            knowledgeRunDocuments.deleteByKnowledgeRunId(runId);
             knowledgeRuns.deleteById(runId);
             outbox.deleteByAggregateTypeAndAggregateId("knowledge_run", runId);
         }

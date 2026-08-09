@@ -11,6 +11,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
+import java.util.LinkedHashSet;
 import java.util.List;
 
 @Service
@@ -192,6 +193,28 @@ public class TranscriptionTaskService {
     public TranscriptionTask ownedTask(String ownerId, String taskId) {
         return tasks.findById(taskId).filter(value -> value.getOwnerId().equals(ownerId))
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "TASK_NOT_FOUND", "Transcription task was not found"));
+    }
+
+    @Transactional
+    public TranscriptionTask updateMetadata(String ownerId, String taskId, Instant occurredAt, SceneType sceneType, String subject, List<String> tags) {
+        TranscriptionTask task = ownedTask(ownerId, taskId);
+        if (occurredAt == null) throw new ApiException(HttpStatus.BAD_REQUEST, "OCCURRED_AT_REQUIRED", "occurredAt is required");
+        SceneType normalizedScene = sceneType == null ? SceneType.OTHER : sceneType;
+        String normalizedSubject = subject == null || subject.isBlank() ? null : subject.trim();
+        if (normalizedSubject != null && normalizedSubject.length() > 512) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "SUBJECT_TOO_LONG", "subject must not exceed 512 characters");
+        }
+        LinkedHashSet<String> normalizedTags = new LinkedHashSet<>();
+        for (String tag : tags == null ? List.<String>of() : tags) {
+            if (tag == null || tag.isBlank()) continue;
+            String value = tag.trim();
+            if (value.length() > 50) throw new ApiException(HttpStatus.BAD_REQUEST, "TAG_TOO_LONG", "Each tag must not exceed 50 characters");
+            normalizedTags.add(value);
+            if (normalizedTags.size() > 20) throw new ApiException(HttpStatus.BAD_REQUEST, "TOO_MANY_TAGS", "At most 20 tags are allowed");
+        }
+        try { task.updateMetadata(occurredAt, normalizedScene, normalizedSubject, mapper.writeValueAsString(normalizedTags)); }
+        catch (Exception exception) { throw new IllegalStateException("Cannot serialize task metadata", exception); }
+        return tasks.save(task);
     }
 
     public record CreateTaskCommand(String audioBlobId, AsrConfig asrConfig) { }

@@ -14,6 +14,7 @@ public class KnowledgeIndexVersion {
     @Column(name = "organized_document_id", nullable = false, columnDefinition = "CHAR(36)") private String organizedDocumentId;
     @Column(name = "organized_document_version", nullable = false) private long organizedDocumentVersion;
     @Column(name = "configuration_hash", nullable = false, columnDefinition = "CHAR(64)") private String configurationHash;
+    @Column(name = "overview_document", columnDefinition = "json") private String overviewDocument;
     @Enumerated(EnumType.STRING) @Column(nullable = false) private KnowledgeIndexVersionStatus status;
     @Enumerated(EnumType.STRING) @Column(name = "current_stage") private KnowledgeIndexStage currentStage;
     @Column(nullable = false) private boolean active;
@@ -36,6 +37,7 @@ public class KnowledgeIndexVersion {
     public String getOrganizedDocumentId() { return organizedDocumentId; }
     public long getOrganizedDocumentVersion() { return organizedDocumentVersion; }
     public String getConfigurationHash() { return configurationHash; }
+    public String getOverviewDocument() { return overviewDocument; }
     public KnowledgeIndexVersionStatus getStatus() { return status; }
     public KnowledgeIndexStage getCurrentStage() { return currentStage; }
     public boolean isActive() { return active; }
@@ -48,6 +50,7 @@ public class KnowledgeIndexVersion {
     public boolean begin() { if (status != KnowledgeIndexVersionStatus.QUEUED) return false; status = KnowledgeIndexVersionStatus.INDEXING; updatedAt = Instant.now(); return true; }
     public void stage(KnowledgeIndexStage value) { currentStage = value; updatedAt = Instant.now(); }
     public void topicsCreated(int count) { topicCount = count; updatedAt = Instant.now(); }
+    public void overviewBuilt(String overviewDocument) { this.overviewDocument = overviewDocument; updatedAt = Instant.now(); }
     public void chunksCreated(int count) { chunkCount = count; updatedAt = Instant.now(); }
     public void indexed(int count) { indexedChunkCount = count; updatedAt = Instant.now(); }
     public void ready() { status = KnowledgeIndexVersionStatus.READY; currentStage = null; failureMessage = null; updatedAt = Instant.now(); }
