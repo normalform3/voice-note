@@ -1,0 +1,20 @@
+{
+  "id": "interview-retro",
+  "version": "v2",
+  "displayName": "面试复盘",
+  "description": "区分面试官与候选人，复盘问答、观察到的能力证据和待核实项。",
+  "invocationPolicy": "AUTO",
+  "sceneTypes": ["INTERVIEW"],
+  "scopeTypes": ["CURRENT_DOCUMENT", "SELECTED_DOCUMENTS", "ALL_DOCUMENTS"],
+  "allowedTools": ["document_list", "document_overview", "knowledge_search", "transcript_context", "skill_resource_read", "finalize_answer"],
+  "outputBlocks": ["SUMMARY", "QA_REVIEW", "ASSESSMENT_MATRIX", "FINDINGS", "COMPARISON_TABLE"],
+  "requireOverviewForMultipleDocuments": true,
+  "shouldTrigger": ["复盘这场面试", "候选人的回答表现如何", "用相同维度比较几个候选人"],
+  "shouldNotTrigger": ["总结项目周会", "这段录音主要讲了什么", "给候选人发送拒信"],
+  "defaultPrompt": "复盘这场面试的问答表现、证据和待核实项。",
+  "resources": [
+    {"type": "REFERENCE", "path": "references/evaluation.md", "name": "面试评价边界", "purpose": "避免把未提问内容判定为能力不足"},
+    {"type": "TEMPLATE", "path": "templates/retro.md", "name": "面试复盘模板", "purpose": "统一问答与评价矩阵结构"},
+    {"type": "EXAMPLE", "path": "examples/expected-result.json", "name": "期望结果 fixture", "purpose": "评测面试复盘 v2 区块结构"}
+  ]
+}

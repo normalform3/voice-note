@@ -1,0 +1,20 @@
+{
+  "id": "meeting-summary",
+  "version": "v2",
+  "displayName": "会议总结",
+  "description": "提炼会议主题、已确认决策、行动项与未决问题，不补写负责人或期限。",
+  "invocationPolicy": "AUTO",
+  "sceneTypes": ["MEETING"],
+  "scopeTypes": ["CURRENT_DOCUMENT", "SELECTED_DOCUMENTS", "ALL_DOCUMENTS"],
+  "allowedTools": ["document_list", "document_overview", "knowledge_search", "transcript_context", "skill_resource_read", "finalize_answer"],
+  "outputBlocks": ["SUMMARY", "DECISIONS", "ACTION_ITEMS", "OPEN_QUESTIONS"],
+  "requireOverviewForMultipleDocuments": true,
+  "shouldTrigger": ["总结这场会议", "会议有哪些行动项", "本周会议做了哪些决定"],
+  "shouldNotTrigger": ["候选人的回答怎么样", "解释这段录音里的技术概念", "创建并发送会议邀请"],
+  "defaultPrompt": "总结会议的结论、行动项与未决问题。",
+  "resources": [
+    {"type": "REFERENCE", "path": "references/decision-status.md", "name": "决策状态规则", "purpose": "区分确认、提议和不明确"},
+    {"type": "TEMPLATE", "path": "templates/meeting.md", "name": "会议结果模板", "purpose": "保持决策、行动项和未决问题字段一致"},
+    {"type": "EXAMPLE", "path": "examples/expected-result.json", "name": "期望结果 fixture", "purpose": "评测会议总结 v2 区块结构"}
+  ]
+}

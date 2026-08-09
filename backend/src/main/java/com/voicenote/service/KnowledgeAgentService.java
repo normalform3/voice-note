@@ -83,16 +83,19 @@ public class KnowledgeAgentService {
         List<ResolvedDocument> resolved = resolveScope(ownerId, scope);
         IdempotencyRecord record = idempotency.reserve(ownerId, CREATE_AGENT_OPERATION, key, Hashing.canonicalJsonHash(command));
         if (record.getResourceId() != null) return ownedRun(ownerId, record.getResourceId());
-        AgentSkill selected = command.skillId() == null || command.skillId().isBlank() ? skills.fallback() : requireSkill(command.skillId());
+        AgentSkill selected = command.skillId() == null || command.skillId().isBlank() ? skills.fallback() : requireSkill(ownerId, command.skillId());
         boolean auto = command.skillId() == null || command.skillId().isBlank();
+        if (!auto && !skills.compatible(selected, scope.type(), resolved.stream().map(value -> value.task().getSceneType()).toList())) {
+            throw new ApiException(HttpStatus.BAD_REQUEST, "AGENT_SKILL_INCOMPATIBLE", "The selected Skill is not compatible with this document scene or scope");
+        }
         String snapshot = json(selected); String hash = Hashing.sha256(snapshot);
         KnowledgeRun run = runs.save(new KnowledgeRun(ownerId, question, properties.getDashscope().getChatModel(), scope.type(), zone.getId(),
-                auto ? "auto" : selected.id(), auto ? "pending" : selected.version(), snapshot, hash,
+                auto ? "auto" : selected.id(), auto ? "pending" : selected.version(), auto ? null : selected.versionId(), snapshot, hash,
                 properties.getAgent().getMaxModelCalls(), properties.getAgent().getMaxTurns(), properties.getAgent().getMaxToolCalls()));
         for (ResolvedDocument document : resolved) runDocuments.save(new KnowledgeRunDocument(run.getId(), document.task().getId(),
                 document.document() == null ? null : document.document().getId(), document.document() == null ? null : document.document().getActiveIndexVersionId(), metadata(document)));
         outbox.enqueue("knowledge_run", run.getId(), EventType.KNOWLEDGE_RUN_REQUESTED);
-        completeIdempotency(record, run, AgentRunView.from(run, resolved.size())); return run;
+        completeIdempotency(record, run, AgentRunView.from(run, resolved.size(), skillDisplayName(run))); return run;
     }
 
     private List<ResolvedDocument> resolveScope(String ownerId, AgentScopeCommand scope) {
@@ -152,6 +155,11 @@ public class KnowledgeAgentService {
     @Transactional(readOnly = true) public KnowledgeRun ownedRun(String ownerId, String runId) {
         return runs.findById(runId).filter(value -> value.getOwnerId().equals(ownerId)).orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "KNOWLEDGE_RUN_NOT_FOUND", "Knowledge task was not found"));
     }
+    public String skillDisplayName(KnowledgeRun run) {
+        if (run == null || "pending".equals(run.getSkillVersion()) || run.getSkillSnapshot() == null) return null;
+        try { return mapper.readTree(run.getSkillSnapshot()).path("displayName").asText(null); }
+        catch (Exception ignored) { return null; }
+    }
     @Transactional(readOnly = true) public List<KnowledgeRunDocument> runDocuments(String runId) { return runDocuments.findByKnowledgeRunIdOrderByCreatedAtAsc(runId); }
     @Transactional(readOnly = true) public List<KnowledgeRunStep> runSteps(String runId) { return steps.findByKnowledgeRunIdOrderByStepIndexAsc(runId); }
     @Transactional(readOnly = true) public List<String> queuedRunIds() {
@@ -165,7 +173,7 @@ public class KnowledgeAgentService {
     }
     @Transactional public void selectSkill(String runId, AgentSkill skill) {
         KnowledgeRun run = runs.findById(runId).orElseThrow(); String snapshot = json(skill);
-        run.selectSkill(skill.id(), skill.version(), snapshot, Hashing.sha256(snapshot)); runs.save(run);
+        run.selectSkill(skill.id(), skill.version(), skill.versionId(), snapshot, Hashing.sha256(snapshot)); runs.save(run);
     }
     @Transactional public boolean consumeModel(String runId) { KnowledgeRun run = runs.findById(runId).orElseThrow(); boolean value = run.consumeModelCall(); runs.save(run); return value; }
     @Transactional public boolean consumeTurn(String runId) { KnowledgeRun run = runs.findById(runId).orElseThrow(); boolean value = run.consumeTurn(); runs.save(run); return value; }
@@ -195,23 +203,30 @@ public class KnowledgeAgentService {
     @Transactional
     public void completeAgent(String runId, JsonNode result, AgentEvidenceLedger ledger) {
         KnowledgeRun run = runs.findById(runId).orElseThrow(); Set<String> persisted = new HashSet<>();
-        for (int findingIndex = 0; findingIndex < result.path("findings").size(); findingIndex++) {
-            JsonNode finding = result.path("findings").get(findingIndex);
-            for (JsonNode citation : finding.path("evidence")) {
-                String ref = citation.path("sourceRef").asText(null); AgentEvidenceLedger.EvidenceSource source;
-                try { source = ledger.require(ref); } catch (IllegalArgumentException exception) { throw evidenceRejected("INVALID_EVIDENCE", exception.getMessage()); }
-                validateSource(run, source);
-                String path = "/findings/" + findingIndex;
-                if (persisted.add(path + ":" + ref)) evidence.save(new KnowledgeRunEvidence(runId, source.kind(), ref, source.documentId(), source.taskId(), source.chunkId(),
-                        path, source.segmentId(), source.label(), source.url()));
-            }
-        }
+        persistResultEvidence(run, result, "", ledger, persisted);
         try {
             run.succeed(mapper.writeValueAsString(result)); runs.save(run);
             if (metrics != null && result.path("coverage").isObject()) metrics.coverage(mapper.treeToValue(result.path("coverage"), AgentExecutionContext.Coverage.class));
             recordSettled(run); notifySettled(run);
         }
         catch (Exception exception) { throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "AGENT_RESULT_INVALID", "Cannot persist the final Agent answer"); }
+    }
+
+    private void persistResultEvidence(KnowledgeRun run, JsonNode node, String path, AgentEvidenceLedger ledger, Set<String> persisted) {
+        if (node.isObject()) {
+            JsonNode citations = node.path("evidence");
+            if (citations.isArray()) for (JsonNode citation : citations) {
+                String ref = citation.path("sourceRef").asText(null); AgentEvidenceLedger.EvidenceSource source;
+                try { source = ledger.require(ref); } catch (IllegalArgumentException exception) { throw evidenceRejected("INVALID_EVIDENCE", exception.getMessage()); }
+                validateSource(run, source);
+                String resultPath = path.isBlank() ? "/" : path;
+                if (persisted.add(resultPath + ":" + ref)) evidence.save(new KnowledgeRunEvidence(run.getId(), source.kind(), ref, source.documentId(), source.taskId(), source.chunkId(),
+                        resultPath, source.segmentId(), source.label(), source.url()));
+            }
+            node.fields().forEachRemaining(field -> { if (!"evidence".equals(field.getKey())) persistResultEvidence(run, field.getValue(), path + "/" + field.getKey(), ledger, persisted); });
+        } else if (node.isArray()) {
+            for (int index = 0; index < node.size(); index++) persistResultEvidence(run, node.get(index), path + "/" + index, ledger, persisted);
+        }
     }
 
     @Transactional
@@ -272,8 +287,8 @@ public class KnowledgeAgentService {
         catch (Exception exception) { throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "KNOWLEDGE_RESULT_INVALID", "Knowledge agent did not return valid JSON"); }
     }
 
-    private AgentSkill requireSkill(String id) {
-        try { return skills.require(id); } catch (IllegalArgumentException exception) { throw new ApiException(HttpStatus.BAD_REQUEST, "AGENT_SKILL_NOT_FOUND", exception.getMessage()); }
+    private AgentSkill requireSkill(String ownerId, String id) {
+        try { return skills.require(ownerId, id); } catch (IllegalArgumentException exception) { throw new ApiException(HttpStatus.BAD_REQUEST, "AGENT_SKILL_NOT_FOUND", exception.getMessage()); }
     }
     private String json(Object value) { try { return mapper.writeValueAsString(value); } catch (Exception exception) { throw new IllegalStateException("Cannot serialize Agent state", exception); } }
     private void completeIdempotency(IdempotencyRecord record, KnowledgeRun run, Object view) {
@@ -295,10 +310,10 @@ public class KnowledgeAgentService {
     public record KnowledgeRunView(String id, KnowledgeRunStatus status, int toolCallsUsed, int maxToolCalls, String resultDocument, String failureMessage) {
         public static KnowledgeRunView from(KnowledgeRun run) { return new KnowledgeRunView(run.getId(), run.getStatus(), run.getToolCallsUsed(), run.getMaxToolCalls(), run.getResultDocument(), run.getFailureMessage()); }
     }
-    public record AgentRunView(String id, String question, KnowledgeRunStatus status, AgentScopeType scopeType, String skillId, String skillVersion,
+    public record AgentRunView(String id, String question, KnowledgeRunStatus status, AgentScopeType scopeType, String skillId, String skillVersion, String skillDisplayName,
                                int scopeDocumentCount, int modelCallsUsed, int maxModelCalls, int agentTurnsUsed, int maxAgentTurns,
                                int toolCallsUsed, int maxToolCalls, String resultDocument, String failureMessage, Instant createdAt) {
-        public static AgentRunView from(KnowledgeRun run, int scopeCount) { return new AgentRunView(run.getId(), run.getQuestion(), run.getStatus(), run.getScopeType(), run.getSkillId(), run.getSkillVersion(),
+        public static AgentRunView from(KnowledgeRun run, int scopeCount, String skillDisplayName) { return new AgentRunView(run.getId(), run.getQuestion(), run.getStatus(), run.getScopeType(), run.getSkillId(), run.getSkillVersion(), skillDisplayName,
                 scopeCount, run.getModelCallsUsed(), run.getMaxModelCalls(), run.getAgentTurnsUsed(), run.getMaxAgentTurns(), run.getToolCallsUsed(), run.getMaxToolCalls(), run.getResultDocument(), run.getFailureMessage(), run.getCreatedAt()); }
     }
     public record AgentStepView(int index, AgentStepType type, AgentStepStatus status, String toolName, String summary, String errorCode, String errorMessage, Long durationMs, Instant createdAt) {

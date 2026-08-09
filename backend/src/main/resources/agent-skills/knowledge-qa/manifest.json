@@ -1,0 +1,20 @@
+{
+  "id": "knowledge-qa",
+  "version": "v2",
+  "displayName": "知识问答",
+  "description": "基于授权听记直接回答问题，披露多文档覆盖，并在证据不足时拒答。",
+  "invocationPolicy": "AUTO",
+  "sceneTypes": ["INTERVIEW", "MEETING", "OTHER"],
+  "scopeTypes": ["CURRENT_DOCUMENT", "SELECTED_DOCUMENTS", "ALL_DOCUMENTS"],
+  "allowedTools": ["document_list", "document_overview", "knowledge_search", "transcript_context", "skill_resource_read", "finalize_answer"],
+  "outputBlocks": ["SUMMARY", "FINDINGS", "COMPARISON_TABLE"],
+  "requireOverviewForMultipleDocuments": true,
+  "shouldTrigger": ["这段录音主要讲了什么", "最近有哪些风险", "比较几份听记中的共同观点"],
+  "shouldNotTrigger": ["总结会议的决策和行动项", "复盘候选人的面试表现", "替我发送一封跟进邮件"],
+  "defaultPrompt": "基于听记回答我的问题，并标注证据不足的部分。",
+  "resources": [
+    {"type": "TEMPLATE", "path": "templates/answer.md", "name": "证据问答模板", "purpose": "组织直接答案、发现和比较表"},
+    {"type": "EXAMPLE", "path": "examples/refusal.md", "name": "证据不足示例", "purpose": "展示证据不足时的拒答边界"},
+    {"type": "EXAMPLE", "path": "examples/expected-result.json", "name": "期望结果 fixture", "purpose": "评测知识问答 v2 区块结构"}
+  ]
+}

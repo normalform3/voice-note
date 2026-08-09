@@ -15,6 +15,7 @@ public class KnowledgeRun {
     @Column(name = "time_zone", nullable = false) private String timeZone;
     @Column(name = "skill_id", nullable = false) private String skillId;
     @Column(name = "skill_version", nullable = false) private String skillVersion;
+    @Column(name = "skill_version_id", columnDefinition = "CHAR(36)") private String skillVersionId;
     @Column(name = "skill_snapshot", columnDefinition = "json") private String skillSnapshot;
     @Column(name = "skill_hash", columnDefinition = "CHAR(64)") private String skillHash;
     @Column(name = "model_id", nullable = false) private String modelId;
@@ -43,9 +44,15 @@ public class KnowledgeRun {
     public KnowledgeRun(String ownerId, String question, String modelId, AgentScopeType scopeType, String timeZone,
                         String skillId, String skillVersion, String skillSnapshot, String skillHash,
                         int maxModelCalls, int maxAgentTurns, int maxToolCalls) {
+        this(ownerId, question, modelId, scopeType, timeZone, skillId, skillVersion, null, skillSnapshot, skillHash,
+                maxModelCalls, maxAgentTurns, maxToolCalls);
+    }
+    public KnowledgeRun(String ownerId, String question, String modelId, AgentScopeType scopeType, String timeZone,
+                        String skillId, String skillVersion, String skillVersionId, String skillSnapshot, String skillHash,
+                        int maxModelCalls, int maxAgentTurns, int maxToolCalls) {
         this(ownerId, question, modelId, maxToolCalls);
         this.scopeType = scopeType; this.timeZone = timeZone; this.skillId = skillId; this.skillVersion = skillVersion;
-        this.skillSnapshot = skillSnapshot; this.skillHash = skillHash; this.maxModelCalls = maxModelCalls; this.maxAgentTurns = maxAgentTurns;
+        this.skillVersionId = skillVersionId; this.skillSnapshot = skillSnapshot; this.skillHash = skillHash; this.maxModelCalls = maxModelCalls; this.maxAgentTurns = maxAgentTurns;
     }
     public String getId() { return id; }
     public String getOwnerId() { return ownerId; }
@@ -54,6 +61,7 @@ public class KnowledgeRun {
     public String getTimeZone() { return timeZone; }
     public String getSkillId() { return skillId; }
     public String getSkillVersion() { return skillVersion; }
+    public String getSkillVersionId() { return skillVersionId; }
     public String getSkillSnapshot() { return skillSnapshot; }
     public String getModelId() { return modelId; }
     public KnowledgeRunStatus getStatus() { return status; }
@@ -69,8 +77,8 @@ public class KnowledgeRun {
     public Instant getLeaseUntil() { return leaseUntil; }
     public Instant getStartedAt() { return startedAt; }
     public boolean isLegacy() { return "legacy-v1".equals(skillVersion); }
-    public void selectSkill(String id, String skillVersion, String snapshot, String hash) {
-        this.skillId = id; this.skillVersion = skillVersion; this.skillSnapshot = snapshot; this.skillHash = hash; this.updatedAt = Instant.now();
+    public void selectSkill(String id, String skillVersion, String skillVersionId, String snapshot, String hash) {
+        this.skillId = id; this.skillVersion = skillVersion; this.skillVersionId = skillVersionId; this.skillSnapshot = snapshot; this.skillHash = hash; this.updatedAt = Instant.now();
     }
     public void queue() { if (status == KnowledgeRunStatus.PENDING) { status = KnowledgeRunStatus.QUEUED; updatedAt = Instant.now(); } }
     public boolean start() {

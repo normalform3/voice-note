@@ -1,0 +1,8 @@
+{
+  "resultSchemaVersion": 2,
+  "blocks": [
+    {"type": "SUMMARY", "content": "候选人说明了实际项目经验。", "evidenceRefs": ["src_example"]},
+    {"type": "QA_REVIEW", "items": [{"question": "如何处理故障？", "answer": "候选人描述了排查步骤。", "status": "OBSERVED", "evidenceRefs": ["src_example"]}]},
+    {"type": "ASSESSMENT_MATRIX", "items": [{"dimension": "故障分析", "assessment": "MIXED", "content": "给出步骤但缺少量化结果。", "evidenceRefs": ["src_example"]}]}
+  ]
+}

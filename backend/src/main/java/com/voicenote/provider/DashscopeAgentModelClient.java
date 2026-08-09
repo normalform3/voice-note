@@ -47,7 +47,9 @@ public class DashscopeAgentModelClient implements AgentModelClient {
             if (!tools.isEmpty()) {
                 body.put("tools", tools.stream().map(tool -> Map.of("type", "function", "function", Map.of(
                         "name", tool.name(), "description", tool.description(), "parameters", tool.parameters()))).toList());
-                body.put("tool_choice", requireTool ? "required" : "auto");
+                // DashScope Chat Completions does not accept OpenAI's string value "required".
+                // The worker enforces tool use by continuing the conversation when no tool is called.
+                body.put("tool_choice", "auto");
             }
             JsonNode response = client.post().uri("/chat/completions").contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(JsonNode.class);
             JsonNode choice = response == null ? null : response.path("choices").path(0);
@@ -68,7 +70,7 @@ public class DashscopeAgentModelClient implements AgentModelClient {
         catch (RestClientResponseException exception) {
             if (exception.getStatusCode().value() == 429) throw new ProviderException(ProviderException.Kind.RETRYABLE_REJECTION, "AGENT_RATE_LIMIT", "DashScope rate limited the agent");
             if (exception.getStatusCode().is5xxServerError()) throw new ProviderException(ProviderException.Kind.AMBIGUOUS_SUBMISSION, "AGENT_SERVER_ERROR", "Agent model outcome is unknown");
-            throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "AGENT_REJECTED", "DashScope rejected the agent request");
+            throw rejected(exception);
         } catch (Exception exception) {
             throw new ProviderException(ProviderException.Kind.AMBIGUOUS_SUBMISSION, "AGENT_NETWORK", "Agent model outcome is unknown");
         }
@@ -76,6 +78,30 @@ public class DashscopeAgentModelClient implements AgentModelClient {
 
     private static ProviderException invalid() {
         return new ProviderException(ProviderException.Kind.FINAL_REJECTION, "AGENT_RESPONSE_INVALID", "DashScope returned an invalid agent response");
+    }
+
+    private ProviderException rejected(RestClientResponseException exception) {
+        String providerCode = null;
+        String providerMessage = null;
+        try {
+            JsonNode body = mapper.readTree(exception.getResponseBodyAsString());
+            JsonNode error = body.path("error");
+            providerCode = error.path("code").asText(null);
+            providerMessage = error.path("message").asText(null);
+            if (providerCode == null) providerCode = body.path("code").asText(null);
+            if (providerMessage == null) providerMessage = body.path("message").asText(null);
+        } catch (Exception ignored) { }
+        StringBuilder message = new StringBuilder("DashScope rejected the agent request (HTTP ")
+                .append(exception.getStatusCode().value());
+        if (providerCode != null && !providerCode.isBlank()) message.append(", ").append(shorten(providerCode));
+        message.append(')');
+        if (providerMessage != null && !providerMessage.isBlank()) message.append(": ").append(shorten(providerMessage));
+        return new ProviderException(ProviderException.Kind.FINAL_REJECTION, "AGENT_REJECTED", message.toString());
+    }
+
+    private static String shorten(String value) {
+        String normalized = value.replaceAll("[\\r\\n]+", " ").trim();
+        return normalized.substring(0, Math.min(normalized.length(), 500));
     }
     private static Integer nullableInt(JsonNode node, String name) { return node.path(name).isIntegralNumber() ? node.path(name).asInt() : null; }
 }

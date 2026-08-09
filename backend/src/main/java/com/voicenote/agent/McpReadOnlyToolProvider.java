@@ -91,6 +91,7 @@ public class McpReadOnlyToolProvider {
         @Override public AgentModelClient.AgentToolDefinition definition() {
             return new AgentModelClient.AgentToolDefinition(publicName, "Call the deployment-approved read-only external tool " + publicName + ".", mapper.valueToTree(tool.inputSchema()));
         }
+        @Override public Source source() { return Source.MCP; }
         @Override public Set<String> allowedSkillIds() { return Set.copyOf(configuredSkills); }
         @Override public ToolResult execute(AgentExecutionContext context, JsonNode arguments) {
             String rawArguments;

@@ -13,4 +13,5 @@ public interface TranscriptionTaskRepository extends JpaRepository<Transcription
     @Query("select max(segment.endMs) from TranscriptSegment segment where segment.transcriptionTaskId = :taskId and segment.transcriptVersion = :transcriptVersion")
     Long findDurationMs(@Param("taskId") String taskId, @Param("transcriptVersion") int transcriptVersion);
     long countByAudioBlobId(String audioBlobId);
+    long countByOwnerId(String ownerId);
 }

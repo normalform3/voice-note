@@ -1,0 +1,7 @@
+{
+  "resultSchemaVersion": 2,
+  "blocks": [
+    {"type": "SUMMARY", "content": "直接回答用户问题。", "evidenceRefs": ["src_example"]},
+    {"type": "FINDINGS", "items": [{"title": "关键事实", "content": "可由原文核实的内容。", "evidenceRefs": ["src_example"]}]}
+  ]
+}

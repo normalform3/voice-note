@@ -52,8 +52,8 @@ public class AgentRunController {
     }
 
     @GetMapping("/skills")
-    List<SkillView> skills() {
-        return skills.all().stream().map(SkillView::from).toList();
+    List<SkillView> skills(Authentication authentication) {
+        return skills.all(CurrentUser.require(authentication).id()).stream().map(SkillView::from).toList();
     }
 
     @GetMapping("/capabilities")
@@ -72,7 +72,7 @@ public class AgentRunController {
     }
 
     private KnowledgeAgentService.AgentRunView view(KnowledgeRun run) {
-        return KnowledgeAgentService.AgentRunView.from(run, runs.runDocuments(run.getId()).size());
+        return KnowledgeAgentService.AgentRunView.from(run, runs.runDocuments(run.getId()).size(), runs.skillDisplayName(run));
     }
 
     private EvidenceView evidenceView(KnowledgeRunEvidence value) {
@@ -97,8 +97,11 @@ public class AgentRunController {
     public record EvidenceView(String resultPath, EvidenceSourceKind sourceKind, String sourceRef, String documentId, String chunkId,
                                String transcriptionTaskId, String segmentId, String topic, String speakerId, String role, String speaker,
                                Long startMs, Long endMs, String text, String externalLabel, String externalUrl) { }
-    public record SkillView(String id, String version, String displayName, String description) {
-        static SkillView from(AgentSkill value) { return new SkillView(value.id(), value.version(), value.displayName(), value.description()); }
+    public record SkillView(String id, String version, String displayName, String description, SkillSource source,
+                            SkillInvocationPolicy invocationPolicy, List<SceneType> sceneTypes, List<AgentScopeType> scopeTypes,
+                            List<SkillBlockType> outputBlocks, String defaultPrompt, List<String> suggestedPrompts) {
+        static SkillView from(AgentSkill value) { return new SkillView(value.id(), value.version(), value.displayName(), value.description(),
+                value.source(), value.invocationPolicy(), value.sceneTypes(), value.scopeTypes(), value.outputBlocks(), value.defaultPrompt(), value.routingExamples()); }
     }
     public record Capabilities(boolean enabled, boolean rerankEnabled, boolean mcpEnabled, int maxScopeDocuments,
                                int maxModelCalls, int maxTurns, int maxToolCalls) { }

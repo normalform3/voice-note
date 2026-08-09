@@ -1,13 +1,16 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import { api, hashFile, key, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentCapabilities, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PipelineStage, type Segment, type Speaker, type SpeakerCorrectionResult, type Task, type WorkspaceSnapshot } from './api'
+import AgentResultBlocks from './AgentResult.vue'
+import ProfilePage from './ProfilePage.vue'
+import SkillManager from './SkillManager.vue'
+import ToolsCenter from './ToolsCenter.vue'
+import { api, hashFile, key, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentCapabilities, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PipelineStage, type Segment, type Speaker, type SpeakerCorrectionResult, type Task, type WorkspaceSnapshot } from './api'
 
-type WorkspaceView = 'library' | 'document'
+type WorkspaceView = 'library' | 'document' | 'skills' | 'tools' | 'profile'
 type DetailTab = 'transcript' | 'summary' | 'organized'
-type Coverage = { scopeDocumentCount: number; overviewedDocumentIds: string[]; searchedDocumentIds: string[]; citedDocumentIds: string[]; omittedDocumentIds: string[]; limitations: string[] }
-type Finding = { title?: string; content?: string; evidence?: { sourceRef?: string; chunkId?: string; segmentId?: string }[] }
 
 const token = ref(localStorage.getItem('voicenote_token') || '')
+const signedInAccount = ref(localStorage.getItem('voicenote_account') || '')
 const loginMode = ref<'login' | 'register'>('login')
 const account = ref('')
 const password = ref('')
@@ -20,6 +23,7 @@ const agent = ref<AgentRunDetail | null>(null)
 const agentSkills = ref<AgentSkill[]>([])
 const agentCapabilities = ref<AgentCapabilities | null>(null)
 const selectedSkillId = ref('')
+const skillSelectionNotice = ref('')
 const selectedTaskIds = ref<string[]>([])
 const libraryScope = ref<'selected' | 'all'>('all')
 const analysisRuns = ref<AnalysisRun[]>([])
@@ -82,6 +86,10 @@ let workspaceRequest: Promise<void> | null = null
 let documentRequestVersion = 0
 
 const isDocumentView = computed(() => workspaceView.value === 'document')
+const isSkillsView = computed(() => workspaceView.value === 'skills')
+const isToolsView = computed(() => workspaceView.value === 'tools')
+const isProfileView = computed(() => workspaceView.value === 'profile')
+const isUtilityView = computed(() => isSkillsView.value || isToolsView.value || isProfileView.value)
 const agentScopeType = computed<AgentScopeType>(() => isDocumentView.value ? 'CURRENT_DOCUMENT' : libraryScope.value === 'selected' ? 'SELECTED_DOCUMENTS' : 'ALL_DOCUMENTS')
 const selectedDocument = computed(() => documents.value.find(document => document.transcriptionTaskId === selected.value?.id))
 const knowledgeBuild = computed<KnowledgeIndexBuild | undefined>(() => selectedDocument.value?.currentBuild || selected.value?.knowledgeDocument?.currentBuild)
@@ -98,6 +106,23 @@ const activeEvidence = computed(() => agent.value?.evidence || [])
 const activeRunUsage = computed(() => activeRun.value
   ? `模型 ${activeRun.value.modelCallsUsed}/${activeRun.value.maxModelCalls} · 工具 ${activeRun.value.toolCallsUsed}/${activeRun.value.maxToolCalls}` : '')
 const parsedAnswer = computed(() => parseResultDocument(activeRun.value?.resultDocument))
+const scopeSceneTypes = computed<Task['sceneType'][]>(() => {
+  if (agentScopeType.value === 'CURRENT_DOCUMENT') return selected.value ? [selected.value.sceneType] : []
+  if (agentScopeType.value === 'SELECTED_DOCUMENTS') return tasks.value.filter(task => selectedTaskIds.value.includes(task.id)).map(task => task.sceneType)
+  const readyTaskIds = new Set(documents.value.filter(document => document.status === 'READY').map(document => document.transcriptionTaskId))
+  return tasks.value.filter(task => readyTaskIds.has(task.id)).map(task => task.sceneType)
+})
+function skillCompatibilityIssue(skill: AgentSkill) {
+  if (!skill.scopeTypes.includes(agentScopeType.value)) return '不支持当前问答范围'
+  if (scopeSceneTypes.value.length && !scopeSceneTypes.value.some(scene => skill.sceneTypes.includes(scene))) return '不支持当前场景'
+  return ''
+}
+const selectedSkillIssue = computed(() => {
+  const skill = agentSkills.value.find(value => value.id === selectedSkillId.value)
+  return skill ? skillCompatibilityIssue(skill) : ''
+})
+const builtInAgentSkills = computed(() => agentSkills.value.filter(skill => skill.source === 'BUILTIN'))
+const customAgentSkills = computed(() => agentSkills.value.filter(skill => skill.source === 'USER'))
 const visibleHistory = computed(() => agentRuns.value.filter(run => run.scopeType === agentScopeType.value))
 const summaryDetail = computed(() => {
   const task = selected.value
@@ -122,14 +147,25 @@ const agentDescription = computed(() => agentScopeType.value === 'CURRENT_DOCUME
 const agentPlaceholder = computed(() => agentScopeType.value === 'CURRENT_DOCUMENT'
   ? '例如：这场会议的结论和待办是什么？'
   : '例如：近期会议有哪些未决事项？')
-const agentSuggestions = computed(() => agentScopeType.value === 'CURRENT_DOCUMENT'
-  ? ['提炼这份录音的重点内容', '有哪些明确的下一步行动？', '不同发言人的主要观点是什么？']
-  : ['总结近期会议中的关键结论', '跨会议有哪些重复出现的风险？', '找出所有需要跟进的行动项'])
+const agentSuggestions = computed(() => {
+  const selectedSkill = agentSkills.value.find(value => value.id === selectedSkillId.value)
+  if (selectedSkill) return [selectedSkill.defaultPrompt, ...(selectedSkill.suggestedPrompts || [])].filter((value): value is string => Boolean(value)).slice(0, 3)
+  return agentScopeType.value === 'CURRENT_DOCUMENT'
+    ? ['提炼这份录音的重点内容', '有哪些明确的下一步行动？', '不同发言人的主要观点是什么？']
+    : ['总结近期会议中的关键结论', '跨会议有哪些重复出现的风险？', '找出所有需要跟进的行动项']
+})
+const activeSkillName = computed(() => {
+  if (!activeRun.value) return ''
+  if (activeRun.value.skillId === 'auto' || activeRun.value.skillVersion === 'pending') return '正在匹配 Skill'
+  return activeRun.value.skillDisplayName || agentSkills.value.find(item => item.id === activeRun.value?.skillId)?.displayName || activeRun.value.skillId
+})
+const shortSignedInAccount = computed(() => signedInAccount.value.length > 18 ? `${signedInAccount.value.slice(0, 15)}…` : signedInAccount.value || '账号')
+const signedInInitial = computed(() => signedInAccount.value.trim().charAt(0).toUpperCase() || 'U')
 const importElapsedMs = computed(() => importStartedAt.value == null ? 0 : Math.max(0, clockNow.value - importStartedAt.value))
 
 function parseResultDocument(raw?: string) {
   if (!raw) return null
-  try { return JSON.parse(raw) as { answer?: string; findings?: Finding[]; coverage?: Coverage } }
+  try { return JSON.parse(raw) as AgentResultDocument }
   catch { return { answer: raw, findings: [] } }
 }
 function taskTitle(task: Task) {
@@ -203,6 +239,9 @@ function showLibrary() {
   workspaceView.value = 'library'
   mobileAgentOpen.value = false
 }
+function showSkills() { workspaceView.value = 'skills'; mobileAgentOpen.value = false }
+function showTools() { workspaceView.value = 'tools'; mobileAgentOpen.value = false }
+function showProfile() { workspaceView.value = 'profile'; mobileAgentOpen.value = false }
 function toggleAgent() { mobileAgentOpen.value = !mobileAgentOpen.value }
 function triggerFilePicker() { fileInput.value?.click() }
 function useSuggestion(suggestion: string) { question.value = suggestion }
@@ -217,7 +256,9 @@ async function authenticate() {
   try {
     const { data } = await api.post(`/auth/${loginMode.value}`, { account: account.value, password: password.value })
     token.value = data.accessToken
+    signedInAccount.value = data.account || account.value
     localStorage.setItem('voicenote_token', token.value)
+    localStorage.setItem('voicenote_account', signedInAccount.value)
     await loadWorkspace(); connectProgressEvents()
   } catch (error: any) { authError.value = error.response?.data?.message || '无法完成登录' }
 }
@@ -247,7 +288,13 @@ async function loadDocuments() { const { data } = await api.get<KnowledgeDocumen
 async function loadRuns() { const { data } = await api.get<KnowledgeRun[]>('/knowledge-runs'); runs.value = data }
 async function loadAnalysisRuns() { const { data } = await api.get<AnalysisRun[]>('/analysis-runs'); analysisRuns.value = data }
 async function loadAgentRuns() { const { data } = await api.get<AgentRun[]>('/agent-runs'); agentRuns.value = data }
-async function loadAgentSkills() { const { data } = await api.get<AgentSkill[]>('/agent-runs/skills'); agentSkills.value = data }
+async function loadAgentSkills() {
+  const { data } = await api.get<AgentSkill[]>('/agent-runs/skills'); agentSkills.value = data
+  if (selectedSkillId.value && !data.some(value => value.id === selectedSkillId.value)) {
+    selectedSkillId.value = ''; skillSelectionNotice.value = '原 Skill 已归档或不可见，已恢复自动匹配。'
+  }
+}
+async function refreshSkillCatalog() { try { await loadAgentSkills() } catch { /* Skill page keeps its own visible error state. */ } }
 async function loadAgentCapabilities() { const { data } = await api.get<AgentCapabilities>('/agent-runs/capabilities'); agentCapabilities.value = data }
 async function choose(task: Task) {
   agent.value = null
@@ -429,13 +476,6 @@ async function saveSpeakerName(speaker: Speaker) {
     const { data: transcript } = await api.get<Segment[]>(`/transcription-tasks/${selected.value.id}/segments`)
     segments.value = transcript
   } finally { savingSpeakerId.value = null }
-}
-function evidenceLabel(citation: { sourceRef?: string; chunkId?: string; segmentId?: string }) {
-  const evidence = activeEvidence.value.find(item => citation.sourceRef ? item.sourceRef === citation.sourceRef : item.chunkId === citation.chunkId && item.segmentId === citation.segmentId)
-  if (!evidence) return '原文证据 ↗'
-  if (evidence.sourceKind === 'EXTERNAL') return `${evidence.externalLabel || '外部来源'} ↗`
-  if (evidence.sourceKind === 'DOCUMENT_METADATA') return `${evidence.topic || '文档元数据'} · ${evidence.text || '范围信息'}`
-  return `${evidence.topic || '原文'} · ${evidence.speaker || evidence.speakerId || '说话人'} · ${timecode(evidence.startMs || 0)} ↗`
 }
 function stepLabel(type: string, toolName?: string) {
   if (type === 'ROUTE') return '选择任务 Skill'
@@ -832,6 +872,8 @@ function logout() {
   if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
   token.value = ''
   localStorage.removeItem('voicenote_token')
+  localStorage.removeItem('voicenote_account')
+  signedInAccount.value = ''
   selected.value = null
   documents.value = []
   runs.value = []
@@ -847,8 +889,16 @@ function logout() {
   documentRequestVersion++
   summaryByTaskId.value = {}
   workspaceView.value = 'library'
+  selectedSkillId.value = ''
+  skillSelectionNotice.value = ''
 }
 watch(speakerDiarization, enabled => { if (!enabled) speakerCount.value = null })
+watch(selectedSkillIssue, issue => {
+  if (selectedSkillId.value && issue) {
+    selectedSkillId.value = ''
+    skillSelectionNotice.value = `所选 Skill ${issue}，已恢复自动匹配。`
+  }
+})
 onMounted(() => {
   clockTimer = window.setInterval(() => { clockNow.value = Date.now() }, 1000)
   if (token.value) { void loadWorkspace().catch(() => {}); void connectProgressEvents() }
@@ -880,19 +930,23 @@ onBeforeUnmount(() => {
     </aside>
   </main>
 
-  <main v-else class="app-shell">
+  <main v-else class="app-shell" :class="{ 'utility-view': isUtilityView }">
     <header class="topbar">
       <button class="brand" type="button" @click="showLibrary" aria-label="返回音频资料库">voice<span>note</span></button>
       <p>音频听记与私人知识库</p>
       <div class="topbar-meta">
-        <span>{{ documents.filter(item => item.status === 'READY').length }} 份已收录</span>
-        <button class="quiet logout" @click="logout">退出</button>
+        <button class="skill-nav" :class="{ active: isSkillsView }" type="button" @click="showSkills"><i>✦</i><span>Skill 设置</span></button>
+        <button class="skill-nav" :class="{ active: isToolsView }" type="button" @click="showTools"><i>⌘</i><span>Tools 中心</span></button>
+        <button class="account-nav" :class="{ active: isProfileView }" type="button" @click="showProfile"><span class="account-avatar">{{ signedInInitial }}</span><span class="account-name">{{ shortSignedInAccount }}</span></button>
       </div>
-      <button class="mobile-agent-toggle" type="button" :aria-expanded="mobileAgentOpen" @click="toggleAgent">{{ mobileAgentOpen ? '关闭问答' : 'AI 问答' }}</button>
+      <button v-if="!isUtilityView" class="mobile-agent-toggle" type="button" :aria-expanded="mobileAgentOpen" @click="toggleAgent">{{ mobileAgentOpen ? '关闭问答' : 'AI 问答' }}</button>
     </header>
 
     <section class="content-pane">
-      <section v-if="workspaceView === 'library'" class="library-page page-reveal">
+      <SkillManager v-if="workspaceView === 'skills'" @catalog-changed="refreshSkillCatalog" />
+      <ToolsCenter v-else-if="workspaceView === 'tools'" :skills="agentSkills" :mcp-enabled="agentCapabilities?.mcpEnabled === true" />
+      <ProfilePage v-else-if="workspaceView === 'profile'" :account="signedInAccount" @logout="logout" />
+      <section v-else-if="workspaceView === 'library'" class="library-page page-reveal">
         <header class="page-intro">
           <div>
             <p class="eyebrow">YOUR AUDIO LIBRARY</p>
@@ -1045,20 +1099,21 @@ onBeforeUnmount(() => {
       </section>
     </section>
 
-    <aside class="agent-rail" :class="{ 'is-open': mobileAgentOpen }">
+    <aside v-if="!isUtilityView" class="agent-rail" :class="{ 'is-open': mobileAgentOpen }">
       <header class="agent-head"><div><p class="eyebrow">AI KNOWLEDGE</p><h3>{{ agentTitle }}</h3></div><button class="agent-close" type="button" @click="mobileAgentOpen = false" aria-label="关闭 AI 问答">×</button></header>
       <p class="agent-description">{{ agentDescription }}</p>
       <div class="agent-suggestions"><button v-for="suggestion in agentSuggestions" :key="suggestion" type="button" @click="useSuggestion(suggestion)">{{ suggestion }} <span>↗</span></button></div>
       <div v-if="!isDocumentView" class="scope-switch" aria-label="问答范围"><button :class="{ active: libraryScope === 'all' }" @click="libraryScope = 'all'">全部资料</button><button :class="{ active: libraryScope === 'selected' }" @click="libraryScope = 'selected'">已勾选 · {{ selectedTaskIds.length }}</button></div>
-      <label class="skill-select">任务方式<select v-model="selectedSkillId"><option value="">自动选择 Skill</option><option v-for="skill in agentSkills" :key="skill.id" :value="skill.id">{{ skill.displayName }}</option></select></label>
+      <label class="skill-select">任务方式<select v-model="selectedSkillId" @change="skillSelectionNotice = ''"><option value="">自动匹配 Skill（推荐）</option><optgroup label="内置 Skill"><option v-for="skill in builtInAgentSkills" :key="skill.id" :value="skill.id" :disabled="Boolean(skillCompatibilityIssue(skill))">{{ skill.displayName }} · 内置{{ skillCompatibilityIssue(skill) ? `（${skillCompatibilityIssue(skill)}）` : '' }}</option></optgroup><optgroup v-if="customAgentSkills.length" label="我的 Skill"><option v-for="skill in customAgentSkills" :key="skill.id" :value="skill.id" :disabled="Boolean(skillCompatibilityIssue(skill))">{{ skill.displayName }} · 我的{{ skillCompatibilityIssue(skill) ? `（${skillCompatibilityIssue(skill)}）` : '' }}</option></optgroup></select></label>
+      <p v-if="skillSelectionNotice" class="skill-selection-notice">{{ skillSelectionNotice }}</p>
       <div class="ask-box"><textarea v-model="question" rows="4" :disabled="agentCapabilities?.enabled === false" :placeholder="agentPlaceholder"></textarea><div><span>{{ agentScopeType === 'CURRENT_DOCUMENT' ? '当前音频' : agentScopeType === 'SELECTED_DOCUMENTS' ? `${selectedTaskIds.length} 份已勾选` : '全部已收录资料' }}</span><button class="send-button" :disabled="agentCapabilities?.enabled !== true || asking || !question.trim() || (agentScopeType === 'CURRENT_DOCUMENT' && !canAnalyzeCurrent) || (agentScopeType === 'SELECTED_DOCUMENTS' && !selectedTaskIds.length)" @click="askAgent">{{ asking ? '处理中' : '发送' }} <b>↑</b></button></div></div>
       <p v-if="agentCapabilities?.enabled === false" class="agent-note">自主 Agent 正在灰度中，请在部署环境启用 VOICENOTE_AGENT_ENABLED。</p>
       <p v-else-if="agentScopeType === 'CURRENT_DOCUMENT' && !canAnalyzeCurrent" class="agent-note">当前音频仍在转写，完成后即可提问。</p>
       <p v-else-if="agentScopeType === 'SELECTED_DOCUMENTS' && !selectedTaskIds.length" class="agent-note">请先在资料库勾选 1–50 份已收录文档。</p>
 
       <section v-if="activeRun" class="result-card">
-        <div class="result-head"><span>{{ activeRun.skillId === 'auto' ? '自主 Agent' : agentSkills.find(item => item.id === activeRun?.skillId)?.displayName || activeRun.skillId }}</span><small>{{ statusText(activeRun.status) }} · {{ activeRunUsage }}</small></div>
-        <template v-if="parsedAnswer"><p class="answer">{{ parsedAnswer.answer }}</p><article v-for="(finding, index) in parsedAnswer.findings" :key="index" class="finding"><b>{{ finding.title || `发现 ${index + 1}` }}</b><p>{{ finding.content }}</p><button v-for="citation in finding.evidence" :key="citation.sourceRef || `${citation.chunkId || 'local'}-${citation.segmentId}`" class="citation" @click="openEvidence(citation)">{{ evidenceLabel(citation) }}</button></article>
+        <div class="result-head"><span>{{ activeSkillName }}</span><small>{{ statusText(activeRun.status) }} · {{ activeRunUsage }}</small></div>
+        <template v-if="parsedAnswer"><AgentResultBlocks :result="parsedAnswer" :evidence="activeEvidence" @evidence="openEvidence" />
           <div v-if="parsedAnswer.coverage" class="coverage-strip"><span>范围 {{ parsedAnswer.coverage.scopeDocumentCount }}</span><span>概览 {{ parsedAnswer.coverage.overviewedDocumentIds.length }}</span><span>深入 {{ parsedAnswer.coverage.searchedDocumentIds.length }}</span><span>引用 {{ parsedAnswer.coverage.citedDocumentIds.length }}</span><p v-if="parsedAnswer.coverage.limitations.length">限制：{{ parsedAnswer.coverage.limitations.join('；') }}</p></div>
         </template>
         <p v-else-if="activeRun.failureMessage" class="error">{{ activeRun.failureMessage }}</p>

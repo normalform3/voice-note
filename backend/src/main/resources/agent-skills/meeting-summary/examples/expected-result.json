@@ -1,0 +1,8 @@
+{
+  "resultSchemaVersion": 2,
+  "blocks": [
+    {"type": "SUMMARY", "content": "会议围绕发布计划达成共识。", "evidenceRefs": ["src_example"]},
+    {"type": "DECISIONS", "items": [{"title": "发布计划", "content": "采用方案 A。", "status": "CONFIRMED", "evidenceRefs": ["src_example"]}]},
+    {"type": "ACTION_ITEMS", "items": [{"title": "完成验收", "content": "发布前完成验收。", "owner": null, "dueAt": null, "status": "UNKNOWN", "evidenceRefs": ["src_example"]}]}
+  ]
+}

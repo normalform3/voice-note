@@ -22,4 +22,5 @@ public class UserAccount {
     public String getAccount() { return account; }
     public String getPasswordHash() { return passwordHash; }
     public PasswordScheme getPasswordScheme() { return passwordScheme; }
+    public Instant getCreatedAt() { return createdAt; }
 }

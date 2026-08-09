@@ -14,4 +14,5 @@ public interface KnowledgeDocumentRepository extends JpaRepository<KnowledgeDocu
     List<KnowledgeDocument> findTop10ByStatusOrderByCreatedAtAsc(KnowledgeDocumentStatus status);
     List<KnowledgeDocument> findByTranscriptionTaskId(String taskId);
     void deleteByTranscriptionTaskId(String taskId);
+    long countByOwnerIdAndStatus(String ownerId, KnowledgeDocumentStatus status);
 }

@@ -23,11 +23,14 @@ voicenote 将上传的音频保存为带时间轴的听记记录，并把完成�
 | 自主知识 Agent | 每次提问创建独立的有界 Run。Workflow 冻结用户、文档、索引版本、时区和 Skill；单 Agent 在预算内选择文档、概览、混合检索、原文上下文和最终校验工具。 |
 | 私有知识库 | 用户确认后，系统从正式文档快照生成 Topic 和知识块，并建立独立索引版本。每个版本分别记录入库、切块和索引进度；只有激活版本可供检索。 |
 | 单/多文档问答 | 支持当前文档、勾选 1–50 份文档或全部已收录文档。宽范围任务先分页读取版本化 Overview，再对最多 12 份文档执行 Dense + BM25 + RRF 检索和可选 Rerank。 |
-| Skill 与只读 MCP | 内置通用问答、面试复盘和会议总结 Skill；可从部署环境连接显式 allowlist 的 Streamable HTTP MCP 只读工具。远端断连不会阻断本地问答。 |
+| Skill 平台 | 内置知识问答、面试复盘和会议总结 v2；用户可在顶部 Skill 设置页手工创建或 AI 草拟私人 Draft，添加 Markdown 参考资料、模板与示例，执行触发测试后发布不可变版本。问答默认自动路由，也可从完整的已发布 Skill 列表手动覆盖；私人 Skill 可归档或永久删除。 |
+| Skill 权限与只读 MCP | 私人 Skill 仅能组合平台固定结果区块，并使用本地只读工具；不支持脚本、Hook、网络、写操作或子 Agent。部署批准的 Streamable HTTP MCP 只读工具只允许内置 Skill 显式声明。 |
+| Tools 中心 | 顶部独立页面展示当前进程实际注册的本地与 MCP 工具，并可按已发布 Skill 查看运行时实际可用权限和输入协议。页面只读，不提供工具执行或授权修改。 |
 | 证据与覆盖率 | 工具来源登记为不可伪造的 `sourceRef`。内容结论至少引用一条本次读取的转写证据，服务端复核范围、索引版本、Chunk 与 Segment；结果披露概览、深入检索、引用和遗漏文档。 |
+| 轻量个人中心 | 顶部账号入口打开独立页面，读取账号、注册时间、录音数、已收录数、Agent 问答数和私人 Skill 数，并提供退出登录。 |
 | 实时进度 | 工作台通过认证后的 SSE 接收听记阶段、三阶段知识索引构建和知识任务完成通知。 |
 
-> **当前边界：**账号密码登录与 JWT 用户隔离已经实现；这不是一个具备组织、角色或权限管理的多租户后台。Agent 由 `VOICENOTE_AGENT_ENABLED` 灰度启用，每个问题互相独立且没有会话记忆。MCP 首版只支持后端配置的只读 Tools，不包含真实钉钉接入、写操作、Resources、Prompts、Sampling 或 Elicitation。
+> **当前边界：**账号密码登录与 JWT 用户隔离已经实现；这不是一个具备组织、角色或权限管理的多租户后台。Agent 由 `VOICENOTE_AGENT_ENABLED` 灰度启用，每个问题互相独立且没有会话记忆。私人 Skill 仅创建者可见，暂不支持导入导出、组织共享或市场；MCP 仍只支持后端配置的内置 Skill 只读 Tools。
 
 ## 架构概览
 
@@ -72,8 +75,9 @@ flowchart LR
 4. 点击“生成正式文档”，系统将转写清洗并按主题、对话或问答对组织；每个主题仍保留可播放的起始时间。
 5. 在正式文档完成后，可选生成 AI 摘要，并在详情页右侧对当前文档提问。摘要和问答的证据链接会回到对应原文段落。
 6. 需要跨录音检索时，点击“建立知识库”。系统按“知识库入库 → 按主题切块 → 构建检索索引”创建一个新的索引版本。所有新点写入成功并标记为可检索后，才切换 MySQL 中的活动版本；已有活动版本在切换前继续服务查询。对于已收录文档，重建失败不会替换原有活动版本。
-7. 在详情页选择当前文档，或在资料库勾选若干文档/选择全部范围后提问。创建 Run 时系统冻结授权文档、活动索引版本和业务元数据；Agent 只能在该快照内搜索。
-8. 回答展示服务端校验过的来源、文档覆盖率和折叠运行轨迹；转写证据仍可回到原始段落与音频时间。
+7. 通过顶部“Skill 设置”查看内置 Skill，或创建、测试并发布私人 Skill。私人 Skill 发布后默认手动；正负触发样例通过当前预览后才能加入自动路由。顶部“Tools 中心”可进一步核对全局工具目录和每个 Skill 的有效权限。
+8. 在详情页选择当前文档，或在资料库勾选若干文档/选择全部范围后提问。默认发送 `skillId: null` 自动匹配，也可在问答区手动指定兼容 Skill。创建 Run 时系统冻结授权文档、活动索引版本、Skill 版本和业务元数据。
+9. 回答展示服务端校验过的类型化区块、来源、文档覆盖率和折叠运行轨迹；旧版 `answer/findings` 结果仍可读取，转写证据仍可回到原始段落与音频时间。
 
 ## 界面流程
 
@@ -203,11 +207,11 @@ Agent 看到的工具名为 `mcp.calendar.list_events`。服务端不信任远�
 
 ### 有界单 Agent、覆盖率检索与证据边界
 
-每次提问都是独立 Agent Run。Workflow 先确定不可变的用户与文档范围，保存活动索引版本、元数据、Skill 快照和哈希；模型只决定调用哪个 allowlist Tool 以及搜索内容，不能提交 ownerId 或扩张文档范围。Run、文档范围、模型/工具 Step、证据账本和租约均持久化；租约过期后从已成功的只读 Tool 输出恢复，隐式推理不会保存或展示。
+每次提问都是独立 Agent Run。Workflow 先确定不可变的用户与文档范围，保存活动索引版本、元数据、Skill 版本 ID、快照和哈希；模型只决定调用哪个 allowlist Tool 以及搜索内容，不能提交 ownerId 或扩张文档范围。自动路由只加载 Catalog 元数据和正负触发样例，Skill 命中后才加载 Instructions；资源只暴露名称与用途，正文由 `skill_resource_read` 每次最多读取 8 KB。Run、文档范围、模型/工具 Step、证据账本和租约均持久化；租约过期后从已成功的只读 Tool 输出恢复，隐式推理不会保存或展示。
 
 `KnowledgeSearchTool` 对指定的每份文档分别执行 Dense + BM25 + RRF，每份保留最多四个候选，总候选池最多 50。选择最终上下文时先为有命中的目标文档保留一个结果，再按重排分数和单文档配额补充，最终受 12 个 Chunk 与 10,000 Token 限制。当前文档尚未建立索引时，`TranscriptContextTool` 直接对该转写版本执行本地 BM25。
 
-所有 Tool 产生的来源先进入持久化证据账本。`FinalizeAnswerTool` 只接受账本内的随机 `sourceRef`，且每条内容型发现必须至少引用一个转写来源。完成事务再次复核 Run 范围、文档、索引版本、Chunk、Segment 和路径后才保存回答；前端只显示安全的 Step 摘要、覆盖数量、耗时和可回跳证据。
+所有 Tool 产生的来源先进入持久化证据账本。`FinalizeAnswerTool` 根据当前 Skill 动态限制 `SUMMARY`、`FINDINGS`、`DECISIONS`、`ACTION_ITEMS`、`OPEN_QUESTIONS`、`QA_REVIEW`、`ASSESSMENT_MATRIX` 与 `COMPARISON_TABLE`，只接受账本内的随机 `sourceRef`；每条事实项必须至少引用一个转写来源，未观察到的评价用 `NOT_OBSERVED`。完成事务再次复核 Run 范围、文档、索引版本、Chunk、Segment 和结果路径后才保存回答；前端同时兼容 v2 区块和旧结果。
 
 相关实现：
 
@@ -215,6 +219,7 @@ Agent 看到的工具名为 `mcp.calendar.list_events`。服务端不信任远�
 - [KnowledgeSearchService](backend/src/main/java/com/voicenote/service/KnowledgeSearchService.java)：复核活动版本、按 Topic 扩展邻近上下文并施加上下文上限。
 - [KnowledgeAgentWorker](backend/src/main/java/com/voicenote/service/KnowledgeAgentWorker.java)：执行标准 Function Calling Tool Loop、预算、最后回合和租约恢复。
 - [KnowledgeAgentService](backend/src/main/java/com/voicenote/service/KnowledgeAgentService.java)：创建范围/Skill 快照，持久化步骤与账本，并校验最终证据。
+- [SkillService](backend/src/main/java/com/voicenote/service/SkillService.java)：管理私人 Draft、版本发布、资源限制、触发预览、自动启用和所有者隔离。
 - [内置 Agent Skills](backend/src/main/resources/agent-skills)：仓库版本化的通用问答、面试复盘和会议总结清单。
 - [Agent 评测说明](docs/agent-evaluation.md)：小型评测集、脱敏结果格式与指标计算方式。
 

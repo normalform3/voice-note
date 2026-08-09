@@ -30,7 +30,7 @@ export type KnowledgeEvidence = { resultPath: string; documentId: string; chunkI
 export type KnowledgeRunDetail = { run: KnowledgeRun; evidence: KnowledgeEvidence[] }
 export type AgentScopeType = 'CURRENT_DOCUMENT' | 'SELECTED_DOCUMENTS' | 'ALL_DOCUMENTS'
 export type AgentRun = {
-  id: string; question: string; status: string; scopeType: AgentScopeType; skillId: string; skillVersion: string; scopeDocumentCount: number
+  id: string; question: string; status: string; scopeType: AgentScopeType; skillId: string; skillVersion: string; skillDisplayName?: string; scopeDocumentCount: number
   modelCallsUsed: number; maxModelCalls: number; agentTurnsUsed: number; maxAgentTurns: number; toolCallsUsed: number; maxToolCalls: number
   resultDocument?: string; failureMessage?: string; createdAt: string
 }
@@ -41,8 +41,41 @@ export type AgentEvidence = {
   text?: string; externalLabel?: string; externalUrl?: string
 }
 export type AgentRunDetail = { run: AgentRun; documentIds: string[]; steps: AgentStep[]; evidence: AgentEvidence[] }
-export type AgentSkill = { id: string; version: string; displayName: string; description: string }
+export type SkillSource = 'BUILTIN' | 'USER'
+export type SkillStatus = 'DRAFT' | 'PUBLISHED' | 'ARCHIVED'
+export type SkillInvocationPolicy = 'MANUAL_ONLY' | 'AUTO'
+export type SkillBlockType = 'SUMMARY' | 'FINDINGS' | 'DECISIONS' | 'ACTION_ITEMS' | 'OPEN_QUESTIONS' | 'QA_REVIEW' | 'ASSESSMENT_MATRIX' | 'COMPARISON_TABLE'
+export type SkillResourceType = 'REFERENCE' | 'TEMPLATE' | 'EXAMPLE'
+export type AgentSkill = {
+  id: string; version: string; displayName: string; description: string; source: SkillSource; invocationPolicy: SkillInvocationPolicy
+  sceneTypes: Task['sceneType'][]; scopeTypes: AgentScopeType[]; outputBlocks: SkillBlockType[]; defaultPrompt?: string; suggestedPrompts: string[]
+}
+export type SkillSummary = {
+  id: string; displayName: string; description: string; source: SkillSource; status: SkillStatus; invocationPolicy: SkillInvocationPolicy
+  version?: string; publishedVersion?: string; hasDraft: boolean; sceneTypes: Task['sceneType'][]; scopeTypes: AgentScopeType[]
+  outputBlocks: SkillBlockType[]; updatedAt: string
+}
+export type SkillResource = { id?: string; key: string; type: SkillResourceType; name: string; purpose: string; markdownContent?: string; sizeBytes?: number }
+export type SkillVersion = {
+  id: string; version: string; instructions: string; allowedTools: string[]; outputBlocks: SkillBlockType[]; shouldTrigger: string[]
+  shouldNotTrigger: string[]; defaultPrompt?: string; contentHash: string; triggerPreviewPassed: boolean; publishedAt?: string; resources: SkillResource[]
+}
+export type SkillDetail = {
+  id: string; displayName: string; description: string; source: SkillSource; status: SkillStatus; invocationPolicy: SkillInvocationPolicy
+  sceneTypes: Task['sceneType'][]; scopeTypes: AgentScopeType[]; draft?: SkillVersion; published?: SkillVersion; versions: string[]; createdAt: string; updatedAt: string
+}
+export type TriggerPreview = { passed: boolean; positiveCount: number; negativeCount: number; conflicts: { text: string; expected: boolean; actual: boolean; reason: string }[] }
+export type Profile = { account: string; createdAt: string; statistics: { recordingCount: number; indexedDocumentCount: number; agentRunCount: number; customSkillCount: number } }
+export type ResultCitation = { sourceRef?: string; chunkId?: string; segmentId?: string }
+export type ResultItem = { title?: string; content?: string; status?: string; owner?: string | null; dueAt?: string | null; question?: string; answer?: string; dimension?: string; assessment?: string; followUp?: string; label?: string; values?: string[]; evidence?: ResultCitation[] }
+export type ResultBlock = { type: SkillBlockType; title?: string; content?: string; status?: string; evidence?: ResultCitation[]; items?: ResultItem[]; columns?: string[]; rows?: ResultItem[] }
+export type AgentResult = { resultSchemaVersion?: number; blocks?: ResultBlock[]; answer?: string; findings?: { title?: string; content?: string; evidence?: ResultCitation[] }[]; coverage?: { scopeDocumentCount: number; overviewedDocumentIds: string[]; searchedDocumentIds: string[]; citedDocumentIds: string[]; omittedDocumentIds: string[]; limitations: string[] } }
 export type AgentCapabilities = { enabled: boolean; rerankEnabled: boolean; mcpEnabled: boolean; maxScopeDocuments: number; maxModelCalls: number; maxTurns: number; maxToolCalls: number }
+export type AgentToolView = {
+  name: string; displayName: string; description: string; source: 'LOCAL' | 'MCP'; userGrantable: boolean
+  enabledForSkill: boolean | null; disabledReason?: string; parameters: unknown; dynamicParameters: boolean
+}
+export type AgentToolCatalog = { skillId?: string; tools: AgentToolView[] }
 export type AnalysisRun = { id: string; transcriptionTaskId: string; organizedDocumentId?: string; analysisMode?: string; modelId?: string; status: string; callsUsed: number; maxCalls: number; resultDocument?: string; failureMessage?: string }
 export type AnalysisEvidence = { resultPath: string; segmentId: string; startOffset?: number; endOffset?: number }
 export type AnalysisRunDetail = { run: AnalysisRun; evidence: AnalysisEvidence[] }
