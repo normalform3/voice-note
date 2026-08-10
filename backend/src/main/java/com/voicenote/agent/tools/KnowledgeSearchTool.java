@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
 import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.voicenote.agent.*;
+import com.voicenote.domain.QaRetrievalMode;
 import com.voicenote.provider.AgentModelClient;
 import com.voicenote.service.KnowledgeSearchService;
 import org.springframework.stereotype.Component;
@@ -15,6 +16,11 @@ public class KnowledgeSearchTool implements AgentTool {
     private final ObjectMapper mapper;
     private final KnowledgeSearchService search;
     public KnowledgeSearchTool(ObjectMapper mapper, KnowledgeSearchService search) { this.mapper = mapper; this.search = search; }
+
+    @Override public boolean available(AgentExecutionContext context) {
+        return context.documents().stream().anyMatch(value -> value.retrievalMode() == QaRetrievalMode.HYBRID_INDEX
+                && value.knowledgeDocumentId() != null && value.indexVersionId() != null);
+    }
 
     @Override public AgentModelClient.AgentToolDefinition definition() {
         ObjectNode schema = mapper.createObjectNode(); schema.put("type", "object");

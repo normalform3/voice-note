@@ -9,6 +9,7 @@ public interface AgentTool {
 
     AgentModelClient.AgentToolDefinition definition();
     default AgentModelClient.AgentToolDefinition definition(AgentExecutionContext context) { return definition(); }
+    default boolean available(AgentExecutionContext context) { return true; }
     ToolResult execute(AgentExecutionContext context, JsonNode arguments);
     default Source source() { return Source.LOCAL; }
     default boolean dynamicParameters() { return false; }

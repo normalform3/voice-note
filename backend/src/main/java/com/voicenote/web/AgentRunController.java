@@ -67,8 +67,23 @@ public class AgentRunController {
         KnowledgeRun run = runs.ownedRun(CurrentUser.require(authentication).id(), runId);
         if (run.isLegacy()) throw new ApiException(HttpStatus.NOT_FOUND, "AGENT_RUN_NOT_FOUND", "Agent Run was not found");
         List<String> documentIds = runs.runDocuments(runId).stream().map(KnowledgeRunDocument::getTranscriptionTaskId).toList();
-        return new AgentRunDetail(view(run), documentIds, runs.runSteps(runId).stream().map(KnowledgeAgentService.AgentStepView::from).toList(),
+        return new AgentRunDetail(view(run), documentIds, runs.childRunIds(run.getOwnerId(), runId), runs.stepViews(runId), runs.checkpointViews(runId),
                 evidence.findByKnowledgeRunId(runId).stream().map(this::evidenceView).toList());
+    }
+
+    @GetMapping("/{runId}/steps/{stepId}")
+    KnowledgeAgentService.AgentStepDetailView step(@PathVariable String runId, @PathVariable String stepId,
+                                                   Authentication authentication) {
+        return runs.stepDetail(CurrentUser.require(authentication).id(), runId, stepId);
+    }
+
+    @PostMapping("/{runId}/replays")
+    KnowledgeAgentService.AgentRunView replay(@PathVariable String runId,
+                                              @RequestHeader("Idempotency-Key") String key,
+                                              @Valid @RequestBody ReplayAgentRunRequest request,
+                                              Authentication authentication) {
+        KnowledgeRun replay = runs.replayAgent(CurrentUser.require(authentication).id(), key, runId, request.checkpointId());
+        return view(replay);
     }
 
     private KnowledgeAgentService.AgentRunView view(KnowledgeRun run) {
@@ -92,8 +107,9 @@ public class AgentRunController {
     public record AgentScopeRequest(@NotNull AgentScopeType type, @Size(max = 50) List<String> transcriptionTaskIds) { }
     public record CreateAgentRunRequest(@NotBlank @Size(max = 8000) String question, @NotNull @Valid AgentScopeRequest scope,
                                         String skillId, @NotBlank String timeZone) { }
-    public record AgentRunDetail(KnowledgeAgentService.AgentRunView run, List<String> documentIds, List<KnowledgeAgentService.AgentStepView> steps,
-                                 List<EvidenceView> evidence) { }
+    public record ReplayAgentRunRequest(@NotBlank String checkpointId) { }
+    public record AgentRunDetail(KnowledgeAgentService.AgentRunView run, List<String> documentIds, List<String> childRunIds, List<KnowledgeAgentService.AgentStepView> steps,
+                                 List<KnowledgeAgentService.AgentCheckpointView> checkpoints, List<EvidenceView> evidence) { }
     public record EvidenceView(String resultPath, EvidenceSourceKind sourceKind, String sourceRef, String documentId, String chunkId,
                                String transcriptionTaskId, String segmentId, String topic, String speakerId, String role, String speaker,
                                Long startMs, Long endMs, String text, String externalLabel, String externalUrl) { }

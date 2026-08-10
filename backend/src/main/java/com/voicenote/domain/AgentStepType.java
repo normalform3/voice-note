@@ -4,5 +4,6 @@ public enum AgentStepType {
     ROUTE,
     MODEL,
     TOOL,
-    FINALIZE
+    FINALIZE,
+    RECOVERY
 }

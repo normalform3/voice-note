@@ -4,7 +4,7 @@ import AgentResultBlocks from './AgentResult.vue'
 import ProfilePage from './ProfilePage.vue'
 import SkillManager from './SkillManager.vue'
 import ToolsCenter from './ToolsCenter.vue'
-import { api, hashFile, key, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentCapabilities, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PipelineStage, type Segment, type Speaker, type SpeakerCorrectionResult, type Task, type WorkspaceSnapshot } from './api'
+import { api, hashFile, key, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentCapabilities, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AgentStep, type AgentStepDetail, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PipelineStage, type Segment, type Speaker, type SpeakerCorrectionResult, type Task, type WorkspaceSnapshot } from './api'
 
 type WorkspaceView = 'library' | 'document' | 'skills' | 'tools' | 'profile'
 type DetailTab = 'transcript' | 'summary' | 'organized'
@@ -20,6 +20,11 @@ const documents = ref<KnowledgeDocument[]>([])
 const runs = ref<KnowledgeRun[]>([])
 const agentRuns = ref<AgentRun[]>([])
 const agent = ref<AgentRunDetail | null>(null)
+const activeStepId = ref<string | null>(null)
+const activeStepDetail = ref<AgentStepDetail | null>(null)
+const stepDetailLoading = ref(false)
+const replayingCheckpointId = ref<string | null>(null)
+const traceActionError = ref('')
 const agentSkills = ref<AgentSkill[]>([])
 const agentCapabilities = ref<AgentCapabilities | null>(null)
 const selectedSkillId = ref('')
@@ -95,7 +100,8 @@ const selectedDocument = computed(() => documents.value.find(document => documen
 const knowledgeBuild = computed<KnowledgeIndexBuild | undefined>(() => selectedDocument.value?.currentBuild || selected.value?.knowledgeDocument?.currentBuild)
 const organizedTopics = computed(() => organized.value?.blocks.filter(block => block.type === 'TOPIC') || [])
 const selectedTitle = computed(() => selected.value ? taskTitle(selected.value) : '从资料库选择一份听记')
-const canAnalyzeCurrent = computed(() => Boolean(selected.value?.transcriptReady))
+const canAnalyzeCurrent = computed(() => selected.value?.qaCapabilities?.currentDocumentAvailable ?? Boolean(selected.value?.transcriptReady))
+const indexedTaskCount = computed(() => tasks.value.filter(task => task.qaCapabilities?.crossDocumentEligible).length)
 const canCancelTask = computed(() => Boolean(selected.value && !['SUCCEEDED', 'CANCELLED'].includes(selected.value.status)))
 const canResubmitTask = computed(() => selected.value?.status === 'CANCELLED')
 const canSummarize = computed(() => selected.value?.organizedDocument?.status === 'READY')
@@ -103,14 +109,15 @@ const canCreateFormalDocument = computed(() => selected.value?.status === 'WAITI
 const canCreateKnowledgeBuild = computed(() => selected.value?.status === 'WAITING_FOR_KNOWLEDGE_BUILD' && selected.value?.organizedDocument?.status === 'READY')
 const activeRun = computed(() => agent.value?.run)
 const activeEvidence = computed(() => agent.value?.evidence || [])
+const activeRunTerminal = computed(() => Boolean(activeRun.value && !['PENDING', 'QUEUED', 'RUNNING'].includes(activeRun.value.status)))
+const initialReplayCheckpoint = computed(() => agent.value?.checkpoints?.find(checkpoint => !checkpoint.stepId && checkpoint.replayable))
 const activeRunUsage = computed(() => activeRun.value
   ? `模型 ${activeRun.value.modelCallsUsed}/${activeRun.value.maxModelCalls} · 工具 ${activeRun.value.toolCallsUsed}/${activeRun.value.maxToolCalls}` : '')
 const parsedAnswer = computed(() => parseResultDocument(activeRun.value?.resultDocument))
 const scopeSceneTypes = computed<Task['sceneType'][]>(() => {
   if (agentScopeType.value === 'CURRENT_DOCUMENT') return selected.value ? [selected.value.sceneType] : []
   if (agentScopeType.value === 'SELECTED_DOCUMENTS') return tasks.value.filter(task => selectedTaskIds.value.includes(task.id)).map(task => task.sceneType)
-  const readyTaskIds = new Set(documents.value.filter(document => document.status === 'READY').map(document => document.transcriptionTaskId))
-  return tasks.value.filter(task => readyTaskIds.has(task.id)).map(task => task.sceneType)
+  return tasks.value.filter(task => task.qaCapabilities?.crossDocumentEligible).map(task => task.sceneType)
 })
 function skillCompatibilityIssue(skill: AgentSkill) {
   if (!skill.scopeTypes.includes(agentScopeType.value)) return '不支持当前问答范围'
@@ -141,9 +148,16 @@ const speakerCorrectionBlocked = computed(() => Boolean(selected.value && select
 const parsedSummary = computed(() => parseResultDocument(summaryDetail.value?.run.resultDocument))
 const summaryLoading = computed(() => summaryLoadingTaskId.value === selected.value?.id)
 const agentTitle = computed(() => agentScopeType.value === 'CURRENT_DOCUMENT' ? '当前文档问答' : '自主知识问答')
+const currentQaMode = computed(() => selected.value?.qaCapabilities?.currentMode)
+const agentModeLabel = computed(() => {
+  if (agentScopeType.value !== 'CURRENT_DOCUMENT') return `知识库检索 · ${indexedTaskCount.value} 份已入库`
+  return ({ TRANSCRIPT_LOCAL: '文内问答 · 原文定位', FORMAL_OVERVIEW: '文内问答 · 正式文档辅助', HYBRID_INDEX: '知识库检索 · 已入库' } as const)[currentQaMode.value || 'TRANSCRIPT_LOCAL']
+})
 const agentDescription = computed(() => agentScopeType.value === 'CURRENT_DOCUMENT'
-  ? '只基于这份音频的听记内容回答。'
-  : libraryScope.value === 'selected' ? `在勾选的 ${selectedTaskIds.value.length} 份资料中检索、比较并核实证据。` : '在全部已收录资料中自主选择工具、检索并核实证据。')
+  ? currentQaMode.value === 'FORMAL_OVERVIEW' ? '先用正式文档定位主题，再回到原始听记核实证据。'
+    : currentQaMode.value === 'HYBRID_INDEX' ? '使用混合索引检索，并保留回到原始听记的证据链。'
+      : '通过原文分段定位回答；超长全文总结会提示先生成正式文档。'
+  : libraryScope.value === 'selected' ? `在勾选的 ${selectedTaskIds.value.length} 份资料中检索、比较并核实证据。` : '在全部已入库资料中自主选择工具、检索并核实证据。')
 const agentPlaceholder = computed(() => agentScopeType.value === 'CURRENT_DOCUMENT'
   ? '例如：这场会议的结论和待办是什么？'
   : '例如：近期会议有哪些未决事项？')
@@ -362,7 +376,7 @@ async function saveMetadata() {
   } catch (error: any) { taskActionError.value = error.response?.data?.message || '元数据保存失败。' }
   finally { savingMetadata.value = false }
 }
-function isScopeSelectable(task: Task) { return documents.value.some(document => document.transcriptionTaskId === task.id && document.status === 'READY') }
+function isScopeSelectable(task: Task) { return Boolean(task.qaCapabilities?.crossDocumentEligible) }
 function toggleTaskSelection(taskId: string) {
   selectedTaskIds.value = selectedTaskIds.value.includes(taskId) ? selectedTaskIds.value.filter(id => id !== taskId) : [...selectedTaskIds.value, taskId]
   if (selectedTaskIds.value.length) libraryScope.value = 'selected'
@@ -481,7 +495,46 @@ function stepLabel(type: string, toolName?: string) {
   if (type === 'ROUTE') return '选择任务 Skill'
   if (type === 'MODEL') return 'Agent 决策'
   if (type === 'FINALIZE') return '校验证据并提交答案'
+  if (type === 'RECOVERY') return '从 Checkpoint 恢复'
   return ({ document_list: '筛选文档范围', document_overview: '读取文档概览', knowledge_search: '混合检索与重排', transcript_context: '读取相邻原文' } as Record<string, string>)[toolName || ''] || toolName || '调用只读工具'
+}
+function resetTraceSelection() {
+  activeStepId.value = null
+  activeStepDetail.value = null
+  stepDetailLoading.value = false
+  traceActionError.value = ''
+}
+async function toggleStepDetail(step: AgentStep) {
+  if (!activeRun.value || stepDetailLoading.value) return
+  if (activeStepId.value === step.id) { activeStepId.value = null; activeStepDetail.value = null; return }
+  activeStepId.value = step.id
+  activeStepDetail.value = null
+  stepDetailLoading.value = true
+  traceActionError.value = ''
+  try {
+    const { data } = await api.get<AgentStepDetail>(`/agent-runs/${activeRun.value.id}/steps/${step.id}`)
+    if (activeStepId.value === step.id) activeStepDetail.value = data
+  } catch (error: any) {
+    traceActionError.value = error.response?.data?.message || '无法读取该步详情。'
+  } finally { stepDetailLoading.value = false }
+}
+function readableTraceValue(value: unknown) {
+  if (value == null) return '无'
+  return typeof value === 'string' ? value : JSON.stringify(value, null, 2)
+}
+async function replayFromCheckpoint(checkpointId: string) {
+  const source = activeRun.value
+  if (!source || replayingCheckpointId.value || !window.confirm('将从这个状态创建子 Run 并继续执行。原 Run 与 Trace 不会被修改，是否继续？')) return
+  replayingCheckpointId.value = checkpointId
+  traceActionError.value = ''
+  try {
+    const { data } = await api.post<AgentRun>(`/agent-runs/${source.id}/replays`, { checkpointId }, { headers: { 'Idempotency-Key': key() } })
+    agent.value = { run: data, documentIds: [...(agent.value?.documentIds || [])], childRunIds: [], steps: [], checkpoints: [], evidence: [] }
+    resetTraceSelection()
+    upsertAgent(data)
+  } catch (error: any) {
+    traceActionError.value = error.response?.data?.message || '无法从该 Checkpoint 重新执行。'
+  } finally { replayingCheckpointId.value = null }
 }
 async function ensureAudio(startMs = 0, play = true) {
   const task = selected.value
@@ -573,18 +626,23 @@ async function askAgent() {
       question: question.value, scope: { type: agentScopeType.value, transcriptionTaskIds },
       skillId: selectedSkillId.value || null, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
     }, { headers: { 'Idempotency-Key': key() } })
-    agent.value = { run: data, documentIds: transcriptionTaskIds, steps: [], evidence: [] }
+    agent.value = { run: data, documentIds: transcriptionTaskIds, childRunIds: [], steps: [], checkpoints: [], evidence: [] }
+    resetTraceSelection()
     upsertAgent(data)
   } catch (error: any) {
     agent.value = { run: { id: '', question: question.value, status: 'FAILED', scopeType: agentScopeType.value, skillId: selectedSkillId.value || 'auto', skillVersion: '', scopeDocumentCount: 0,
       modelCallsUsed: 0, maxModelCalls: 0, agentTurnsUsed: 0, maxAgentTurns: 0, toolCallsUsed: 0, maxToolCalls: 0,
-      failureMessage: error.response?.data?.message || '无法创建 Agent 任务', createdAt: new Date().toISOString() }, documentIds: [], steps: [], evidence: [] }
+      failureMessage: error.response?.data?.message || '无法创建 Agent 任务', recoveryCount: 0, createdAt: new Date().toISOString() }, documentIds: [], childRunIds: [], steps: [], checkpoints: [], evidence: [] }
   } finally { asking.value = false }
 }
 async function loadAgentDetail(runId: string) {
   const { data } = await api.get<AgentRunDetail>(`/agent-runs/${runId}`)
-  agent.value = data; upsertAgent(data.run)
+  agent.value = data; resetTraceSelection(); upsertAgent(data.run)
   return data
+}
+async function openLineageRun(runId: string) {
+  try { await loadAgentDetail(runId) }
+  catch (error: any) { traceActionError.value = error.response?.data?.message || '无法读取关联 Run。' }
 }
 async function loadKnowledgeDetail(runId: string) {
   const { data } = await api.get<KnowledgeRunDetail>(`/knowledge-runs/${runId}`)
@@ -759,7 +817,7 @@ function applySnapshot(snapshot: WorkspaceSnapshot) {
   documents.value = snapshot.documents
   runs.value = snapshot.knowledgeRuns
   analysisRuns.value = snapshot.analyses
-  selectedTaskIds.value = selectedTaskIds.value.filter(id => snapshot.tasks.some(task => task.id === id))
+  selectedTaskIds.value = selectedTaskIds.value.filter(id => snapshot.tasks.some(task => task.id === id && task.qaCapabilities?.crossDocumentEligible))
   if (selected.value) {
     const update = tasks.value.find(task => task.id === selected.value?.id)
     if (update) upsertTask(update)
@@ -979,7 +1037,7 @@ onBeforeUnmount(() => {
         <div class="records-head"><div><p class="eyebrow">RECENT RECORDINGS</p><h3>最近音频</h3></div><span>创建时间 · 音频时长 · 状态</span></div>
         <div class="record-list">
           <article v-for="task in tasks" :key="task.id" class="record-row" :class="{ active: selected?.id === task.id }">
-            <label class="record-select" :class="{ unavailable: !isScopeSelectable(task) }" :title="isScopeSelectable(task) ? '加入多文档问答范围' : '建立知识索引后可勾选'" @click.stop>
+            <label class="record-select" :class="{ unavailable: !isScopeSelectable(task) }" :title="isScopeSelectable(task) ? '加入多文档问答范围' : '建立知识库后可参与跨文档检索'" @click.stop>
               <input type="checkbox" :checked="selectedTaskIds.includes(task.id)" :disabled="!isScopeSelectable(task)" @change="toggleTaskSelection(task.id)">
             </label>
             <button class="record-row-open" type="button" :aria-label="`打开${taskTitle(task)}`" @click="choose(task)"></button>
@@ -1090,7 +1148,7 @@ onBeforeUnmount(() => {
           </section>
 
           <section v-else class="detail-content organized-content" role="tabpanel">
-            <template v-if="organized?.document.status === 'READY'"><div v-if="organized.document.summary" class="organized-summary"><b>文档摘要</b><p>{{ organized.document.summary }}</p></div><article v-for="topic in organizedTopics" :key="topic.id" class="organized-block"><button class="topic-link" @click="seekToTime(topic.startMs, true)">{{ topic.topic || '整理片段' }} <span>{{ timecode(topic.startMs) }}</span></button><p v-if="topic.summary" class="topic-summary">{{ topic.summary }}</p><article v-for="item in topicChildren(topic.id)" :key="item.id" class="organized-unit"><small>{{ item.type === 'QA_PAIR' ? '问答' : '对话' }}</small><p>{{ item.text }}</p></article></article></template>
+            <template v-if="organized?.document.status === 'READY'"><article v-for="topic in organizedTopics" :key="topic.id" class="organized-block"><button class="topic-link" @click="seekToTime(topic.startMs, true)">{{ topic.topic || '整理片段' }} <span>{{ timecode(topic.startMs) }}</span></button><article v-for="item in topicChildren(topic.id)" :key="item.id" class="organized-unit"><small>{{ item.type === 'QA_PAIR' ? '问答' : '叙述' }}</small><p>{{ item.text }}</p></article></article></template>
             <div v-else-if="documentLoading" class="content-empty"><span aria-hidden="true">◎</span><b>正在读取正式文档…</b><p>正在加载整理后的主题和内容。</p></div>
             <div v-else-if="documentLoadError" class="content-empty"><span aria-hidden="true">!</span><b>正式文档读取失败。</b><p>{{ documentLoadError }}</p><button class="stage-retry" type="button" @click="retrySelectedDocument">立即重试</button></div>
             <div v-else class="content-empty"><span aria-hidden="true">◎</span><b>正式文档尚未准备好。</b><p>请在原始文档完成后手动生成清洗、整理后的正式文档。</p></div>
@@ -1101,24 +1159,58 @@ onBeforeUnmount(() => {
 
     <aside v-if="!isUtilityView" class="agent-rail" :class="{ 'is-open': mobileAgentOpen }">
       <header class="agent-head"><div><p class="eyebrow">AI KNOWLEDGE</p><h3>{{ agentTitle }}</h3></div><button class="agent-close" type="button" @click="mobileAgentOpen = false" aria-label="关闭 AI 问答">×</button></header>
+      <div class="agent-mode-row"><span aria-hidden="true"></span><b>{{ agentModeLabel }}</b></div>
       <p class="agent-description">{{ agentDescription }}</p>
       <div class="agent-suggestions"><button v-for="suggestion in agentSuggestions" :key="suggestion" type="button" @click="useSuggestion(suggestion)">{{ suggestion }} <span>↗</span></button></div>
-      <div v-if="!isDocumentView" class="scope-switch" aria-label="问答范围"><button :class="{ active: libraryScope === 'all' }" @click="libraryScope = 'all'">全部资料</button><button :class="{ active: libraryScope === 'selected' }" @click="libraryScope = 'selected'">已勾选 · {{ selectedTaskIds.length }}</button></div>
+      <div v-if="!isDocumentView" class="scope-switch" aria-label="问答范围"><button :class="{ active: libraryScope === 'all' }" @click="libraryScope = 'all'">全部已入库</button><button :class="{ active: libraryScope === 'selected' }" @click="libraryScope = 'selected'">已勾选 · {{ selectedTaskIds.length }}</button></div>
       <label class="skill-select">任务方式<select v-model="selectedSkillId" @change="skillSelectionNotice = ''"><option value="">自动匹配 Skill（推荐）</option><optgroup label="内置 Skill"><option v-for="skill in builtInAgentSkills" :key="skill.id" :value="skill.id" :disabled="Boolean(skillCompatibilityIssue(skill))">{{ skill.displayName }} · 内置{{ skillCompatibilityIssue(skill) ? `（${skillCompatibilityIssue(skill)}）` : '' }}</option></optgroup><optgroup v-if="customAgentSkills.length" label="我的 Skill"><option v-for="skill in customAgentSkills" :key="skill.id" :value="skill.id" :disabled="Boolean(skillCompatibilityIssue(skill))">{{ skill.displayName }} · 我的{{ skillCompatibilityIssue(skill) ? `（${skillCompatibilityIssue(skill)}）` : '' }}</option></optgroup></select></label>
       <p v-if="skillSelectionNotice" class="skill-selection-notice">{{ skillSelectionNotice }}</p>
-      <div class="ask-box"><textarea v-model="question" rows="4" :disabled="agentCapabilities?.enabled === false" :placeholder="agentPlaceholder"></textarea><div><span>{{ agentScopeType === 'CURRENT_DOCUMENT' ? '当前音频' : agentScopeType === 'SELECTED_DOCUMENTS' ? `${selectedTaskIds.length} 份已勾选` : '全部已收录资料' }}</span><button class="send-button" :disabled="agentCapabilities?.enabled !== true || asking || !question.trim() || (agentScopeType === 'CURRENT_DOCUMENT' && !canAnalyzeCurrent) || (agentScopeType === 'SELECTED_DOCUMENTS' && !selectedTaskIds.length)" @click="askAgent">{{ asking ? '处理中' : '发送' }} <b>↑</b></button></div></div>
+      <div class="ask-box"><textarea v-model="question" rows="4" :disabled="agentCapabilities?.enabled === false" :placeholder="agentPlaceholder"></textarea><div><span>{{ agentScopeType === 'CURRENT_DOCUMENT' ? '当前音频' : agentScopeType === 'SELECTED_DOCUMENTS' ? `${selectedTaskIds.length} 份已勾选` : `${indexedTaskCount} 份已入库` }}</span><button class="send-button" :disabled="agentCapabilities?.enabled !== true || asking || !question.trim() || (agentScopeType === 'CURRENT_DOCUMENT' && !canAnalyzeCurrent) || (agentScopeType === 'SELECTED_DOCUMENTS' && !selectedTaskIds.length) || (agentScopeType === 'ALL_DOCUMENTS' && !indexedTaskCount)" @click="askAgent">{{ asking ? '处理中' : '发送' }} <b>↑</b></button></div></div>
       <p v-if="agentCapabilities?.enabled === false" class="agent-note">自主 Agent 正在灰度中，请在部署环境启用 VOICENOTE_AGENT_ENABLED。</p>
       <p v-else-if="agentScopeType === 'CURRENT_DOCUMENT' && !canAnalyzeCurrent" class="agent-note">当前音频仍在转写，完成后即可提问。</p>
       <p v-else-if="agentScopeType === 'SELECTED_DOCUMENTS' && !selectedTaskIds.length" class="agent-note">请先在资料库勾选 1–50 份已收录文档。</p>
+      <p v-else-if="agentScopeType === 'ALL_DOCUMENTS' && !indexedTaskCount" class="agent-note">当前没有已入库资料。请先打开一份正式文档并建立知识库。</p>
 
       <section v-if="activeRun" class="result-card">
         <div class="result-head"><span>{{ activeSkillName }}</span><small>{{ statusText(activeRun.status) }} · {{ activeRunUsage }}</small></div>
+        <nav v-if="activeRun.parentRunId || (agent?.childRunIds || []).length" class="run-lineage" aria-label="Run 演进关系">
+          <span>LINEAGE</span>
+          <button v-if="activeRun.rootRunId && activeRun.rootRunId !== activeRun.id && activeRun.rootRunId !== activeRun.parentRunId" type="button" @click="openLineageRun(activeRun.rootRunId)">根 Run ↖</button>
+          <button v-if="activeRun.parentRunId" type="button" @click="openLineageRun(activeRun.parentRunId)">父 Run ↖</button>
+          <button v-for="(childRunId, index) in agent?.childRunIds || []" :key="childRunId" type="button" @click="openLineageRun(childRunId)">子 Run {{ index + 1 }} ↗</button>
+        </nav>
+        <div v-if="activeRun.failureCode" class="trace-failure">
+          <b>{{ activeRun.failureCode }}</b><span>{{ activeRun.failureStage || '未知阶段' }}</span><p>{{ activeRun.failureMessage }}</p>
+        </div>
         <template v-if="parsedAnswer"><AgentResultBlocks :result="parsedAnswer" :evidence="activeEvidence" @evidence="openEvidence" />
           <div v-if="parsedAnswer.coverage" class="coverage-strip"><span>范围 {{ parsedAnswer.coverage.scopeDocumentCount }}</span><span>概览 {{ parsedAnswer.coverage.overviewedDocumentIds.length }}</span><span>深入 {{ parsedAnswer.coverage.searchedDocumentIds.length }}</span><span>引用 {{ parsedAnswer.coverage.citedDocumentIds.length }}</span><p v-if="parsedAnswer.coverage.limitations.length">限制：{{ parsedAnswer.coverage.limitations.join('；') }}</p></div>
         </template>
-        <p v-else-if="activeRun.failureMessage" class="error">{{ activeRun.failureMessage }}</p>
+        <p v-else-if="activeRun.failureMessage && !activeRun.failureCode" class="error">{{ activeRun.failureMessage }}</p>
         <p v-else class="waiting">Agent 正在规划检索、读取原文并校验证据…</p>
-        <details v-if="agent?.steps.length" class="agent-trace"><summary>运行轨迹 <b>{{ agent.steps.length }} 步</b></summary><ol><li v-for="step in agent.steps" :key="step.index" :class="step.status.toLowerCase()"><i></i><span><b>{{ stepLabel(step.type, step.toolName) }}</b><small>{{ step.summary || step.errorMessage || statusText(step.status) }}</small></span><time>{{ step.durationMs == null ? '—' : `${step.durationMs}ms` }}</time></li></ol></details>
+        <details v-if="agent?.steps.length || initialReplayCheckpoint" class="agent-trace">
+          <summary>运行轨迹 <b>{{ agent?.steps.length || 0 }} 步<template v-if="activeRun.recoveryCount"> · {{ activeRun.recoveryCount }} 次恢复</template></b></summary>
+          <div v-if="initialReplayCheckpoint && activeRunTerminal" class="initial-replay"><span>初始状态 · Checkpoint #{{ initialReplayCheckpoint.sequence }}</span><button type="button" :disabled="Boolean(replayingCheckpointId)" @click="replayFromCheckpoint(initialReplayCheckpoint.id)">从此重新执行</button></div>
+          <ol>
+            <li v-for="step in agent?.steps || []" :key="step.id" :class="[step.status.toLowerCase(), { expanded: activeStepId === step.id }]">
+              <i></i>
+              <button class="trace-step-open" type="button" :aria-expanded="activeStepId === step.id" @click="toggleStepDetail(step)">
+                <span><b>{{ stepLabel(step.type, step.toolName) }}</b><small>{{ step.summary || step.errorMessage || statusText(step.status) }}</small></span>
+                <span class="trace-metrics"><time>{{ step.durationMs == null ? '—' : formatDuration(step.durationMs) }}</time><em v-if="step.totalTokens != null">{{ step.totalTokens }} tok</em><em v-if="activeRun.recoveryCount">E{{ step.executionEpoch }}</em></span>
+              </button>
+              <button v-if="activeRunTerminal && step.replayable && step.checkpointId" class="trace-replay" type="button" :disabled="Boolean(replayingCheckpointId)" @click.stop="replayFromCheckpoint(step.checkpointId)">{{ replayingCheckpointId === step.checkpointId ? '创建中…' : '从此重新执行' }}</button>
+              <div v-if="activeStepId === step.id" class="trace-detail">
+                <p v-if="stepDetailLoading">正在加载该步的可观察输入与输出…</p>
+                <template v-else-if="activeStepDetail">
+                  <div class="trace-detail-meta"><span>状态 {{ statusText(activeStepDetail.status) }}</span><span v-if="activeStepDetail.finishReason">Finish {{ activeStepDetail.finishReason }}</span><span v-if="activeStepDetail.totalTokens != null">Token {{ activeStepDetail.inputTokens || 0 }} + {{ activeStepDetail.outputTokens || 0 }} = {{ activeStepDetail.totalTokens }}</span></div>
+                  <section><b>可观察输入</b><pre>{{ readableTraceValue(activeStepDetail.input) }}</pre></section>
+                  <section><b>可观察输出</b><pre>{{ readableTraceValue(activeStepDetail.output) }}</pre></section>
+                  <section v-if="activeStepDetail.errorCode || activeStepDetail.errorMessage" class="trace-detail-error"><b>错误定位</b><p>{{ activeStepDetail.errorCode }}<template v-if="activeStepDetail.errorMessage"> · {{ activeStepDetail.errorMessage }}</template></p></section>
+                </template>
+              </div>
+            </li>
+          </ol>
+          <p v-if="traceActionError" class="trace-action-error">{{ traceActionError }}</p>
+        </details>
       </section>
 
       <section v-if="visibleHistory.length" class="run-history"><p class="eyebrow">RECENT QUESTIONS</p><button v-for="run in visibleHistory.slice(0, 4)" :key="run.id" @click="openHistory(run)"><span>{{ run.question }}</span><small>{{ statusText(run.status) }}</small></button></section>

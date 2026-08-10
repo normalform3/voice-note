@@ -47,10 +47,12 @@ public class KnowledgeDocument {
     public boolean beginIndexing() { if (status != KnowledgeDocumentStatus.QUEUED) return false; status = KnowledgeDocumentStatus.INDEXING; updatedAt = Instant.now(); return true; }
     public void ready() { status = KnowledgeDocumentStatus.READY; failureMessage = null; updatedAt = Instant.now(); }
     public void fail(String message) { status = KnowledgeDocumentStatus.FAILED; failureMessage = message; updatedAt = Instant.now(); }
-    public void stale() { status = KnowledgeDocumentStatus.STALE; activeIndexVersionId = null; failureMessage = null; updatedAt = Instant.now(); }
+    /** Keep the prior pointer so a successful rebuild can deactivate its external vector generation atomically. */
+    public void stale() { status = KnowledgeDocumentStatus.STALE; failureMessage = null; updatedAt = Instant.now(); }
     public void refreshSource(String organizedDocumentId, int organizedDocumentVersion, String title) {
         this.organizedDocumentId = organizedDocumentId; this.organizedDocumentVersion = organizedDocumentVersion; this.title = title;
-        this.status = KnowledgeDocumentStatus.PENDING; this.activeIndexVersionId = null; this.failureMessage = null; this.updatedAt = Instant.now();
+        this.status = activeIndexVersionId == null ? KnowledgeDocumentStatus.PENDING : KnowledgeDocumentStatus.STALE;
+        this.failureMessage = null; this.updatedAt = Instant.now();
     }
     public boolean retry() { if (status != KnowledgeDocumentStatus.FAILED) return false; status = KnowledgeDocumentStatus.PENDING; failureMessage = null; updatedAt = Instant.now(); return true; }
     public boolean recover() { if (status != KnowledgeDocumentStatus.INDEXING) return false; status = KnowledgeDocumentStatus.QUEUED; updatedAt = Instant.now(); return true; }

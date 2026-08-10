@@ -18,9 +18,9 @@ voicenote 将上传的音频保存为带时间轴的听记记录，并把完成�
 | 异步听记 | 任务创建立即返回，不等待 ASR 完成。转写、文档整理、知识构建由持久化任务和消息事件驱动；每个阶段的状态、尝试次数与失败信息可查询。 |
 | 说话人和时间轴 | 导入时可开启说话人识别并选填人数；转写段保存时间范围、段序号与 ASR 原始说话人，用户可补充名称、纠正个别句子的说话人，并从段落或证据回到对应音频时间。 |
 | 原始文档 | 听记完成后显示完整 ASR 转写。每段转写都带时间戳、说话人和原文内容，并在对象存储保留 ASR 原始结果文件。 |
-| 正式文档 | 用户确认后生成按主题组织的清洗文档，内容区分对话与问答对，保留来源转写段和可播放的时间位置。 |
+| 正式文档 | 用户确认后先按固定规则清洗并合并同说话人片段，再由模型按 Topic、问答对或叙述单元整理。每个清洗后发言只出现一次，正文保留完整原意、来源转写段和可播放的时间位置，不以摘要替代原文。 |
 | AI 摘要 | 正式文档完成后可按需生成摘要，呈现核心结论和分项要点；每项可通过“回到原文”定位其依据。 |
-| 自主知识 Agent | 每次提问创建独立的有界 Run。Workflow 冻结用户、文档、索引版本、时区和 Skill；单 Agent 在预算内选择文档、概览、混合检索、原文上下文和最终校验工具。 |
+| 自主知识 Agent | 每次提问创建独立的有界 Run。自研 ReAct 状态机冻结用户、文档、索引版本、时区和 Skill；单 Agent 在预算内选择文档、概览、混合检索、原文上下文和最终校验工具。 |
 | 私有知识库 | 用户确认后，系统从正式文档快照生成 Topic 和知识块，并建立独立索引版本。每个版本分别记录入库、切块和索引进度；只有激活版本可供检索。 |
 | 单/多文档问答 | 支持当前文档、勾选 1–50 份文档或全部已收录文档。宽范围任务先分页读取版本化 Overview，再对最多 12 份文档执行 Dense + BM25 + RRF 检索和可选 Rerank。 |
 | Skill 平台 | 内置知识问答、面试复盘和会议总结 v2；用户可在顶部 Skill 设置页手工创建或 AI 草拟私人 Draft，添加 Markdown 参考资料、模板与示例，执行触发测试后发布不可变版本。问答默认自动路由，也可从完整的已发布 Skill 列表手动覆盖；私人 Skill 可归档或永久删除。 |
@@ -72,7 +72,7 @@ flowchart LR
 1. 登录后导入音频；可选择是否识别说话人，并选填说话人数。客户端计算内容 SHA-256 后创建上传意图。
 2. 上传完成后创建异步听记任务。详情页显示“音频已存入 MinIO、提交至转写服务、异步转写、保存原始文档”等阶段，以及进度、等待时间、模型标识和可重试错误。
 3. 原始文档准备好后，按时间轴浏览完整转写；为识别出的说话人填写名称，回听并纠正个别分配错误的句子。点击顶部“修改说话人”进入校对模式，再点击整条句子选择；可用 Shift 连续选择后批量改派，且模型原标注始终保留。
-4. 点击“生成正式文档”，系统将转写清洗并按主题、对话或问答对组织；每个主题仍保留可播放的起始时间。
+4. 点击“生成正式文档”，系统先清理标点与空格、合并相邻同说话人片段，再按 Topic、问答对或叙述单元组织；服务端校验每个来源片段只出现一次且顺序不变，不接受摘要式正文。
 5. 在正式文档完成后，可选生成 AI 摘要，并在详情页右侧对当前文档提问。摘要和问答的证据链接会回到对应原文段落。
 6. 需要跨录音检索时，点击“建立知识库”。系统按“知识库入库 → 按主题切块 → 构建检索索引”创建一个新的索引版本。所有新点写入成功并标记为可检索后，才切换 MySQL 中的活动版本；已有活动版本在切换前继续服务查询。对于已收录文档，重建失败不会替换原有活动版本。
 7. 通过顶部“Skill 设置”查看内置 Skill，或创建、测试并发布私人 Skill。私人 Skill 发布后默认手动；正负触发样例通过当前预览后才能加入自动路由。顶部“Tools 中心”可进一步核对全局工具目录和每个 Skill 的有效权限。
@@ -93,7 +93,7 @@ flowchart LR
 
 ### 3. 阅读按主题整理的正式文档
 
-“正式文档”将连续转写清洗为主题化内容，并标注对话或问答对。主题标题可跳回相应的原始音频时间，方便在阅读结论时核对上下文。
+“正式文档”是完整转写的清洗整理稿，不是摘要。系统逐发言进行受约束的轻度润色，将明确问答组织为问答对，将讨论和独白保留为叙述单元；无法通过数字、技术标识、否定词和长度校验的润色会回退到规则清洗文本。主题标题可跳回相应的原始音频时间。
 
 ![按主题整理的正式文档](docs/images/organized-formal-document.png)
 
@@ -149,7 +149,7 @@ Qdrant 由开发或部署环境单独运行。启动后可请求其 `/healthz` �
 
 | 目的 | 有效配置与默认值 |
 | --- | --- |
-| Topic 合并与切块大小 | `VOICENOTE_KNOWLEDGE_SHORT_TOPIC_TOKENS=200`、`VOICENOTE_KNOWLEDGE_CHUNK_TARGET_TOKENS=800`、`VOICENOTE_KNOWLEDGE_CHUNK_MAX_TOKENS=1200`。连续短 Topic 会在不超过目标值时合并；单个超大 Topic 再向来源片段下钻。 |
+| Topic 合并与切块大小 | `VOICENOTE_KNOWLEDGE_SHORT_TOPIC_TOKENS=200`、`VOICENOTE_KNOWLEDGE_CHUNK_TARGET_TOKENS=800`、`VOICENOTE_KNOWLEDGE_CHUNK_MAX_TOKENS=1200`。短 Topic 会在不超过目标值时合并相邻 Topic；超大 Topic 只在问答对或叙述原子单元之间切分，单个超限原子独立保存。 |
 | 混合检索候选 | `VOICENOTE_KNOWLEDGE_RETRIEVAL_PREFETCH_LIMIT=50`。Dense 与 BM25 分别取候选，再由 RRF 融合。 |
 | 送入问答的上下文 | `VOICENOTE_KNOWLEDGE_RETRIEVAL_SEED_LIMIT=4`、`VOICENOTE_KNOWLEDGE_CONTEXT_MAX_CHUNKS=12`、`VOICENOTE_KNOWLEDGE_CONTEXT_MAX_TOKENS=10000`。每个种子最多扩展同一 Topic 中相邻的一个 Chunk，随后受总数和 Token 上限约束。 |
 
@@ -188,7 +188,7 @@ Agent 看到的工具名为 `mcp.calendar.list_events`。服务端不信任远�
 
 ### 按 Topic 快照保留语义边界
 
-知识构建先从正式文档提取并持久化 Topic 快照；每个快照包含来源区块、说话人、转写段、时间范围和文本。知识块从这些快照生成，而非按固定字符数机械截断。默认一个 Topic 对应一个 Chunk；连续且都很短的 Topic 会合并，以减少过碎召回，同时通过关联表保留每个 Chunk 覆盖的全部 Topic。过大的 Topic 再向来源片段下钻；是否需要切分由 Embedding 提供方返回的 Token 用量和目标/最大 Token 配置共同决定。
+知识构建先从正式文档提取并持久化 Topic 快照；每个快照包含来源区块类型、说话人、转写段、时间范围和完整文本。知识块从这些快照生成，而非按固定字符数机械截断。默认一个 Topic 对应一个 Chunk；过短 Topic 在目标 Token 内与相邻 Topic 合并，同时通过关联表保留全部 Topic。过大的 Topic 只在 `QA_PAIR` 或 `NARRATIVE` 原子单元之间切分，绝不拆散一组问答；单个原子超过上限时独立保存并标记 `oversized`。Chunk 正文持久化在 MySQL，同一文本同时用于 Dense Embedding 和 Qdrant multilingual BM25。
 
 相关实现：
 
@@ -207,9 +207,13 @@ Agent 看到的工具名为 `mcp.calendar.list_events`。服务端不信任远�
 
 ### 有界单 Agent、覆盖率检索与证据边界
 
-每次提问都是独立 Agent Run。Workflow 先确定不可变的用户与文档范围，保存活动索引版本、元数据、Skill 版本 ID、快照和哈希；模型只决定调用哪个 allowlist Tool 以及搜索内容，不能提交 ownerId 或扩张文档范围。自动路由只加载 Catalog 元数据和正负触发样例，Skill 命中后才加载 Instructions；资源只暴露名称与用途，正文由 `skill_resource_read` 每次最多读取 8 KB。Run、文档范围、模型/工具 Step、证据账本和租约均持久化；租约过期后从已成功的只读 Tool 输出恢复，隐式推理不会保存或展示。
+每次提问都是独立 Agent Run。Workflow 先确定不可变的用户与文档范围，保存活动索引版本、元数据、Skill 版本 ID、快照和哈希；模型只决定调用哪个 allowlist Tool 以及搜索内容，不能提交 ownerId 或扩张文档范围。自动路由只加载 Catalog 元数据和正负触发样例，Skill 命中后才加载 Instructions；资源只暴露名称与用途，正文由 `skill_resource_read` 每次最多读取 8 KB。
 
-`KnowledgeSearchTool` 对指定的每份文档分别执行 Dense + BM25 + RRF，每份保留最多四个候选，总候选池最多 50。选择最终上下文时先为有命中的目标文档保留一个结果，再按重排分数和单文档配额补充，最终受 12 个 Chunk 与 10,000 Token 限制。当前文档尚未建立索引时，`TranscriptContextTool` 直接对该转写版本执行本地 BM25。
+`AgentRuntime` 以 `ROUTING → MODEL_DECISION → TOOL_EXECUTION → FINALIZE/TERMINAL` 执行可测试的 ReAct 状态机。MySQL 保存 Run、完整可观察 Step 和不可变 Checkpoint；Checkpoint 包含模型、Prompt/Skill、文档/索引、证据和已消耗预算快照，并使用 SHA-256 验证完整性。租约过期时，旧 Step 转为 `INTERRUPTED`，execution epoch 递增后从最新 Checkpoint 恢复；旧 Worker 的迟到结果不能再提交。终态 Run 可从稳定 Checkpoint 创建保留剩余预算的子 Run，原 Trace 不变。Trace 在持久化前会清理凭据和内网地址；隐式推理不会保存或展示。这套实现不依赖 LangGraph、Langfuse、LangChain 或 OpenTelemetry。
+
+问答能力与知识索引状态分开计算：原始转写完成即可进行当前文档问答；正式文档未入库时使用冻结的主题概览辅助定位；只有活动索引版本可以进入勾选或全部资料的跨文档范围。页面会分别标识“原文定位”“正式文档辅助”和“知识库检索”，不会把未入库资料悄悄纳入全库搜索。
+
+`KnowledgeSearchTool` 对指定的每份文档分别执行 Dense + BM25 + RRF，每份保留最多四个候选，总候选池最多 50。选择最终上下文时先为有命中的目标文档保留一个结果，再按重排分数和单文档配额补充，最终受 12 个 Chunk 与 10,000 Token 限制。当前文档尚未建立索引时，`TranscriptContextTool` 直接对冻结的转写版本执行本地 BM25；全文读取同样受 10,000 Token 和 Tool 输出大小限制，超长原文的全局总结会披露覆盖不足并建议先生成正式文档。
 
 所有 Tool 产生的来源先进入持久化证据账本。`FinalizeAnswerTool` 根据当前 Skill 动态限制 `SUMMARY`、`FINDINGS`、`DECISIONS`、`ACTION_ITEMS`、`OPEN_QUESTIONS`、`QA_REVIEW`、`ASSESSMENT_MATRIX` 与 `COMPARISON_TABLE`，只接受账本内的随机 `sourceRef`；每条事实项必须至少引用一个转写来源，未观察到的评价用 `NOT_OBSERVED`。完成事务再次复核 Run 范围、文档、索引版本、Chunk、Segment 和结果路径后才保存回答；前端同时兼容 v2 区块和旧结果。
 
@@ -217,8 +221,11 @@ Agent 看到的工具名为 `mcp.calendar.list_events`。服务端不信任远�
 
 - [QdrantKnowledgeVectorStore](backend/src/main/java/com/voicenote/service/QdrantKnowledgeVectorStore.java)：维护 Dense + BM25 的 RRF 查询，以及版本化可检索过滤。
 - [KnowledgeSearchService](backend/src/main/java/com/voicenote/service/KnowledgeSearchService.java)：复核活动版本、按 Topic 扩展邻近上下文并施加上下文上限。
-- [KnowledgeAgentWorker](backend/src/main/java/com/voicenote/service/KnowledgeAgentWorker.java)：执行标准 Function Calling Tool Loop、预算、最后回合和租约恢复。
-- [KnowledgeAgentService](backend/src/main/java/com/voicenote/service/KnowledgeAgentService.java)：创建范围/Skill 快照，持久化步骤与账本，并校验最终证据。
+- [DocumentQaPolicy](backend/src/main/java/com/voicenote/service/DocumentQaPolicy.java)：根据原文、正式文档和活动索引分别派生当前问答与跨文档检索能力。
+- [AgentRuntime](backend/src/main/java/com/voicenote/service/AgentRuntime.java)：执行版本化 ReAct 状态机、多轮 Tool Call、预算和终止条件。
+- [KnowledgeAgentWorker](backend/src/main/java/com/voicenote/service/KnowledgeAgentWorker.java)：领取租约，保留 Legacy 路径并将新 Run 分派给 Runtime。
+- [KnowledgeAgentService](backend/src/main/java/com/voicenote/service/KnowledgeAgentService.java)：创建范围/Skill 快照，原子持久化 Step、Checkpoint 与账本，处理恢复 epoch、分支重放和最终证据校验。
+- [V16 Agent Trace 迁移](backend/src/main/resources/db/migration/V16__add_agent_trace_checkpoints.sql)：定义 lineage、执行 epoch、结构化失败和不可变 Checkpoint。
 - [SkillService](backend/src/main/java/com/voicenote/service/SkillService.java)：管理私人 Draft、版本发布、资源限制、触发预览、自动启用和所有者隔离。
 - [内置 Agent Skills](backend/src/main/resources/agent-skills)：仓库版本化的通用问答、面试复盘和会议总结清单。
 - [Agent 评测说明](docs/agent-evaluation.md)：小型评测集、脱敏结果格式与指标计算方式。

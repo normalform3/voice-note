@@ -51,25 +51,25 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
 
     @Override public void upsert(KnowledgeDocument document, KnowledgeIndexVersion indexVersion, KnowledgeChunk chunk, List<Double> denseVector, List<String> topicIds) {
         try {
-            List<String> speakerIds = chunk.getSpeakerIds() == null ? List.of() : mapper.readValue(chunk.getSpeakerIds(), new TypeReference<>() { });
-            Map<String, Object> bm25 = new LinkedHashMap<>();
-            bm25.put("text", chunk.getTextContent()); bm25.put("model", "qdrant/bm25");
-            bm25.put("options", Map.of("language", "none", "tokenizer", "multilingual"));
-            Map<String, Object> payload = new LinkedHashMap<>();
-            payload.put("ownerId", document.getOwnerId()); payload.put("documentId", document.getId()); payload.put("indexVersionId", indexVersion.getId());
-            payload.put("chunkId", chunk.getId()); payload.put("topicIds", topicIds); payload.put("chunkIndex", chunk.getChunkIndex());
-            payload.put("startMs", chunk.getStartMs()); payload.put("endMs", chunk.getEndMs());
-            payload.put("speakerIds", speakerIds);
-            payload.put("searchable", false);
-            payload.put("tokenCount", chunk.getTokenCount()); payload.put("oversized", chunk.isOversized());
-            Map<String, Object> point = Map.of(
-                    "id", chunk.getId(),
-                    "vector", Map.of(DENSE, denseVector, BM25, bm25),
-                    "payload", payload);
+            Map<String, Object> point = point(document, indexVersion, chunk, denseVector, topicIds);
             client.put().uri("/collections/{collection}/points?wait=true", properties.getKnowledge().getCollection())
                     .contentType(MediaType.APPLICATION_JSON).body(Map.of("points", List.of(point))).retrieve().toBodilessEntity();
         } catch (ProviderException exception) { throw exception; }
         catch (Exception exception) { throw unavailable(exception); }
+    }
+
+    Map<String, Object> point(KnowledgeDocument document, KnowledgeIndexVersion indexVersion, KnowledgeChunk chunk,
+                              List<Double> denseVector, List<String> topicIds) throws Exception {
+        List<String> speakerIds = chunk.getSpeakerIds() == null ? List.of() : mapper.readValue(chunk.getSpeakerIds(), new TypeReference<>() { });
+        Map<String, Object> bm25 = new LinkedHashMap<>();
+        bm25.put("text", chunk.getTextContent()); bm25.put("model", "qdrant/bm25");
+        bm25.put("options", Map.of("language", "none", "tokenizer", "multilingual"));
+        Map<String, Object> payload = new LinkedHashMap<>();
+        payload.put("ownerId", document.getOwnerId()); payload.put("documentId", document.getId()); payload.put("indexVersionId", indexVersion.getId());
+        payload.put("chunkId", chunk.getId()); payload.put("topicIds", topicIds); payload.put("chunkIndex", chunk.getChunkIndex());
+        payload.put("startMs", chunk.getStartMs()); payload.put("endMs", chunk.getEndMs()); payload.put("speakerIds", speakerIds);
+        payload.put("searchable", false); payload.put("tokenCount", chunk.getTokenCount()); payload.put("oversized", chunk.isOversized());
+        return Map.of("id", chunk.getId(), "vector", Map.of(DENSE, denseVector, BM25, bm25), "payload", payload);
     }
 
     @Override public void deleteDocument(String ownerId, String documentId) {

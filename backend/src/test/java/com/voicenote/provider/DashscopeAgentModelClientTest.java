@@ -39,6 +39,20 @@ class DashscopeAgentModelClientTest {
     }
 
     @Test
+    void forcesFinalizeAnswerWhenItIsTheOnlyRemainingTool() throws Exception {
+        AtomicReference<JsonNode> request = new AtomicReference<>();
+        server = server(200, "{\"choices\":[{\"message\":{\"role\":\"assistant\",\"content\":null,\"tool_calls\":[{\"id\":\"call-1\",\"type\":\"function\",\"function\":{\"name\":\"finalize_answer\",\"arguments\":\"{}\"}}]},\"finish_reason\":\"tool_calls\"}]}", request);
+        DashscopeAgentModelClient client = client();
+        var tool = new AgentModelClient.AgentToolDefinition("finalize_answer", "Submit answer",
+                mapper.readTree("{\"type\":\"object\",\"properties\":{}}"));
+
+        client.next(List.of(AgentModelClient.AgentMessage.user("提交答案")), List.of(tool), true);
+
+        assertThat(request.get().path("tool_choice").path("type").asText()).isEqualTo("function");
+        assertThat(request.get().path("tool_choice").path("function").path("name").asText()).isEqualTo("finalize_answer");
+    }
+
+    @Test
     void includesDashscopeErrorCodeAndMessageInARejectedRequest() throws Exception {
         server = server(400, "{\"error\":{\"code\":\"invalid_parameter_error\",\"message\":\"tool_choice must be auto or none\"}}", new AtomicReference<>());
         DashscopeAgentModelClient client = client();

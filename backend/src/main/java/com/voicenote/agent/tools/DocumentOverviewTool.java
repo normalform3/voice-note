@@ -7,6 +7,7 @@ import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.voicenote.agent.*;
 import com.voicenote.domain.OrganizedBlockType;
 import com.voicenote.domain.OrganizedDocumentStatus;
+import com.voicenote.domain.QaRetrievalMode;
 import com.voicenote.provider.AgentModelClient;
 import com.voicenote.repository.*;
 import org.springframework.stereotype.Component;
@@ -22,6 +23,10 @@ public class DocumentOverviewTool implements AgentTool {
     public DocumentOverviewTool(ObjectMapper mapper, KnowledgeIndexVersionRepository versions, OrganizedDocumentRepository organizedDocuments,
                                 OrganizedDocumentBlockRepository organizedBlocks) {
         this.mapper = mapper; this.versions = versions; this.organizedDocuments = organizedDocuments; this.organizedBlocks = organizedBlocks;
+    }
+
+    @Override public boolean available(AgentExecutionContext context) {
+        return context.documents().stream().anyMatch(value -> value.retrievalMode() != QaRetrievalMode.TRANSCRIPT_LOCAL);
     }
 
     @Override public AgentModelClient.AgentToolDefinition definition() {
@@ -44,9 +49,8 @@ public class DocumentOverviewTool implements AgentTool {
         ArrayNode overviews = mapper.createArrayNode(); ArrayNode missing = mapper.createArrayNode(); ArrayNode unavailable = mapper.createArrayNode();
         for (String taskId : page) {
             AgentExecutionContext.ScopeDocument scope = context.requireDocument(taskId);
-            if (scope.indexVersionId() == null) unavailable.add(taskId);
             JsonNode overview = overview(context, scope);
-            if (overview == null) { missing.add(taskId); continue; }
+            if (overview == null) { missing.add(taskId); unavailable.add(taskId); continue; }
             overviews.add(overview);
         }
         context.markOverviewed(page.stream().filter(id -> !contains(missing, id)).toList());
@@ -64,10 +68,15 @@ public class DocumentOverviewTool implements AgentTool {
             JsonNode stored = indexVersion == null ? null : parse(indexVersion.getOverviewDocument());
             if (stored != null && stored.isObject()) return normalize(context, scope, stored);
         }
-        var organized = indexVersion == null
+        if (scope.formalOverviewSnapshot() != null && scope.formalOverviewSnapshot().isObject()) {
+            return normalize(context, scope, scope.formalOverviewSnapshot());
+        }
+        var organized = scope.organizedDocumentId() == null
                 ? organizedDocuments.findTopByOwnerIdAndTranscriptionTaskIdOrderByUpdatedAtDesc(context.ownerId(), scope.taskId()).orElse(null)
-                : organizedDocuments.findById(indexVersion.getOrganizedDocumentId()).orElse(null);
-        if (organized != null && (!organized.getOwnerId().equals(context.ownerId()) || organized.getStatus() != OrganizedDocumentStatus.READY)) organized = null;
+                : organizedDocuments.findById(scope.organizedDocumentId()).orElse(null);
+        if (organized != null && (!organized.getOwnerId().equals(context.ownerId())
+                || !organized.getTranscriptionTaskId().equals(scope.taskId())
+                || organized.getStatus() != OrganizedDocumentStatus.READY)) organized = null;
         if (organized == null) return null;
         ObjectNode raw = mapper.createObjectNode(); raw.put("title", organized.getTitle()); raw.put("summary", Objects.toString(organized.getSummaryText(), ""));
         ArrayNode topics = raw.putArray("topics");
@@ -96,7 +105,11 @@ public class DocumentOverviewTool implements AgentTool {
                         fragment.path("speakerId").asText(null), fragment.path("startMs").asLong(), fragment.path("endMs").asLong(), fragment.path("text").asText("")));
             }
         }
-        output.put("topicCount", raw.path("topics").size()); return output;
+        int totalTopics = raw.path("topicCount").isInt() ? raw.path("topicCount").asInt() : raw.path("topics").size();
+        output.put("topicCount", totalTopics); output.put("returnedTopicCount", topics.size());
+        output.put("truncated", totalTopics > topics.size());
+        if (totalTopics > topics.size()) context.addLimitation("文档“" + scope.title() + "”的概览主题超过单次返回上限，当前只读取了前 " + topics.size() + " 个主题。");
+        return output;
     }
 
     private JsonNode parse(String value) {

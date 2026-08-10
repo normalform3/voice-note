@@ -54,8 +54,9 @@ public class OrganizedDocumentWorker {
                 pipeline.recordModelInvocation(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION, properties.getDashscope().getChatModel());
             }
             String response = action.cached() ? action.value() : model.complete(action.value());
+            DocumentOrganizationService.OrganizationResult result = documents.organizeSemantic(work, response);
             if (!action.cached()) documents.completeSemantic(work.document().getId(), response);
-            return documents.organizeSemantic(work, response);
+            return result;
         } catch (ProviderException exception) {
             if (exception.getKind() == ProviderException.Kind.AMBIGUOUS_SUBMISSION) documents.markSemanticUnknown(work.document().getId());
             else documents.markSemanticFallback(work.document().getId());

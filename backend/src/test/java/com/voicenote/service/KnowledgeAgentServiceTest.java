@@ -2,16 +2,17 @@ package com.voicenote.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.voicenote.agent.AgentSkill;
+import com.voicenote.agent.AgentSkillRegistry;
 import com.voicenote.config.AppProperties;
 import com.voicenote.domain.*;
-import com.voicenote.repository.KnowledgeRunEvidenceRepository;
-import com.voicenote.repository.KnowledgeRunRepository;
+import com.voicenote.repository.*;
 import com.voicenote.web.ApiException;
 import org.junit.jupiter.api.Test;
 import java.util.List;
 import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.*;
 
 class KnowledgeAgentServiceTest {
@@ -39,5 +40,41 @@ class KnowledgeAgentServiceTest {
         assertThatThrownBy(() -> service.complete(run.getId(), "{\"answer\":\"x\",\"findings\":[{\"evidence\":[{\"chunkId\":\"chunk-a\",\"segmentId\":\"segment-b\"}]}]}", List.of(readable)))
                 .isInstanceOf(ApiException.class).hasMessageContaining("did not read");
         verify(evidence, never()).save(any());
+    }
+
+    @Test
+    void freezesAFormalOverviewForAnUnindexedCurrentDocument() throws Exception {
+        ObjectMapper mapper = new ObjectMapper().findAndRegisterModules(); AppProperties properties = new AppProperties(); properties.getAgent().setEnabled(true);
+        KnowledgeRunRepository runs = mock(KnowledgeRunRepository.class); KnowledgeRunDocumentRepository runDocuments = mock(KnowledgeRunDocumentRepository.class);
+        TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class); KnowledgeDocumentRepository documents = mock(KnowledgeDocumentRepository.class);
+        OrganizedDocumentRepository organizedDocuments = mock(OrganizedDocumentRepository.class); OrganizedDocumentBlockRepository blocks = mock(OrganizedDocumentBlockRepository.class);
+        IdempotencyService idempotency = mock(IdempotencyService.class); AgentSkillRegistry skills = mock(AgentSkillRegistry.class);
+        TranscriptionTask task = new TranscriptionTask("owner", "audio", "a".repeat(64), "pipeline"); task.transcriptPersisted();
+        OrganizedDocument organized = new OrganizedDocument("owner", task.getId(), task.getTranscriptVersion(), "正式标题"); organized.ready("正式标题", "摘要", "LLM", "{}", "正文");
+        OrganizedDocumentBlock topic = new OrganizedDocumentBlock(organized.getId(), 0, OrganizedBlockType.TOPIC, null, "主题", "主题摘要", "[\"S1\"]",
+                0, 1_000, "[\"segment-1\"]", "[{\"segmentId\":\"segment-1\",\"speakerId\":\"S1\",\"startMs\":0,\"endMs\":1000,\"text\":\"原文证据\"}]", "主题正文");
+        AgentSkill skill = new AgentSkill("knowledge-qa", "v1", "知识问答", "", List.of(), "", List.of("document_overview", "transcript_context", "finalize_answer"), false);
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion("owner", task.getId(), task.getTranscriptVersion())).thenReturn(Optional.empty());
+        when(organizedDocuments.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion("owner", task.getId(), task.getTranscriptVersion())).thenReturn(Optional.of(organized));
+        when(blocks.findByOrganizedDocumentIdOrderByBlockIndex(organized.getId())).thenReturn(List.of(topic));
+        when(idempotency.reserve(anyString(), anyString(), anyString(), anyString())).thenReturn(new IdempotencyRecord("owner", "CREATE_AGENT_RUN", "key", "b".repeat(64)));
+        when(skills.fallback()).thenReturn(skill); when(runs.save(any(KnowledgeRun.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        when(runDocuments.save(any(KnowledgeRunDocument.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        KnowledgeAgentService service = new KnowledgeAgentService(runs, mock(KnowledgeRunEvidenceRepository.class), runDocuments,
+                mock(KnowledgeRunStepRepository.class), mock(KnowledgeRunSourceRepository.class), tasks, documents, organizedDocuments, blocks,
+                mock(KnowledgeIndexVersionRepository.class), mock(KnowledgeChunkRepository.class), mock(TranscriptSegmentRepository.class),
+                idempotency, mock(OutboxService.class), mapper, properties, new ProgressEventPublisher(event -> { }), skills,
+                mock(com.voicenote.agent.AgentMetrics.class), mock(AgentCheckpointStore.class), new DocumentQaPolicy());
+
+        service.createAgent("owner", "key", new KnowledgeAgentService.CreateAgentCommand("总结这份文档",
+                new KnowledgeAgentService.AgentScopeCommand(AgentScopeType.CURRENT_DOCUMENT, List.of(task.getId())), null, "Asia/Shanghai"));
+
+        var captor = org.mockito.ArgumentCaptor.forClass(KnowledgeRunDocument.class); verify(runDocuments).save(captor.capture());
+        var metadata = mapper.readTree(captor.getValue().getMetadataSnapshot());
+        assertThat(metadata.path("retrievalMode").asText()).isEqualTo("FORMAL_OVERVIEW");
+        assertThat(metadata.path("organizedDocumentId").asText()).isEqualTo(organized.getId());
+        assertThat(metadata.path("formalOverview").path("topics").path(0).path("title").asText()).isEqualTo("主题");
+        assertThat(captor.getValue().getKnowledgeIndexVersionId()).isNull();
     }
 }

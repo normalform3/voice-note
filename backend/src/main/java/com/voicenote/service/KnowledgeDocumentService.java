@@ -259,7 +259,7 @@ public class KnowledgeDocumentService {
     }
     private KnowledgeIndexStageAttempt latestStage(String indexVersionId, KnowledgeIndexStage stage) { return stageAttempts.findTopByKnowledgeIndexVersionIdAndStageOrderByAttemptNumberDesc(indexVersionId, stage).orElseThrow(); }
     private String configurationHash() {
-        return Hashing.canonicalJsonHash(Map.of("chunker", "topic-v2", "shortTopicTokens", properties.getKnowledge().getShortTopicTokens(), "targetTokens", properties.getKnowledge().getChunkTargetTokens(),
+        return Hashing.canonicalJsonHash(Map.of("chunker", "topic-v3-atomic", "shortTopicTokens", properties.getKnowledge().getShortTopicTokens(), "targetTokens", properties.getKnowledge().getChunkTargetTokens(),
                 "maxTokens", properties.getKnowledge().getChunkMaxTokens(), "embeddingModel", String.valueOf(properties.getDashscope().getEmbeddingModel()), "embeddingDimension", properties.getDashscope().getEmbeddingDimension()));
     }
     private void publish(String ownerId, String indexVersionId) { progressEvents.publish(new ProgressEventPublisher.ProgressNotification(ownerId, "knowledge-index-progress", indexVersionId)); }

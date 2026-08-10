@@ -50,33 +50,40 @@ public class KnowledgeChunker {
         if (topics.isEmpty()) return List.of();
         int target = Math.max(200, properties.getKnowledge().getChunkTargetTokens());
         int shortLimit = Math.max(1, properties.getKnowledge().getShortTopicTokens());
-        List<EmbeddedChunk> output = new ArrayList<>();
-        int cursor = 0;
-        while (cursor < topics.size()) {
-            TopicData current = topics.get(cursor);
-            Measured measured = measure(documentTitle, current.units, null);
-            if (measured.tokens <= shortLimit) {
-                List<Unit> merged = new ArrayList<>(current.units);
-                TextEmbeddingClient.EmbeddedDocument embedded = measured.embedded;
-                int next = cursor + 1;
-                while (next < topics.size()) {
-                    TopicData candidateTopic = topics.get(next);
-                    Measured candidateTopicMeasured = measure(documentTitle, candidateTopic.units, null);
-                    if (candidateTopicMeasured.tokens > shortLimit) break;
-                    List<Unit> candidate = new ArrayList<>(merged); candidate.addAll(candidateTopic.units);
-                    Measured candidateMeasured = measure(documentTitle, candidate, null);
-                    if (candidateMeasured.tokens > target) break;
-                    merged = candidate; embedded = candidateMeasured.embedded; next++;
+        List<List<TopicData>> groups = new ArrayList<>();
+        topics.forEach(topic -> groups.add(new ArrayList<>(List.of(topic))));
+        int groupIndex = 0;
+        while (groupIndex < groups.size()) {
+            List<TopicData> current = groups.get(groupIndex);
+            if (measure(documentTitle, units(current)).tokens > shortLimit) { groupIndex++; continue; }
+            boolean merged = false;
+            if (groupIndex + 1 < groups.size()) {
+                List<TopicData> candidate = new ArrayList<>(current); candidate.addAll(groups.get(groupIndex + 1));
+                if (measure(documentTitle, units(candidate)).tokens <= target) {
+                    groups.set(groupIndex, candidate); groups.remove(groupIndex + 1); merged = true;
                 }
-                output.add(toChunk(documentTitle, merged, null, embedded, false));
-                cursor = next;
-                continue;
             }
-            output.addAll(splitTopic(documentTitle, current));
-            cursor++;
+            if (!merged && groupIndex > 0) {
+                List<TopicData> candidate = new ArrayList<>(groups.get(groupIndex - 1)); candidate.addAll(current);
+                if (measure(documentTitle, units(candidate)).tokens <= target) {
+                    groups.set(groupIndex - 1, candidate); groups.remove(groupIndex); groupIndex--; merged = true;
+                }
+            }
+            if (!merged || measure(documentTitle, units(groups.get(groupIndex))).tokens > shortLimit) groupIndex++;
+        }
+        List<EmbeddedChunk> output = new ArrayList<>();
+        for (List<TopicData> group : groups) {
+            List<Unit> groupedUnits = units(group);
+            if (group.size() > 1) {
+                Measured measured = measure(documentTitle, groupedUnits);
+                int maximum = Math.max(target, properties.getKnowledge().getChunkMaxTokens());
+                output.add(toChunk(documentTitle, groupedUnits, measured.embedded, measured.tokens > maximum));
+            } else output.addAll(splitTopic(documentTitle, group.get(0)));
         }
         return List.copyOf(output);
     }
+
+    private static List<Unit> units(List<TopicData> topics) { return topics.stream().flatMap(value -> value.units.stream()).toList(); }
 
     private List<EmbeddedChunk> splitTopic(String documentTitle, TopicData topic) {
         int target = Math.max(200, properties.getKnowledge().getChunkTargetTokens());
@@ -84,32 +91,26 @@ public class KnowledgeChunker {
         List<EmbeddedChunk> output = new ArrayList<>();
         List<Unit> current = new ArrayList<>();
         TextEmbeddingClient.EmbeddedDocument currentEmbedded = null;
-        Unit prior = null;
         int cursor = 0;
         while (cursor < topic.units.size()) {
             Unit next = topic.units.get(cursor);
             List<Unit> candidate = new ArrayList<>(current); candidate.add(next);
-            Measured measured = measure(documentTitle, candidate, prior);
+            Measured measured = measure(documentTitle, candidate);
             if (measured.tokens <= maximum && (measured.tokens <= target || current.isEmpty() || requiredTokens(currentEmbedded) < MIN_ACCEPTED_TOKENS)) {
                 current = candidate; currentEmbedded = measured.embedded; cursor++; continue;
             }
             if (!current.isEmpty()) {
-                output.add(toChunk(documentTitle, current, prior, currentEmbedded, false));
-                prior = current.get(current.size() - 1); current = new ArrayList<>(); currentEmbedded = null; continue;
+                output.add(toChunk(documentTitle, current, currentEmbedded, false));
+                current = new ArrayList<>(); currentEmbedded = null; continue;
             }
-            if (!next.atomic()) {
-                List<Unit> atoms = next.atomicUnits();
-                if (atoms.size() > 1) { topic.units.remove(cursor); topic.units.addAll(cursor, atoms); continue; }
-            }
-            output.add(toChunk(documentTitle, List.of(next), prior, measured.embedded, true));
-            prior = next; cursor++;
+            output.add(toChunk(documentTitle, List.of(next), measured.embedded, true)); cursor++;
         }
-        if (!current.isEmpty()) output.add(toChunk(documentTitle, current, prior, currentEmbedded, false));
+        if (!current.isEmpty()) output.add(toChunk(documentTitle, current, currentEmbedded, false));
         return output;
     }
 
-    private Measured measure(String title, List<Unit> units, Unit context) {
-        TextEmbeddingClient.EmbeddedDocument embedded = embeddings.embedDocumentWithUsage(render(title, units, context));
+    private Measured measure(String title, List<Unit> units) {
+        TextEmbeddingClient.EmbeddedDocument embedded = embeddings.embedDocumentWithUsage(render(title, units));
         return new Measured(embedded, requiredTokens(embedded));
     }
 
@@ -120,9 +121,8 @@ public class KnowledgeChunker {
         return value.promptTokens();
     }
 
-    private static String render(String title, List<Unit> units, Unit context) {
+    private static String render(String title, List<Unit> units) {
         StringBuilder output = new StringBuilder("# ").append(title).append('\n');
-        if (context != null) output.append("[上下文] ").append(context.text).append('\n');
         String topicId = null;
         for (Unit unit : units) {
             if (!Objects.equals(topicId, unit.topicId)) {
@@ -133,27 +133,24 @@ public class KnowledgeChunker {
         return output.toString();
     }
 
-    private static EmbeddedChunk toChunk(String title, List<Unit> units, Unit prior, TextEmbeddingClient.EmbeddedDocument embedded, boolean oversized) {
-        Unit context = prior != null && Objects.equals(prior.topicId, units.get(0).topicId) ? prior : null;
+    private static EmbeddedChunk toChunk(String title, List<Unit> units, TextEmbeddingClient.EmbeddedDocument embedded, boolean oversized) {
         LinkedHashMap<String, Fragment> fragments = new LinkedHashMap<>();
-        if (context != null) context.fragments.forEach(value -> fragments.put(value.segmentId, value));
         for (Unit unit : units) unit.fragments.forEach(value -> fragments.put(value.segmentId, value));
         List<String> primaryIds = units.stream().flatMap(unit -> unit.segmentIds.stream()).distinct().toList();
-        List<String> contextIds = context == null ? List.of() : context.segmentIds;
         List<String> blockIds = units.stream().map(unit -> unit.blockId).filter(Objects::nonNull).distinct().toList();
         List<String> speakerIds = fragments.values().stream().map(Fragment::speakerId).filter(value -> value != null && !value.isBlank()).distinct().toList();
         List<TopicReference> topics = units.stream().collect(java.util.stream.Collectors.toMap(unit -> unit.topicId,
                 unit -> new TopicReference(unit.topicId, unit.topicTitle, unit.topicIndex), (left, right) -> left, LinkedHashMap::new)).values().stream().toList();
         String topicTitle = topics.stream().map(TopicReference::title).distinct().reduce((left, right) -> left + " / " + right).orElse("整理片段");
-        return new EmbeddedChunk(topics, topicTitle, units.get(0).startMs, units.get(units.size() - 1).endMs, primaryIds, contextIds, blockIds,
-                speakerIds, List.copyOf(fragments.values()), render(title, units, context), requiredTokens(embedded), embedded.vector(), oversized);
+        return new EmbeddedChunk(topics, topicTitle, units.get(0).startMs, units.get(units.size() - 1).endMs, primaryIds, List.of(), blockIds,
+                speakerIds, List.copyOf(fragments.values()), render(title, units), requiredTokens(embedded), embedded.vector(), oversized);
     }
 
     private TopicData toTopic(TopicSnapshot topic) {
         List<Unit> units = new ArrayList<>();
         for (UnitSnapshot source : topic.units()) {
             List<Fragment> fragments = fragments(source.sourceFragments(), source.sourceSegmentIds(), source.speakerLabel(), source.startMs(), source.endMs(), source.text());
-            units.add(new Unit(topic.id(), topic.topicIndex(), source.blockId(), topic.title(), source.text(), source.startMs(), source.endMs(), fragments, false));
+            units.add(new Unit(topic.id(), topic.topicIndex(), source.blockId(), topic.title(), source.text(), source.startMs(), source.endMs(), fragments));
         }
         return new TopicData(topic, units);
     }
@@ -185,7 +182,7 @@ public class KnowledgeChunker {
     }
 
     private UnitSnapshot snapshot(OrganizedDocumentBlock block) {
-        return new UnitSnapshot(block.getId(), block.getTextContent(), block.getSpeakerLabel(), block.getSpeakerIds(), block.getStartMs(), block.getEndMs(), block.getSourceSegmentIds(), block.getSourceFragments());
+        return new UnitSnapshot(block.getId(), block.getTextContent(), block.getSpeakerLabel(), block.getSpeakerIds(), block.getStartMs(), block.getEndMs(), block.getSourceSegmentIds(), block.getSourceFragments(), block.getBlockType());
     }
 
     private List<Fragment> fragments(String document, String idsDocument, String legacySpeaker, long start, long end, String text) {
@@ -202,7 +199,8 @@ public class KnowledgeChunker {
     private static String title(String value) { return value == null || value.isBlank() ? "整理片段" : value; }
 
     public record TopicSnapshot(String id, int topicIndex, String title, List<UnitSnapshot> units) { }
-    public record UnitSnapshot(String blockId, String text, String speakerLabel, String speakerIds, long startMs, long endMs, String sourceSegmentIds, String sourceFragments) { }
+    public record UnitSnapshot(String blockId, String text, String speakerLabel, String speakerIds, long startMs, long endMs,
+                               String sourceSegmentIds, String sourceFragments, OrganizedBlockType blockType) { }
     public record TopicReference(String id, String title, int topicIndex) { }
     public record EmbeddedChunk(List<TopicReference> topics, String topicTitle, long startMs, long endMs, List<String> segmentIds, List<String> contextSegmentIds,
                                 List<String> blockIds, List<String> speakerIds, List<Fragment> sourceFragments, String content,
@@ -215,15 +213,10 @@ public class KnowledgeChunker {
     }
     private static final class Unit {
         private final String topicId; private final int topicIndex; private final String blockId; private final String topicTitle; private final String text;
-        private final long startMs; private final long endMs; private final List<Fragment> fragments; private final boolean atomic; private final List<String> segmentIds;
-        private Unit(String topicId, int topicIndex, String blockId, String topicTitle, String text, long startMs, long endMs, List<Fragment> fragments, boolean atomic) {
+        private final long startMs; private final long endMs; private final List<Fragment> fragments; private final List<String> segmentIds;
+        private Unit(String topicId, int topicIndex, String blockId, String topicTitle, String text, long startMs, long endMs, List<Fragment> fragments) {
             this.topicId = topicId; this.topicIndex = topicIndex; this.blockId = blockId; this.topicTitle = topicTitle; this.text = text;
-            this.startMs = startMs; this.endMs = endMs; this.fragments = fragments; this.atomic = atomic; this.segmentIds = fragments.stream().map(Fragment::segmentId).toList();
-        }
-        private boolean atomic() { return atomic; }
-        private List<Unit> atomicUnits() {
-            return fragments.stream().map(fragment -> new Unit(topicId, topicIndex, blockId, topicTitle,
-                    fragment.speakerId() == null ? fragment.text() : fragment.speakerId() + ": " + fragment.text(), fragment.startMs(), fragment.endMs(), List.of(fragment), true)).toList();
+            this.startMs = startMs; this.endMs = endMs; this.fragments = fragments; this.segmentIds = fragments.stream().map(Fragment::segmentId).toList();
         }
     }
 }

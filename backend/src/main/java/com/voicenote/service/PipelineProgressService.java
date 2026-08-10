@@ -31,20 +31,22 @@ public class PipelineProgressService {
     private final ProgressEventPublisher progressEvents;
     private final OutboxService outbox;
     private final AppProperties properties;
+    private final DocumentQaPolicy qaPolicy;
 
     @org.springframework.beans.factory.annotation.Autowired
     public PipelineProgressService(TranscriptionTaskRepository tasks, TaskStageAttemptRepository stages,
                                    KnowledgeDocumentRepository documents, OrganizedDocumentRepository organizedDocuments,
                                    KnowledgeIndexVersionRepository indexVersions, KnowledgeIndexStageAttemptRepository indexStages,
-                                   ProgressEventPublisher progressEvents, OutboxService outbox, AppProperties properties) {
+                                   ProgressEventPublisher progressEvents, OutboxService outbox, AppProperties properties,
+                                   DocumentQaPolicy qaPolicy) {
         this.tasks = tasks; this.stages = stages; this.documents = documents; this.organizedDocuments = organizedDocuments;
         this.indexVersions = indexVersions; this.indexStages = indexStages;
-        this.progressEvents = progressEvents; this.outbox = outbox; this.properties = properties;
+        this.progressEvents = progressEvents; this.outbox = outbox; this.properties = properties; this.qaPolicy = qaPolicy;
     }
     PipelineProgressService(TranscriptionTaskRepository tasks, TaskStageAttemptRepository stages,
                             KnowledgeDocumentRepository documents, OrganizedDocumentRepository organizedDocuments,
                             ProgressEventPublisher progressEvents, OutboxService outbox, AppProperties properties) {
-        this(tasks, stages, documents, organizedDocuments, null, null, progressEvents, outbox, properties);
+        this(tasks, stages, documents, organizedDocuments, null, null, progressEvents, outbox, properties, new DocumentQaPolicy());
     }
 
     @Transactional
@@ -301,15 +303,27 @@ public class PipelineProgressService {
             stageViews.add(new StageView(stage, current.getStatus(), current.getAttemptNumber(), current.getQueuedAt(), current.getStartedAt(), current.getCompletedAt(),
                     current.getWaitDurationMs(), totalWait, current.getNextRetryAt(), current.getErrorCode(), current.getErrorMessage(), current.getModelId()));
         }
-        KnowledgeDocumentView document = documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(task.getOwnerId(), task.getId(), task.getTranscriptVersion())
-                .map(value -> new KnowledgeDocumentView(value.getId(), value.getTitle(), value.getStatus().name(), value.getFailureMessage(), indexBuild(value.getId()))).orElse(null);
-        OrganizedDocumentView organized = organizedDocuments.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(task.getOwnerId(), task.getId(), task.getTranscriptVersion())
-                .map(value -> new OrganizedDocumentView(value.getId(), value.getTitle(), value.getStatus().name(), value.getFailureMessage())).orElse(null);
+        KnowledgeDocument knowledgeEntity = documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(
+                task.getOwnerId(), task.getId(), task.getTranscriptVersion()).orElse(null);
+        OrganizedDocument organizedEntity = organizedDocuments.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(
+                task.getOwnerId(), task.getId(), task.getTranscriptVersion()).orElse(null);
+        KnowledgeIndexVersion activeIndex = activeIndex(knowledgeEntity);
+        DocumentQaPolicy.Capabilities qaCapabilities = qaPolicy.evaluate(task, organizedEntity, knowledgeEntity, activeIndex);
+        KnowledgeDocumentView document = knowledgeEntity == null ? null : new KnowledgeDocumentView(knowledgeEntity.getId(), knowledgeEntity.getTitle(),
+                knowledgeEntity.getStatus().name(), knowledgeEntity.getFailureMessage(), indexBuild(knowledgeEntity.getId()));
+        OrganizedDocumentView organized = organizedEntity == null ? null : new OrganizedDocumentView(organizedEntity.getId(), organizedEntity.getTitle(),
+                organizedEntity.getStatus().name(), organizedEntity.getFailureMessage());
         List<PipelineStage> retryable = stageViews.stream().filter(stage -> stage.status() == StageAttemptStatus.FAILED || stage.status() == StageAttemptStatus.UNKNOWN || stage.status() == StageAttemptStatus.RETRY_WAIT).map(StageView::stage).toList();
         return new TaskProgressView(task.getId(), task.getAudioBlobId(), task.getStatus(), task.getCurrentPhase(), task.getCurrentStage(), task.getProgressPercent(), task.isTranscriptReady(),
                 task.getCreatedAt(), tasks.findDurationMs(task.getId(), task.getTranscriptVersion()),
                 task.getOccurredAt(), task.getSceneType(), task.getSubject(), parseTags(task),
-                task.getCurrentAttemptNumber(), task.getTranscriptVersion(), task.getSpeakerCorrectionRevision(), task.getFailureCode(), task.getFailureMessage(), task.getFailedStage(), retryable, stageViews, document, organized);
+                task.getCurrentAttemptNumber(), task.getTranscriptVersion(), task.getSpeakerCorrectionRevision(), task.getFailureCode(), task.getFailureMessage(), task.getFailedStage(),
+                retryable, stageViews, qaCapabilities, document, organized);
+    }
+
+    private KnowledgeIndexVersion activeIndex(KnowledgeDocument document) {
+        if (document == null || document.getActiveIndexVersionId() == null || indexVersions == null) return null;
+        return indexVersions.findById(document.getActiveIndexVersionId()).orElse(null);
     }
 
     private static List<String> parseTags(TranscriptionTask task) {
@@ -363,6 +377,7 @@ public class PipelineProgressService {
                                    Instant createdAt, Long durationMs,
                                    Instant occurredAt, SceneType sceneType, String subject, List<String> tags,
                                    int currentAttemptNumber, int transcriptVersion, int speakerCorrectionRevision, String failureCode, String failureMessage, PipelineStage failedStage,
-                                   List<PipelineStage> retryableStages, List<StageView> stages, KnowledgeDocumentView knowledgeDocument, OrganizedDocumentView organizedDocument) { }
+                                   List<PipelineStage> retryableStages, List<StageView> stages, DocumentQaPolicy.Capabilities qaCapabilities,
+                                   KnowledgeDocumentView knowledgeDocument, OrganizedDocumentView organizedDocument) { }
     public record RetryWork(String stageAttemptId, String taskId, PipelineStage stage) { }
 }

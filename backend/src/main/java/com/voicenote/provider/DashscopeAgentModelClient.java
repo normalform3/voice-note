@@ -47,9 +47,11 @@ public class DashscopeAgentModelClient implements AgentModelClient {
             if (!tools.isEmpty()) {
                 body.put("tools", tools.stream().map(tool -> Map.of("type", "function", "function", Map.of(
                         "name", tool.name(), "description", tool.description(), "parameters", tool.parameters()))).toList());
-                // DashScope Chat Completions does not accept OpenAI's string value "required".
-                // The worker enforces tool use by continuing the conversation when no tool is called.
-                body.put("tool_choice", "auto");
+                boolean forceFinalize = requireTool && tools.size() == 1 && "finalize_answer".equals(tools.get(0).name());
+                // DashScope supports selecting a named function, but not OpenAI's string value "required".
+                body.put("tool_choice", forceFinalize
+                        ? Map.of("type", "function", "function", Map.of("name", "finalize_answer"))
+                        : "auto");
             }
             JsonNode response = client.post().uri("/chat/completions").contentType(MediaType.APPLICATION_JSON).body(body).retrieve().body(JsonNode.class);
             JsonNode choice = response == null ? null : response.path("choices").path(0);

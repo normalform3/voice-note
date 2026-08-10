@@ -13,12 +13,14 @@ export type StageAttempt = { stage: PipelineStage; status: string; attemptNumber
 export type KnowledgeIndexStage = { stage: 'INGEST' | 'CHUNK' | 'INDEX'; status: string; attemptNumber?: number; progressPercent: number; completedCount: number; totalCount: number; errorMessage?: string }
 export type KnowledgeIndexBuild = { id: string; generation?: number; status: string; currentStage?: 'INGEST' | 'CHUNK' | 'INDEX'; progressPercent: number; topicCount: number; chunkCount: number; indexedChunkCount: number; failureMessage?: string; active?: boolean; stages: KnowledgeIndexStage[] }
 export type KnowledgeDocument = { id: string; transcriptionTaskId: string; title: string; status: string; failureMessage?: string; updatedAt: string; currentBuild?: KnowledgeIndexBuild }
+export type QaRetrievalMode = 'TRANSCRIPT_LOCAL' | 'FORMAL_OVERVIEW' | 'HYBRID_INDEX'
+export type QaCapabilities = { currentDocumentAvailable: boolean; currentMode?: QaRetrievalMode; crossDocumentEligible: boolean; limitationCode?: string }
 export type Task = {
   id: string; audioBlobId: string; status: string; currentPhase?: PipelinePhase; currentStage?: PipelineStage; progressPercent?: number; transcriptReady?: boolean
   currentAttemptNumber: number; transcriptVersion: number; speakerCorrectionRevision: number; failureCode?: string; failureMessage?: string; failedStage?: PipelineStage
   createdAt: string; durationMs?: number
   occurredAt: string; sceneType: 'INTERVIEW' | 'MEETING' | 'OTHER'; subject?: string; tags: string[]
-  retryableStages?: PipelineStage[]; stages?: StageAttempt[]; knowledgeDocument?: { id: string; title: string; status: string; failureMessage?: string; currentBuild?: KnowledgeIndexBuild }; organizedDocument?: { id: string; title: string; status: string; failureMessage?: string }
+  retryableStages?: PipelineStage[]; stages?: StageAttempt[]; qaCapabilities?: QaCapabilities; knowledgeDocument?: { id: string; title: string; status: string; failureMessage?: string; currentBuild?: KnowledgeIndexBuild }; organizedDocument?: { id: string; title: string; status: string; failureMessage?: string }
 }
 export type Segment = { id: string; index: number; speakerId?: string; asrSpeakerId?: string; correctedSpeakerId?: string; speakerCorrected: boolean; speaker?: string; role?: string; startMs: number; endMs: number; text: string }
 export type SpeakerCorrectionResult = { changedSegmentCount: number; revision: number; task: Task }
@@ -32,15 +34,22 @@ export type AgentScopeType = 'CURRENT_DOCUMENT' | 'SELECTED_DOCUMENTS' | 'ALL_DO
 export type AgentRun = {
   id: string; question: string; status: string; scopeType: AgentScopeType; skillId: string; skillVersion: string; skillDisplayName?: string; scopeDocumentCount: number
   modelCallsUsed: number; maxModelCalls: number; agentTurnsUsed: number; maxAgentTurns: number; toolCallsUsed: number; maxToolCalls: number
-  resultDocument?: string; failureMessage?: string; createdAt: string
+  resultDocument?: string; failureMessage?: string; failureCode?: string; failureStage?: string; recoveryCount: number
+  parentRunId?: string; rootRunId?: string; replayFromCheckpointId?: string; createdAt: string; completedAt?: string
 }
-export type AgentStep = { index: number; type: 'ROUTE' | 'MODEL' | 'TOOL' | 'FINALIZE'; status: string; toolName?: string; summary?: string; errorCode?: string; errorMessage?: string; durationMs?: number; createdAt: string }
+export type AgentCheckpoint = { id: string; sequence: number; phase: string; stepId?: string; replayable: boolean; createdAt: string }
+export type AgentStep = {
+  id: string; index: number; executionEpoch: number; type: 'ROUTE' | 'MODEL' | 'TOOL' | 'FINALIZE' | 'RECOVERY'; status: string
+  toolName?: string; summary?: string; errorCode?: string; errorMessage?: string; durationMs?: number; finishReason?: string
+  inputTokens?: number; outputTokens?: number; totalTokens?: number; checkpointId?: string; replayable: boolean; createdAt: string; completedAt?: string
+}
+export type AgentStepDetail = Omit<AgentStep, 'checkpointId' | 'replayable'> & { inputCheckpointId?: string; outputCheckpointId?: string; input?: unknown; output?: unknown }
 export type AgentEvidence = {
   resultPath: string; sourceKind: 'TRANSCRIPT_SEGMENT' | 'DOCUMENT_METADATA' | 'EXTERNAL'; sourceRef: string; documentId?: string; chunkId?: string
   transcriptionTaskId?: string; segmentId?: string; topic?: string; speakerId?: string; role?: string; speaker?: string; startMs?: number; endMs?: number
   text?: string; externalLabel?: string; externalUrl?: string
 }
-export type AgentRunDetail = { run: AgentRun; documentIds: string[]; steps: AgentStep[]; evidence: AgentEvidence[] }
+export type AgentRunDetail = { run: AgentRun; documentIds: string[]; childRunIds: string[]; steps: AgentStep[]; checkpoints: AgentCheckpoint[]; evidence: AgentEvidence[] }
 export type SkillSource = 'BUILTIN' | 'USER'
 export type SkillStatus = 'DRAFT' | 'PUBLISHED' | 'ARCHIVED'
 export type SkillInvocationPolicy = 'MANUAL_ONLY' | 'AUTO'
@@ -131,7 +140,7 @@ export const statusText = (status: string) => ({
   SUCCEEDED: '已完成', RUNNING: '处理中', PROVIDER_RUNNING: '转写中', SUBMITTING: '提交中', ORGANIZING: '整理中', CANCELLED: '已取消',
   WAITING_FOR_FORMAL_DOCUMENT: '等待生成正式文档', WAITING_FOR_KNOWLEDGE_BUILD: '等待建立知识库',
   FINAL_FAILED: '转写失败', RETRYABLE_FAILED: '自动重试中', SUBMISSION_UNKNOWN: '状态未知', BUDGET_EXHAUSTED: '额度已用尽', TIMED_OUT: '执行超时',
-  RETRY_WAIT: '等待重试', UNKNOWN: '状态未知', RETRIED: '已重试'
+  RETRY_WAIT: '等待重试', UNKNOWN: '状态未知', RETRIED: '已重试', INTERRUPTED: '已中断'
 }[status] || status)
 export const stageText = (stage?: PipelineStage) => {
   const labels: Record<PipelineStage, string> = {

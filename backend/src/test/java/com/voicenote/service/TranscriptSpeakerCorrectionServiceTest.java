@@ -71,7 +71,7 @@ class TranscriptSpeakerCorrectionServiceTest {
     }
 
     @Test
-    void invalidatesDerivedDocumentsAndRetiresTheActiveIndex() {
+    void invalidatesDerivedDocumentsAndRetainsTheRetiredIndexPointerForExternalCleanup() {
         TranscriptionTask task = readyTask();
         TranscriptSegment segment = new TranscriptSegment(task.getId(), task.getTranscriptVersion(), 0, "SPEAKER_0", 0, 1_000, "hello");
         stubTaskAndSegment(task, segment);
@@ -96,7 +96,7 @@ class TranscriptSpeakerCorrectionServiceTest {
         assertThat(organized.getStatus()).isEqualTo(OrganizedDocumentStatus.STALE);
         assertThat(summary.getStatus()).isEqualTo(AnalysisRunStatus.STALE);
         assertThat(knowledge.getStatus()).isEqualTo(KnowledgeDocumentStatus.STALE);
-        assertThat(knowledge.getActiveIndexVersionId()).isNull();
+        assertThat(knowledge.getActiveIndexVersionId()).isEqualTo(index.getId());
         assertThat(index.getStatus()).isEqualTo(KnowledgeIndexVersionStatus.RETIRED);
         assertThat(index.isActive()).isFalse();
         verify(organizationInvocations).deleteByOrganizedDocumentId(organized.getId());

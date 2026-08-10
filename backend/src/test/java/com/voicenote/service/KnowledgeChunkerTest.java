@@ -29,8 +29,9 @@ class KnowledgeChunkerTest {
         assertThat(chunks.get(0).segmentIds()).containsExactly("first");
         assertThat(chunks.get(1).segmentIds()).containsExactly("second");
         assertThat(chunks.get(0).speakerIds()).containsExactly("SPEAKER_0");
-        assertThat(chunks.get(1).contextSegmentIds()).containsExactly("first");
-        assertThat(chunks.get(1).sourceFragments()).extracting(KnowledgeChunker.Fragment::segmentId).containsExactly("first", "second");
+        assertThat(chunks.get(1).contextSegmentIds()).isEmpty();
+        assertThat(chunks.get(1).sourceFragments()).extracting(KnowledgeChunker.Fragment::segmentId).containsExactly("second");
+        assertThat(chunks.get(1).oversized()).isTrue();
     }
 
     @Test
@@ -39,19 +40,45 @@ class KnowledgeChunkerTest {
         properties.getKnowledge().setShortTopicTokens(200);
         properties.getKnowledge().setChunkTargetTokens(800);
         properties.getKnowledge().setChunkMaxTokens(1200);
-        TextEmbeddingClient embeddings = embeddings(text -> text.contains("长主题") ? 400 : 100);
         OrganizedDocumentBlock firstTopic = topic(0, "短主题一", 0, 1_000);
         OrganizedDocumentBlock first = child(1, firstTopic, "短主题一", "短一", 0, 1_000);
-        OrganizedDocumentBlock secondTopic = topic(2, "短主题二", 1_000, 2_000);
-        OrganizedDocumentBlock second = child(3, secondTopic, "短主题二", "短二", 1_000, 2_000);
+        OrganizedDocumentBlock secondTopic = topic(2, "普通主题", 1_000, 2_000);
+        OrganizedDocumentBlock second = child(3, secondTopic, "普通主题", "普通内容", 1_000, 2_000);
         OrganizedDocumentBlock longTopic = topic(4, "长主题", 2_000, 3_000);
         OrganizedDocumentBlock third = child(5, longTopic, "长主题", "长内容", 2_000, 3_000);
 
-        List<KnowledgeChunker.EmbeddedChunk> chunks = new KnowledgeChunker(new ObjectMapper(), properties, embeddings).build("会议", List.of(firstTopic, first, secondTopic, second, longTopic, third));
+        List<KnowledgeChunker.EmbeddedChunk> chunks = new KnowledgeChunker(new ObjectMapper(), properties, embeddings(text -> {
+            if (text.contains("长主题")) return 900;
+            if (text.contains("短主题一") && text.contains("普通主题")) return 600;
+            if (text.contains("普通主题")) return 500;
+            return 100;
+        })).build("会议", List.of(firstTopic, first, secondTopic, second, longTopic, third));
 
         assertThat(chunks).hasSize(2);
-        assertThat(chunks.get(0).topics()).extracting(KnowledgeChunker.TopicReference::title).containsExactly("短主题一", "短主题二");
+        assertThat(chunks.get(0).topics()).extracting(KnowledgeChunker.TopicReference::title).containsExactly("短主题一", "普通主题");
         assertThat(chunks.get(1).topics()).extracting(KnowledgeChunker.TopicReference::title).containsExactly("长主题");
+    }
+
+    @Test
+    void neverSplitsAnOversizedQaPairIntoSourceFragments() {
+        AppProperties properties = new AppProperties();
+        properties.getKnowledge().setChunkTargetTokens(800);
+        properties.getKnowledge().setChunkMaxTokens(1200);
+        OrganizedDocumentBlock topic = topic(0, "项目介绍", 0, 2_000);
+        String fragments = "[{\"segmentId\":\"question\",\"speakerId\":\"INTERVIEWER\",\"startMs\":0,\"endMs\":1000,\"text\":\"问题\"},"
+                + "{\"segmentId\":\"answer\",\"speakerId\":\"CANDIDATE\",\"startMs\":1000,\"endMs\":2000,\"text\":\"回答\"}]";
+        OrganizedDocumentBlock qa = new OrganizedDocumentBlock("document", 1, OrganizedBlockType.QA_PAIR, topic.getId(), "项目介绍", null,
+                "[\"INTERVIEWER\",\"CANDIDATE\"]", 0, 2_000, "[\"question\",\"answer\"]", fragments, "面试官：问题\n候选人：回答");
+
+        List<KnowledgeChunker.EmbeddedChunk> chunks = new KnowledgeChunker(new ObjectMapper(), properties, embeddings(text -> 1300))
+                .build("Java 面试", List.of(topic, qa));
+
+        assertThat(chunks).singleElement().satisfies(chunk -> {
+            assertThat(chunk.segmentIds()).containsExactly("question", "answer");
+            assertThat(chunk.blockIds()).containsExactly(qa.getId());
+            assertThat(chunk.oversized()).isTrue();
+            assertThat(chunk.content()).contains("面试官：问题").contains("候选人：回答");
+        });
     }
 
     private static OrganizedDocumentBlock block(int index, String segmentId, String text, long start, long end) {

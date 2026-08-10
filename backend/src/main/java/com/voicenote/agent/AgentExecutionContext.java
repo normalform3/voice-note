@@ -2,6 +2,7 @@ package com.voicenote.agent;
 
 import com.fasterxml.jackson.databind.JsonNode;
 import com.voicenote.domain.AgentScopeType;
+import com.voicenote.domain.QaRetrievalMode;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.*;
@@ -36,6 +37,14 @@ public class AgentExecutionContext {
     public void markSearched(Collection<String> taskIds) { searched.addAll(taskIds); }
     public boolean hasOverviewedAllDocuments() { return documents.stream().allMatch(value -> overviewed.contains(value.taskId())); }
     public void addLimitation(String value) { if (value != null && !value.isBlank() && !limitations.contains(value)) limitations.add(value); }
+    public AgentState.CoverageState checkpointCoverage() {
+        return new AgentState.CoverageState(List.copyOf(overviewed), List.copyOf(searched), List.copyOf(limitations));
+    }
+    public void restoreCoverage(AgentState.CoverageState state) {
+        if (state == null) return;
+        overviewed.addAll(state.overviewedDocumentIds()); searched.addAll(state.searchedDocumentIds());
+        state.limitations().forEach(this::addLimitation);
+    }
     public Coverage coverage(Collection<AgentEvidenceLedger.EvidenceSource> cited) {
         List<String> citedIds = cited.stream().map(AgentEvidenceLedger.EvidenceSource::taskId).filter(Objects::nonNull).distinct().toList();
         List<String> omitted = documents.stream().map(ScopeDocument::taskId).filter(id -> !overviewed.contains(id) && !searched.contains(id)).toList();
@@ -46,8 +55,19 @@ public class AgentExecutionContext {
                 .orElseThrow(() -> new IllegalArgumentException("Document is outside the Agent Run scope: " + taskId));
     }
 
-    public record ScopeDocument(String taskId, String knowledgeDocumentId, String indexVersionId, String title, Instant occurredAt,
-                                String sceneType, String subject, List<String> tags, int transcriptVersion, JsonNode metadataSnapshot) { }
+    public record ScopeDocument(String taskId, String knowledgeDocumentId, String indexVersionId,
+                                String organizedDocumentId, Long organizedDocumentVersion,
+                                QaRetrievalMode retrievalMode, JsonNode formalOverviewSnapshot,
+                                String title, Instant occurredAt, String sceneType, String subject,
+                                List<String> tags, int transcriptVersion, JsonNode metadataSnapshot) {
+        /** Compatibility constructor for focused tool tests and older in-memory callers. */
+        public ScopeDocument(String taskId, String knowledgeDocumentId, String indexVersionId, String title, Instant occurredAt,
+                             String sceneType, String subject, List<String> tags, int transcriptVersion, JsonNode metadataSnapshot) {
+            this(taskId, knowledgeDocumentId, indexVersionId, null, null,
+                    indexVersionId == null ? QaRetrievalMode.TRANSCRIPT_LOCAL : QaRetrievalMode.HYBRID_INDEX,
+                    null, title, occurredAt, sceneType, subject, tags, transcriptVersion, metadataSnapshot);
+        }
+    }
     public record Coverage(int scopeDocumentCount, List<String> overviewedDocumentIds, List<String> searchedDocumentIds,
                            List<String> citedDocumentIds, List<String> omittedDocumentIds, List<String> limitations) { }
 }

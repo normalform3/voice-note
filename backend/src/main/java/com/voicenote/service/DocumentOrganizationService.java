@@ -10,12 +10,20 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.util.*;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 import java.util.stream.Collectors;
 
 /** Builds an evidence-preserving reading document. The model may organize text, never source identity. */
 @Service
 public class DocumentOrganizationService {
-    private static final String STRUCTURE_STAGE = "STRUCTURE";
+    private static final String STRUCTURE_STAGE = "STRUCTURE_V2";
+    private static final String SCHEMA_VERSION = "formal-document-v2";
+    private static final int MAX_TURN_CHARACTERS = 2_400;
+    private static final double MIN_POLISH_RATIO = 0.60;
+    private static final double MAX_POLISH_RATIO = 1.40;
+    private static final Pattern PROTECTED_TOKEN = Pattern.compile("(?i)[a-z][a-z0-9_+.#/-]*|\\d+(?:[.,:/-]\\d+)*(?:%|％)?");
+    private static final Pattern NEGATION_TOKEN = Pattern.compile("不是|没有|不能|不会|未能|不|没|未|无|非|否");
     private final OrganizedDocumentRepository documents;
     private final OrganizedDocumentBlockRepository blocks;
     private final TranscriptSegmentRepository segments;
@@ -40,7 +48,7 @@ public class DocumentOrganizationService {
         if (document.getStatus() == OrganizedDocumentStatus.STALE || document.getStatus() == OrganizedDocumentStatus.PENDING) {
             outbox.enqueue("organized_document", document.getId(), EventType.DOCUMENT_ORGANIZATION_REQUESTED,
                     "{\"taskId\":\"" + task.getId() + "\",\"stage\":\"DOCUMENT_ORGANIZATION\",\"documentId\":\"" + document.getId() + "\"}",
-                    "task:" + task.getId() + ":document:" + document.getId() + ":speaker-revision:" + task.getSpeakerCorrectionRevision());
+                    "task:" + task.getId() + ":document:" + document.getId() + ":speaker-revision:" + task.getSpeakerCorrectionRevision() + ":formal-schema:v2");
         }
         return document;
     }
@@ -57,12 +65,14 @@ public class DocumentOrganizationService {
         Map<String, String> displayNames = speakers.index(task.getOwnerId(), task.getId()).values().stream()
                 .filter(value -> value.getDisplayName() != null && !value.getDisplayName().isBlank())
                 .collect(Collectors.toMap(TranscriptSpeaker::getAsrSpeakerId, TranscriptSpeaker::getDisplayName));
-        return new OrganizationWork(document, segments.findByTranscriptionTaskIdAndTranscriptVersionOrderBySegmentIndex(task.getId(), document.getTranscriptVersion()), displayNames);
+        return new OrganizationWork(document,
+                segments.findByTranscriptionTaskIdAndTranscriptVersionOrderBySegmentIndex(task.getId(), document.getTranscriptVersion()),
+                displayNames, task.getSceneType(), task.getSubject());
     }
 
     @Transactional
     public ModelAction prepareSemantic(OrganizationWork work) {
-        String prompt = semanticPrompt(work.document().getTitle(), turns(work.segments(), work.speakerNames()));
+        String prompt = semanticPrompt(work, turns(work.segments(), work.speakerNames()));
         String hash = Hashing.sha256(prompt);
         OrganizationInvocation invocation = invocations.findByOrganizedDocumentIdAndStageName(work.document().getId(), STRUCTURE_STAGE)
                 .orElseGet(() -> invocations.save(new OrganizationInvocation(work.document().getId(), STRUCTURE_STAGE, hash)));
@@ -94,40 +104,52 @@ public class DocumentOrganizationService {
             JsonNode root = mapper.readTree(rawResponse);
             if (!root.isObject() || !root.path("topics").isArray()) throw invalid("LLM must return a topics array");
             Map<String, TranscriptSegment> source = work.segments().stream().collect(Collectors.toMap(TranscriptSegment::getId, value -> value, (left, right) -> left, LinkedHashMap::new));
-            List<String> expected = allTurns.stream().flatMap(turn -> turn.segmentIds().stream()).toList();
+            Map<String, Turn> turnIndex = allTurns.stream().collect(Collectors.toMap(Turn::key, value -> value, (left, right) -> left, LinkedHashMap::new));
+            List<String> expected = allTurns.stream().map(Turn::key).toList();
             List<Topic> topicResults = new ArrayList<>();
             List<String> seen = new ArrayList<>();
             for (JsonNode topic : root.path("topics")) {
                 String title = bounded(topic.path("title").asText(null), 512, "Topic title");
-                String summary = optionalBounded(topic.path("summary").asText(null), 4_000);
                 JsonNode items = topic.path("items");
                 if (!items.isArray() || items.isEmpty()) throw invalid("Each topic must include items");
                 List<ContentUnit> units = new ArrayList<>(); List<String> topicIds = new ArrayList<>();
                 for (JsonNode item : items) {
                     OrganizedBlockType type = parseUnitType(item.path("type").asText(null));
-                    String text = bounded(item.path("text").asText(null), 16_000, "Item text");
-                    List<String> ids = idList(item.path("sourceSegmentIds"), source, "Item");
-                    ensureContiguous(ids, expected, seen.size());
-                    seen.addAll(ids); topicIds.addAll(ids);
+                    JsonNode itemTurns = item.path("turns");
+                    if (!itemTurns.isArray() || itemTurns.isEmpty()) throw invalid("Each item must include turns");
+                    List<OrganizedTurn> organizedTurns = new ArrayList<>(); List<String> ids = new ArrayList<>();
+                    for (JsonNode value : itemTurns) {
+                        String turnKey = bounded(value.path("turnKey").asText(null), 64, "Turn key");
+                        Turn turn = turnIndex.get(turnKey);
+                        if (turn == null) throw invalid("Item cited an unknown turn");
+                        ensureNextTurn(turnKey, expected, seen.size());
+                        TurnFunction function = parseTurnFunction(value.path("function").asText(null));
+                        String proposed = bounded(value.path("text").asText(null), 8_000, "Turn text");
+                        String polished = safePolish(turn.text(), proposed);
+                        organizedTurns.add(new OrganizedTurn(turn.key(), function, turn.speakerId(), turn.speaker(), polished,
+                                turn.segmentIds(), turn.startMs(), turn.endMs(), polished.equals(clean(proposed))));
+                        seen.add(turnKey); ids.addAll(turn.segmentIds());
+                    }
+                    validateUnit(type, organizedTurns);
+                    topicIds.addAll(ids);
                     Span span = span(ids, source);
-                    units.add(new ContentUnit(type, text, span.startMs(), span.endMs(), List.copyOf(ids), span.speakerIds()));
+                    String text = organizedTurns.stream().map(value -> value.speaker() + "：" + value.text()).collect(Collectors.joining("\n"));
+                    units.add(new ContentUnit(type, text, span.startMs(), span.endMs(), List.copyOf(ids), span.speakerIds(), List.copyOf(organizedTurns)));
                 }
                 Span span = span(topicIds, source);
                 String topicText = units.stream().map(ContentUnit::text).collect(Collectors.joining("\n"));
-                topicResults.add(new Topic(title, summary, span.startMs(), span.endMs(), List.copyOf(topicIds), List.copyOf(units), topicText));
+                topicResults.add(new Topic(title, span.startMs(), span.endMs(), List.copyOf(topicIds), List.copyOf(units), topicText));
             }
-            if (!seen.equals(expected)) throw invalid("LLM output must cover every source segment exactly once");
+            if (!seen.equals(expected)) throw invalid("LLM output must cover every turn exactly once");
             String title = optionalBounded(root.path("title").asText(null), 512);
             if (title == null) title = work.document().getTitle();
-            String summary = optionalBounded(root.path("summary").asText(null), 8_000);
-            if (summary == null) summary = topicResults.stream().map(Topic::summary).filter(Objects::nonNull).collect(Collectors.joining(" "));
             Set<String> knownSpeakerIds = source.values().stream()
                     .map(TranscriptSegment::getEffectiveSpeakerId)
                     .filter(Objects::nonNull)
                     .collect(Collectors.toSet());
             List<RoleSuggestion> suggestions = roleSuggestions(root.path("roleSuggestions"), knownSpeakerIds);
-            String plainText = plainText(title, summary, topicResults);
-            return new OrganizationResult(title, summary, "LLM", allTurns, List.copyOf(topicResults), plainText, List.copyOf(suggestions));
+            String plainText = plainText(title, topicResults);
+            return new OrganizationResult(SCHEMA_VERSION, title, "LLM_V2", allTurns, List.copyOf(topicResults), plainText, List.copyOf(suggestions));
         } catch (IllegalArgumentException exception) { throw exception; }
         catch (Exception exception) { throw invalid("LLM returned invalid structured document"); }
     }
@@ -142,7 +164,7 @@ public class DocumentOrganizationService {
             Map<String, TranscriptSegment> segmentIndex = source.stream().collect(Collectors.toMap(TranscriptSegment::getId, value -> value));
             List<OrganizedDocumentBlock> stored = new ArrayList<>(); int index = 0;
             for (Topic topic : result.topics()) {
-                OrganizedDocumentBlock topicBlock = blocks.save(new OrganizedDocumentBlock(documentId, index++, OrganizedBlockType.TOPIC, null, topic.title(), topic.summary(),
+                OrganizedDocumentBlock topicBlock = blocks.save(new OrganizedDocumentBlock(documentId, index++, OrganizedBlockType.TOPIC, null, topic.title(), null,
                         json(topic.speakerIds()), topic.startMs(), topic.endMs(), json(topic.segmentIds()), fragments(topic.segmentIds(), segmentIndex), topic.text()));
                 stored.add(topicBlock);
                 for (ContentUnit unit : topic.items()) {
@@ -150,7 +172,7 @@ public class DocumentOrganizationService {
                             json(unit.speakerIds()), unit.startMs(), unit.endMs(), json(unit.segmentIds()), fragments(unit.segmentIds(), segmentIndex), unit.text())));
                 }
             }
-            document.ready(result.title(), result.summary(), result.mode(), mapper.writeValueAsString(result), result.plainText());
+            document.ready(result.title(), null, result.mode(), mapper.writeValueAsString(result), result.plainText());
             documents.save(document);
             for (RoleSuggestion suggestion : result.roleSuggestions()) speakers.suggest(document.getTranscriptionTaskId(), document.getTranscriptVersion(), suggestion.speakerId(), suggestion.role(), suggestion.confidence());
             return stored;
@@ -168,12 +190,12 @@ public class DocumentOrganizationService {
             } else current.append(turn);
         }
         if (current != null) topics.add(current.build(topics.size() + 1));
-        return new OrganizationResult("整理文档", null, "FALLBACK", turns, List.copyOf(topics), plainText("整理文档", null, topics), List.of());
+        return new OrganizationResult(SCHEMA_VERSION, "整理文档", "FALLBACK_V2", turns, List.copyOf(topics), plainText("整理文档", topics), List.of());
     }
     static OrganizationResult fallbackFor(OrganizationWork work) {
         OrganizationResult fallback = organize(work.segments(), work.speakerNames());
-        return new OrganizationResult(work.document().getTitle(), fallback.summary(), fallback.mode(), fallback.turns(), fallback.topics(),
-                plainText(work.document().getTitle(), fallback.summary(), fallback.topics()), fallback.roleSuggestions());
+        return new OrganizationResult(SCHEMA_VERSION, work.document().getTitle(), fallback.mode(), fallback.turns(), fallback.topics(),
+                plainText(work.document().getTitle(), fallback.topics()), fallback.roleSuggestions());
     }
 
     static List<Turn> turns(List<TranscriptSegment> source) { return turns(source, Map.of()); }
@@ -183,10 +205,10 @@ public class DocumentOrganizationService {
             String text = clean(segment.getTextContent()); if (text.isBlank()) continue;
             String speakerId = segment.getEffectiveSpeakerId() == null || segment.getEffectiveSpeakerId().isBlank() ? "SPEAKER_UNKNOWN" : segment.getEffectiveSpeakerId();
             String speaker = speakerNames.getOrDefault(speakerId, speakerId);
-            if (current != null && current.speaker.equals(speaker) && segment.getStartMs() - current.endMs <= 5_000 && current.characterCount() + text.length() <= 2_400) current.append(segment, text);
-            else { if (current != null) output.add(current.build()); current = new TurnBuilder(speaker, segment, text); }
+            if (current != null && current.speakerId.equals(speakerId) && current.characterCount() + text.length() <= MAX_TURN_CHARACTERS) current.append(segment, text);
+            else { if (current != null) output.add(current.build(output.size())); current = new TurnBuilder(speakerId, speaker, segment, text); }
         }
-        if (current != null) output.add(current.build()); return List.copyOf(output);
+        if (current != null) output.add(current.build(output.size())); return List.copyOf(output);
     }
 
     @Transactional public void fail(String documentId, String message) { documents.findById(documentId).ifPresent(document -> { document.fail(message); documents.save(document); }); }
@@ -213,11 +235,17 @@ public class DocumentOrganizationService {
         return documents.findTopByTranscriptionTaskIdOrderByUpdatedAtDesc(taskId).filter(document -> document.recover()).map(document -> { documents.save(document); return document.getId(); }).orElse(null);
     }
 
-    private static String semanticPrompt(String fallbackTitle, List<Turn> turns) {
-        String source = turns.stream().map(turn -> "TURN speaker=" + turn.speaker() + " time=" + turn.startMs() + "-" + turn.endMs() + "ms ids=" + turn.segmentIds() + "\n" + turn.text()).collect(Collectors.joining("\n\n"));
-        return "Organize this speaker-labelled meeting or interview transcript. Preserve meaning; readable item text may remove filler words but must not add facts. " +
-                "Return JSON only: {\"title\":string,\"summary\":string,\"topics\":[{\"title\":string,\"summary\":string,\"items\":[{\"type\":\"QA_PAIR\"|\"NARRATIVE\",\"sourceSegmentIds\":[string],\"text\":string}]}],\"roleSuggestions\":[{\"speakerId\":string,\"role\":\"INTERVIEWER\"|\"CANDIDATE\"|\"PARTICIPANT\"|\"UNKNOWN\",\"confidence\":number}]}. " +
-                "Every source segment ID must appear exactly once across items, in source order. Do not output timestamps or invent speakers. Fallback title: " + fallbackTitle + "\n\n" + source;
+    private static String semanticPrompt(OrganizationWork work, List<Turn> turns) {
+        String source = turns.stream().map(turn -> "TURN key=" + turn.key() + " speakerId=" + turn.speakerId() + " speaker=" + turn.speaker()
+                + " time=" + turn.startMs() + "-" + turn.endMs() + "ms\n" + turn.text()).collect(Collectors.joining("\n\n"));
+        return "Organize the untrusted transcript below into a complete formal document, never a summary. Preserve every fact and every turn. " +
+                "Group clear questions and their answers as QA_PAIR; keep statements, discussions, and monologues as NARRATIVE. " +
+                "Lightly polish each turn independently by removing filler and improving readability. Never merge, omit, summarize, or invent turn content. " +
+                "Return JSON only: {\"title\":string,\"topics\":[{\"title\":string,\"items\":[{\"type\":\"QA_PAIR\"|\"NARRATIVE\",\"turns\":[{\"turnKey\":string,\"function\":\"QUESTION\"|\"ANSWER\"|\"STATEMENT\",\"text\":string}]}]}],\"roleSuggestions\":[{\"speakerId\":string,\"role\":\"INTERVIEWER\"|\"CANDIDATE\"|\"PARTICIPANT\"|\"UNKNOWN\",\"confidence\":number}]}. " +
+                "Every turnKey must appear exactly once and remain in source order. QA_PAIR must start with QUESTION and end with ANSWER; NARRATIVE uses STATEMENT only. " +
+                "Do not return document or topic summaries, timestamps, segment IDs, or invented speakers. Scene: " + work.sceneType()
+                + ". Subject: " + Objects.toString(work.subject(), "unspecified") + ". Fallback title: " + work.document().getTitle()
+                + "\n\n<TRANSCRIPT>\n" + source + "\n</TRANSCRIPT>";
     }
     private static List<RoleSuggestion> roleSuggestions(JsonNode node, Set<String> knownSpeakerIds) {
         if (!node.isArray()) return List.of(); List<RoleSuggestion> output = new ArrayList<>();
@@ -234,18 +262,29 @@ public class DocumentOrganizationService {
         if ("NARRATIVE".equals(raw)) return OrganizedBlockType.NARRATIVE;
         throw invalid("Item type must be QA_PAIR or NARRATIVE");
     }
-    private static List<String> idList(JsonNode node, Map<String, TranscriptSegment> source, String field) {
-        if (!node.isArray() || node.isEmpty()) throw invalid(field + " must include source segment IDs");
-        List<String> ids = new ArrayList<>(); for (JsonNode value : node) { String id = value.asText(null); if (id == null || !source.containsKey(id)) throw invalid(field + " cited an unknown source segment"); ids.add(id); }
-        if (new HashSet<>(ids).size() != ids.size()) throw invalid(field + " repeated a source segment"); return List.copyOf(ids);
+    private static TurnFunction parseTurnFunction(String raw) {
+        try { return TurnFunction.valueOf(raw); }
+        catch (Exception exception) { throw invalid("Turn function must be QUESTION, ANSWER, or STATEMENT"); }
     }
-    private static void ensureContiguous(List<String> ids, List<String> expected, int offset) {
-        if (offset + ids.size() > expected.size()) throw invalid("Source segment IDs exceed transcript length");
-        for (int index = 0; index < ids.size(); index++) if (!ids.get(index).equals(expected.get(offset + index))) throw invalid("Source segment IDs must remain in transcript order");
+    private static void ensureNextTurn(String key, List<String> expected, int offset) {
+        if (offset >= expected.size() || !expected.get(offset).equals(key)) throw invalid("Turn keys must appear exactly once in transcript order");
+    }
+    private static void validateUnit(OrganizedBlockType type, List<OrganizedTurn> turns) {
+        if (type == OrganizedBlockType.NARRATIVE) {
+            if (turns.stream().anyMatch(value -> value.function() != TurnFunction.STATEMENT)) throw invalid("NARRATIVE turns must use STATEMENT");
+            return;
+        }
+        if (turns.size() < 2 || turns.get(0).function() != TurnFunction.QUESTION || turns.get(turns.size() - 1).function() != TurnFunction.ANSWER
+                || turns.stream().anyMatch(value -> value.function() == TurnFunction.STATEMENT)
+                || turns.stream().skip(1).anyMatch(value -> value.function() == TurnFunction.QUESTION)
+                || turns.stream().noneMatch(value -> value.function() == TurnFunction.ANSWER)) {
+            throw invalid("QA_PAIR must contain one leading QUESTION followed by one or more ANSWER turns");
+        }
     }
     private static Span span(List<String> ids, Map<String, TranscriptSegment> source) {
         if (ids.isEmpty()) throw invalid("Source segment IDs cannot be empty");
-        List<String> speakers = ids.stream().map(source::get).map(TranscriptSegment::getEffectiveSpeakerId).distinct().toList();
+        List<String> speakers = ids.stream().map(source::get).map(TranscriptSegment::getEffectiveSpeakerId)
+                .map(value -> value == null || value.isBlank() ? "SPEAKER_UNKNOWN" : value).distinct().toList();
         return new Span(source.get(ids.get(0)).getStartMs(), source.get(ids.get(ids.size() - 1)).getEndMs(), speakers);
     }
     private String json(Object value) throws Exception { return mapper.writeValueAsString(value); }
@@ -260,42 +299,88 @@ public class DocumentOrganizationService {
     }
     private String fragments(List<String> ids, Map<String, TranscriptSegment> source) throws Exception {
         List<Map<String, Object>> output = new ArrayList<>();
-        for (String id : ids) { TranscriptSegment segment = source.get(id); output.add(Map.of("segmentId", id, "speakerId", segment.getEffectiveSpeakerId(), "startMs", segment.getStartMs(), "endMs", segment.getEndMs(), "text", segment.getTextContent())); }
+        for (String id : ids) {
+            TranscriptSegment segment = source.get(id); String speakerId = segment.getEffectiveSpeakerId();
+            output.add(Map.of("segmentId", id, "speakerId", speakerId == null || speakerId.isBlank() ? "SPEAKER_UNKNOWN" : speakerId,
+                    "startMs", segment.getStartMs(), "endMs", segment.getEndMs(), "text", segment.getTextContent()));
+        }
         return mapper.writeValueAsString(output);
     }
     private static String bounded(String value, int limit, String label) { if (value == null || value.isBlank() || value.length() > limit) throw invalid(label + " is missing or too long"); return value.trim(); }
     private static String optionalBounded(String value, int limit) { if (value == null || value.isBlank()) return null; if (value.length() > limit) throw invalid("Text field is too long"); return value.trim(); }
     private static IllegalArgumentException invalid(String message) { return new IllegalArgumentException(message); }
-    private static String clean(String text) { return text == null ? "" : text.replaceAll("\\s+", " ").trim(); }
+    private static String clean(String text) {
+        if (text == null) return "";
+        String value = text.replace('\u00a0', ' ').replaceAll("\\s+", " ").trim();
+        value = value.replaceAll("(?<=\\p{IsHan}) +(?=\\p{IsHan})", "");
+        value = value.replaceAll(" +([，。！？；：、,.!?;:）】》”’])", "$1");
+        value = value.replaceAll("([（【《“‘]) +", "$1");
+        value = value.replaceAll("([，。！？；：、]) +(?=\\p{IsHan})", "$1");
+        value = value.replaceAll("([，,；;：:、])\\1+", "$1");
+        if (value.matches(".*[，,、：:；;]$")) value = value.substring(0, value.length() - 1) + "。";
+        else if (!value.isBlank() && !value.matches(".*[。！？.!?…]$")) value += "。";
+        return value;
+    }
+    private static String safePolish(String source, String proposed) {
+        String polished = clean(proposed);
+        int sourceLength = contentLength(source); int polishedLength = contentLength(polished);
+        double ratio = sourceLength == 0 ? (polishedLength == 0 ? 1 : Double.POSITIVE_INFINITY) : (double) polishedLength / sourceLength;
+        if (polished.isBlank() || ratio < MIN_POLISH_RATIO || ratio > MAX_POLISH_RATIO
+                || !tokens(source, PROTECTED_TOKEN, true).equals(tokens(polished, PROTECTED_TOKEN, true))
+                || !tokens(source, NEGATION_TOKEN, false).equals(tokens(polished, NEGATION_TOKEN, false))) return source;
+        return polished;
+    }
+    private static int contentLength(String value) { return (int) value.codePoints().filter(Character::isLetterOrDigit).count(); }
+    private static List<String> tokens(String value, Pattern pattern, boolean lowerCase) {
+        List<String> output = new ArrayList<>(); Matcher matcher = pattern.matcher(value);
+        while (matcher.find()) output.add(lowerCase ? matcher.group().toLowerCase(Locale.ROOT) : matcher.group());
+        Collections.sort(output); return List.copyOf(output);
+    }
     private static String titleFor(String filename) { int extension = filename.lastIndexOf('.'); return extension > 0 ? filename.substring(0, extension) : filename; }
-    private static String plainText(String title, String summary, List<Topic> topics) {
-        String body = topics.stream().map(topic -> "## " + topic.title() + (topic.summary() == null ? "" : "\n" + topic.summary()) + "\n" + topic.text()).collect(Collectors.joining("\n\n"));
-        return "# " + title + (summary == null || summary.isBlank() ? "" : "\n" + summary) + (body.isBlank() ? "" : "\n\n" + body);
+    private static String plainText(String title, List<Topic> topics) {
+        String body = topics.stream().map(topic -> "## " + topic.title() + "\n" + topic.text()).collect(Collectors.joining("\n\n"));
+        return "# " + title + (body.isBlank() ? "" : "\n\n" + body);
     }
 
     private static final class TurnBuilder {
-        private final String speaker; private final long startMs; private long endMs; private final List<String> ids = new ArrayList<>(); private final StringBuilder text = new StringBuilder();
-        private TurnBuilder(String speaker, TranscriptSegment segment, String content) { this.speaker = speaker; this.startMs = segment.getStartMs(); append(segment, content); }
-        private void append(TranscriptSegment segment, String content) { if (!text.isEmpty()) text.append(' '); text.append(content); ids.add(segment.getId()); endMs = segment.getEndMs(); }
+        private final String speakerId; private final String speaker; private final long startMs; private long endMs; private final List<String> ids = new ArrayList<>();
+        private final List<SourceFragment> sourceFragments = new ArrayList<>(); private final StringBuilder text = new StringBuilder();
+        private TurnBuilder(String speakerId, String speaker, TranscriptSegment segment, String content) { this.speakerId = speakerId; this.speaker = speaker; this.startMs = segment.getStartMs(); append(segment, content); }
+        private void append(TranscriptSegment segment, String content) {
+            if (!text.isEmpty()) text.append(' '); text.append(content); ids.add(segment.getId()); endMs = segment.getEndMs();
+            String asrSpeakerId = segment.getAsrSpeakerId();
+            sourceFragments.add(new SourceFragment(segment.getId(), asrSpeakerId == null || asrSpeakerId.isBlank() ? "SPEAKER_UNKNOWN" : asrSpeakerId,
+                    speakerId, segment.getStartMs(), segment.getEndMs(), segment.getTextContent()));
+        }
         private int characterCount() { return text.length(); }
-        private Turn build() { return new Turn(speaker, startMs, endMs, List.copyOf(ids), text.toString()); }
+        private Turn build(int index) { return new Turn("T" + String.format(Locale.ROOT, "%06d", index + 1), speakerId, speaker, startMs, endMs,
+                List.copyOf(ids), List.copyOf(sourceFragments), clean(text.toString())); }
     }
     private static final class TopicBuilder {
         private final long startMs; private long endMs; private final List<String> ids = new ArrayList<>(); private final List<ContentUnit> units = new ArrayList<>(); private final StringBuilder text = new StringBuilder(); private int characters;
         private TopicBuilder(Turn turn) { startMs = turn.startMs(); append(turn); }
-        private void append(Turn turn) { if (!text.isEmpty()) text.append('\n'); String content = turn.speaker() + ": " + turn.text(); text.append(content); ids.addAll(turn.segmentIds()); endMs = turn.endMs(); characters += turn.text().length(); units.add(new ContentUnit(OrganizedBlockType.NARRATIVE, content, turn.startMs(), turn.endMs(), turn.segmentIds(), List.of(turn.speaker()))); }
+        private void append(Turn turn) { if (!text.isEmpty()) text.append('\n'); String content = turn.speaker() + "：" + turn.text(); text.append(content); ids.addAll(turn.segmentIds()); endMs = turn.endMs(); characters += turn.text().length();
+            OrganizedTurn organizedTurn = new OrganizedTurn(turn.key(), TurnFunction.STATEMENT, turn.speakerId(), turn.speaker(), turn.text(), turn.segmentIds(), turn.startMs(), turn.endMs(), false);
+            units.add(new ContentUnit(OrganizedBlockType.NARRATIVE, content, turn.startMs(), turn.endMs(), turn.segmentIds(), List.of(turn.speakerId()), List.of(organizedTurn))); }
         private int characterCount() { return characters; }
-        private Topic build(int number) { return new Topic("主题 " + number, null, startMs, endMs, List.copyOf(ids), List.copyOf(units), text.toString()); }
+        private Topic build(int number) { return new Topic("主题 " + number, startMs, endMs, List.copyOf(ids), List.copyOf(units), text.toString()); }
     }
 
-    public record OrganizationWork(OrganizedDocument document, List<TranscriptSegment> segments, Map<String, String> speakerNames) { }
+    public record OrganizationWork(OrganizedDocument document, List<TranscriptSegment> segments, Map<String, String> speakerNames, SceneType sceneType, String subject) { }
     public record ModelAction(boolean cached, String value) { static ModelAction cached(String response) { return new ModelAction(true, response); } static ModelAction call(String prompt) { return new ModelAction(false, prompt); } }
-    public record Turn(String speaker, long startMs, long endMs, List<String> segmentIds, String text) { }
-    public record ContentUnit(OrganizedBlockType type, String text, long startMs, long endMs, List<String> segmentIds, List<String> speakerIds) { }
-    public record Topic(String title, String summary, long startMs, long endMs, List<String> segmentIds, List<ContentUnit> items, String text) {
+    public record SourceFragment(String segmentId, String asrSpeakerId, String speakerId, long startMs, long endMs, String text) { }
+    public record Turn(String key, String speakerId, String speaker, long startMs, long endMs, List<String> segmentIds,
+                       List<SourceFragment> sourceFragments, String text) { }
+    public enum TurnFunction { QUESTION, ANSWER, STATEMENT }
+    public record OrganizedTurn(String turnKey, TurnFunction function, String speakerId, String speaker, String text,
+                                List<String> sourceSegmentIds, long startMs, long endMs, boolean polishAccepted) { }
+    public record ContentUnit(OrganizedBlockType type, String text, long startMs, long endMs, List<String> segmentIds,
+                              List<String> speakerIds, List<OrganizedTurn> turns) { }
+    public record Topic(String title, long startMs, long endMs, List<String> segmentIds, List<ContentUnit> items, String text) {
         List<String> speakerIds() { return items.stream().flatMap(item -> item.speakerIds().stream()).distinct().toList(); }
     }
     public record RoleSuggestion(String speakerId, SpeakerRole role, Double confidence) { }
-    public record OrganizationResult(String title, String summary, String mode, List<Turn> turns, List<Topic> topics, String plainText, List<RoleSuggestion> roleSuggestions) { }
+    public record OrganizationResult(String schemaVersion, String title, String mode, List<Turn> turns, List<Topic> topics,
+                                     String plainText, List<RoleSuggestion> roleSuggestions) { }
     private record Span(long startMs, long endMs, List<String> speakerIds) { }
 }

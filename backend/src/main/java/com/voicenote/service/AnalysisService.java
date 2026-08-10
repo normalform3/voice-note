@@ -165,9 +165,12 @@ public class AnalysisService {
         for (TranscriptSegment segment : source) { String line = "[" + segment.getId() + "] " + segment.getEffectiveSpeakerId() + " " + segment.getStartMs() + "-" + segment.getEndMs() + "ms: " + segment.getTextContent() + "\n"; if (current.length() > 0 && current.length() + line.length() > 8000) { output.add(current.toString()); current = new StringBuilder(); } current.append(line); }
         if (!current.isEmpty()) output.add(current.toString()); return output;
     }
-    private List<String> chunkOrganized(List<OrganizedDocumentBlock> source) {
+    static List<String> chunkOrganized(List<OrganizedDocumentBlock> source) {
         List<String> output = new ArrayList<>(); StringBuilder current = new StringBuilder();
+        Set<String> topicParentsWithChildren = source.stream().map(OrganizedDocumentBlock::getParentBlockId)
+                .filter(Objects::nonNull).collect(java.util.stream.Collectors.toSet());
         for (OrganizedDocumentBlock block : source) {
+            if (block.getBlockType() == OrganizedBlockType.TOPIC && topicParentsWithChildren.contains(block.getId())) continue;
             String line = "[source=" + block.getSourceSegmentIds() + "] " + (block.getTopicTitle() == null ? "整理片段" : block.getTopicTitle()) + "\n" + block.getTextContent() + "\n";
             if (!current.isEmpty() && current.length() + line.length() > 8000) { output.add(current.toString()); current = new StringBuilder(); }
             current.append(line);

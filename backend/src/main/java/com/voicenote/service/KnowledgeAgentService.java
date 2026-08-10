@@ -5,9 +5,12 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.voicenote.agent.*;
 import com.voicenote.config.AppProperties;
 import com.voicenote.domain.*;
+import com.voicenote.provider.AgentModelClient;
 import com.voicenote.repository.*;
 import com.voicenote.web.ApiException;
 import org.springframework.http.HttpStatus;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.time.*;
@@ -15,8 +18,10 @@ import java.util.*;
 
 @Service
 public class KnowledgeAgentService {
+    private static final Logger log = LoggerFactory.getLogger(KnowledgeAgentService.class);
     private static final String CREATE_OPERATION = "CREATE_KNOWLEDGE_RUN";
     private static final String CREATE_AGENT_OPERATION = "CREATE_AGENT_RUN";
+    private static final String REPLAY_AGENT_OPERATION = "REPLAY_AGENT_RUN";
     private static final int LEGACY_MAX_TOOL_CALLS = 4;
     private final KnowledgeRunRepository runs;
     private final KnowledgeRunEvidenceRepository evidence;
@@ -25,6 +30,9 @@ public class KnowledgeAgentService {
     private final KnowledgeRunSourceRepository sources;
     private final TranscriptionTaskRepository tasks;
     private final KnowledgeDocumentRepository documents;
+    private final OrganizedDocumentRepository organizedDocuments;
+    private final OrganizedDocumentBlockRepository organizedBlocks;
+    private final KnowledgeIndexVersionRepository indexVersions;
     private final KnowledgeChunkRepository chunks;
     private final TranscriptSegmentRepository segments;
     private final IdempotencyService idempotency;
@@ -34,25 +42,32 @@ public class KnowledgeAgentService {
     private final ProgressEventPublisher progressEvents;
     private final AgentSkillRegistry skills;
     private final AgentMetrics metrics;
+    private final AgentCheckpointStore checkpoints;
+    private final DocumentQaPolicy qaPolicy;
 
     @org.springframework.beans.factory.annotation.Autowired
     public KnowledgeAgentService(KnowledgeRunRepository runs, KnowledgeRunEvidenceRepository evidence,
                                  KnowledgeRunDocumentRepository runDocuments, KnowledgeRunStepRepository steps,
                                  KnowledgeRunSourceRepository sources, TranscriptionTaskRepository tasks, KnowledgeDocumentRepository documents,
+                                 OrganizedDocumentRepository organizedDocuments, OrganizedDocumentBlockRepository organizedBlocks,
+                                 KnowledgeIndexVersionRepository indexVersions,
                                  KnowledgeChunkRepository chunks, TranscriptSegmentRepository segments,
                                  IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, AppProperties properties,
-                                 ProgressEventPublisher progressEvents, AgentSkillRegistry skills, AgentMetrics metrics) {
+                                 ProgressEventPublisher progressEvents, AgentSkillRegistry skills, AgentMetrics metrics,
+                                 AgentCheckpointStore checkpoints, DocumentQaPolicy qaPolicy) {
         this.runs = runs; this.evidence = evidence; this.runDocuments = runDocuments; this.steps = steps; this.sources = sources;
-        this.tasks = tasks; this.documents = documents; this.chunks = chunks; this.segments = segments;
+        this.tasks = tasks; this.documents = documents; this.organizedDocuments = organizedDocuments; this.organizedBlocks = organizedBlocks;
+        this.indexVersions = indexVersions; this.chunks = chunks; this.segments = segments;
         this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper; this.properties = properties;
         this.progressEvents = progressEvents; this.skills = skills; this.metrics = metrics;
+        this.checkpoints = checkpoints; this.qaPolicy = qaPolicy;
     }
 
     /** Compatibility constructor used by focused legacy evidence tests. */
     KnowledgeAgentService(KnowledgeRunRepository runs, KnowledgeRunEvidenceRepository evidence, IdempotencyService idempotency,
                           OutboxService outbox, ObjectMapper mapper, AppProperties properties) {
-        this(runs, evidence, null, null, null, null, null, null, null, idempotency, outbox, mapper, properties,
-                new ProgressEventPublisher(event -> { }), null, null);
+        this(runs, evidence, null, null, null, null, null, null, null, null, null, null,
+                idempotency, outbox, mapper, properties, new ProgressEventPublisher(event -> { }), null, null, null, new DocumentQaPolicy());
     }
 
     /** Legacy /knowledge-runs creation remains owner-wide and uses the previous fixed worker while the agent feature flag is off. */
@@ -91,9 +106,10 @@ public class KnowledgeAgentService {
         String snapshot = json(selected); String hash = Hashing.sha256(snapshot);
         KnowledgeRun run = runs.save(new KnowledgeRun(ownerId, question, properties.getDashscope().getChatModel(), scope.type(), zone.getId(),
                 auto ? "auto" : selected.id(), auto ? "pending" : selected.version(), auto ? null : selected.versionId(), snapshot, hash,
-                properties.getAgent().getMaxModelCalls(), properties.getAgent().getMaxTurns(), properties.getAgent().getMaxToolCalls()));
+                properties.getAgent().getMaxModelCalls(), properties.getAgent().getMaxTurns(), properties.getAgent().getMaxToolCalls(),
+                properties.getAgent().getTimeoutSeconds() * 1000L));
         for (ResolvedDocument document : resolved) runDocuments.save(new KnowledgeRunDocument(run.getId(), document.task().getId(),
-                document.document() == null ? null : document.document().getId(), document.document() == null ? null : document.document().getActiveIndexVersionId(), metadata(document)));
+                document.document() == null ? null : document.document().getId(), document.indexVersion() == null ? null : document.indexVersion().getId(), metadata(document)));
         outbox.enqueue("knowledge_run", run.getId(), EventType.KNOWLEDGE_RUN_REQUESTED);
         completeIdempotency(record, run, AgentRunView.from(run, resolved.size(), skillDisplayName(run))); return run;
     }
@@ -105,10 +121,7 @@ public class KnowledgeAgentService {
             if (requested.size() != 1) throw new ApiException(HttpStatus.BAD_REQUEST, "CURRENT_DOCUMENT_REQUIRED", "CURRENT_DOCUMENT requires exactly one transcriptionTaskId");
             TranscriptionTask task = ownedTask(ownerId, requested.iterator().next());
             if (!task.isTranscriptReady()) throw new ApiException(HttpStatus.CONFLICT, "TRANSCRIPT_NOT_READY", "Current document questions require a persisted transcript");
-            KnowledgeDocument document = documents.findTopByOwnerIdAndTranscriptionTaskIdOrderByUpdatedAtDesc(ownerId, task.getId()).orElse(null);
-            if (document != null && (document.getStatus() != KnowledgeDocumentStatus.READY || document.getActiveIndexVersionId() == null
-                    || document.getTranscriptVersion() != task.getTranscriptVersion())) document = null;
-            resolved.add(new ResolvedDocument(task, document));
+            resolved.add(currentDocument(task));
         } else if (scope.type() == AgentScopeType.SELECTED_DOCUMENTS) {
             if (requested.isEmpty()) throw new ApiException(HttpStatus.BAD_REQUEST, "SELECTED_DOCUMENTS_REQUIRED", "SELECTED_DOCUMENTS requires at least one transcriptionTaskId");
             for (String taskId : requested) resolved.add(indexed(ownerId, taskId));
@@ -116,9 +129,11 @@ public class KnowledgeAgentService {
             if (!requested.isEmpty()) throw new ApiException(HttpStatus.BAD_REQUEST, "ALL_DOCUMENTS_HAS_IDS", "ALL_DOCUMENTS must not include transcriptionTaskIds");
             LinkedHashSet<String> seenTasks = new LinkedHashSet<>();
             for (KnowledgeDocument document : documents.findByOwnerIdOrderByUpdatedAtDesc(ownerId)) {
-                if (document.getStatus() != KnowledgeDocumentStatus.READY || document.getActiveIndexVersionId() == null) continue;
                 if (!seenTasks.add(document.getTranscriptionTaskId())) continue;
-                resolved.add(new ResolvedDocument(ownedTask(ownerId, document.getTranscriptionTaskId()), document));
+                TranscriptionTask task = ownedTask(ownerId, document.getTranscriptionTaskId());
+                KnowledgeIndexVersion index = activeIndex(task, document);
+                if (index == null) continue;
+                resolved.add(new ResolvedDocument(task, document, organizedForIndex(index), index, QaRetrievalMode.HYBRID_INDEX));
             }
         }
         if (resolved.isEmpty()) throw new ApiException(HttpStatus.CONFLICT, "AGENT_SCOPE_EMPTY", "No ready documents are available in this scope");
@@ -128,10 +143,31 @@ public class KnowledgeAgentService {
 
     private ResolvedDocument indexed(String ownerId, String taskId) {
         TranscriptionTask task = ownedTask(ownerId, taskId);
-        KnowledgeDocument document = documents.findTopByOwnerIdAndTranscriptionTaskIdOrderByUpdatedAtDesc(ownerId, taskId)
-                .filter(value -> value.getStatus() == KnowledgeDocumentStatus.READY && value.getActiveIndexVersionId() != null)
-                .orElseThrow(() -> new ApiException(HttpStatus.CONFLICT, "DOCUMENT_NOT_SEARCHABLE", "Selected documents must have an active knowledge index"));
-        return new ResolvedDocument(task, document);
+        KnowledgeDocument document = documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(ownerId, taskId, task.getTranscriptVersion()).orElse(null);
+        KnowledgeIndexVersion index = activeIndex(task, document);
+        if (index == null) throw new ApiException(HttpStatus.CONFLICT, "DOCUMENT_NOT_SEARCHABLE", "Selected documents must have an active knowledge index");
+        return new ResolvedDocument(task, document, organizedForIndex(index), index, QaRetrievalMode.HYBRID_INDEX);
+    }
+
+    private ResolvedDocument currentDocument(TranscriptionTask task) {
+        OrganizedDocument organized = organizedDocuments.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(
+                task.getOwnerId(), task.getId(), task.getTranscriptVersion()).filter(value -> qaPolicy.hasReadyFormalDocument(task, value)).orElse(null);
+        KnowledgeDocument document = documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion(
+                task.getOwnerId(), task.getId(), task.getTranscriptVersion()).orElse(null);
+        KnowledgeIndexVersion index = activeIndex(task, document);
+        DocumentQaPolicy.Capabilities capabilities = qaPolicy.evaluate(task, organized, document, index);
+        if (capabilities.currentMode() == QaRetrievalMode.HYBRID_INDEX) organized = organizedForIndex(index);
+        return new ResolvedDocument(task, index == null ? null : document, organized, index, capabilities.currentMode());
+    }
+
+    private KnowledgeIndexVersion activeIndex(TranscriptionTask task, KnowledgeDocument document) {
+        if (document == null || document.getActiveIndexVersionId() == null) return null;
+        KnowledgeIndexVersion index = indexVersions.findById(document.getActiveIndexVersionId()).orElse(null);
+        return qaPolicy.hasActiveIndex(task, document, index) ? index : null;
+    }
+
+    private OrganizedDocument organizedForIndex(KnowledgeIndexVersion index) {
+        return index == null ? null : organizedDocuments.findById(index.getOrganizedDocumentId()).orElse(null);
     }
 
     private TranscriptionTask ownedTask(String ownerId, String taskId) {
@@ -142,13 +178,51 @@ public class KnowledgeAgentService {
     private String metadata(ResolvedDocument value) {
         try {
             Map<String, Object> snapshot = new LinkedHashMap<>();
-            snapshot.put("title", value.document() == null ? Objects.toString(value.task().getSubject(), "录音 " + value.task().getId().substring(0, 8)) : value.document().getTitle());
+            String title = value.document() != null ? value.document().getTitle()
+                    : value.organized() != null ? value.organized().getTitle()
+                    : Objects.toString(value.task().getSubject(), "录音 " + value.task().getId().substring(0, 8));
+            snapshot.put("title", title);
             snapshot.put("occurredAt", value.task().getOccurredAt()); snapshot.put("sceneType", value.task().getSceneType().name());
             snapshot.put("subject", value.task().getSubject()); snapshot.put("tags", mapper.readTree(value.task().getTags() == null ? "[]" : value.task().getTags()));
-            snapshot.put("transcriptVersion", value.document() == null ? value.task().getTranscriptVersion() : value.document().getTranscriptVersion());
+            snapshot.put("transcriptVersion", value.task().getTranscriptVersion()); snapshot.put("speakerCorrectionRevision", value.task().getSpeakerCorrectionRevision());
+            snapshot.put("retrievalMode", value.mode().name());
+            if (value.organized() != null) {
+                snapshot.put("organizedDocumentId", value.organized().getId()); snapshot.put("organizedDocumentVersion", value.organized().getVersion());
+                if (value.mode() == QaRetrievalMode.FORMAL_OVERVIEW) snapshot.put("formalOverview", formalOverview(value.organized()));
+            }
             return mapper.writeValueAsString(snapshot);
         } catch (Exception exception) { throw new IllegalStateException("Cannot snapshot Agent document metadata", exception); }
     }
+
+    private JsonNode formalOverview(OrganizedDocument document) {
+        var output = mapper.createObjectNode(); output.put("title", document.getTitle());
+        output.put("summary", shortenText(Objects.toString(document.getSummaryText(), ""), 800));
+        var topics = output.putArray("topics"); int total = 0;
+        for (OrganizedDocumentBlock block : organizedBlocks.findByOrganizedDocumentIdOrderByBlockIndex(document.getId())) {
+            if (block.getBlockType() != OrganizedBlockType.TOPIC) continue;
+            total++; if (topics.size() >= 20) continue;
+            var topic = topics.addObject(); topic.put("title", Objects.toString(block.getTopicTitle(), "整理片段"));
+            topic.put("content", shortenText(Objects.toString(block.getSummaryText(), block.getTextContent()), 500));
+            topic.put("startMs", block.getStartMs()); topic.put("endMs", block.getEndMs());
+            var fragments = topic.putArray("sourceFragments"); JsonNode raw = parseArray(block.getSourceFragments()); int count = 0;
+            for (JsonNode fragment : raw) {
+                String segmentId = fragment.path("segmentId").asText(null); if (segmentId == null || segmentId.isBlank()) continue;
+                if (count++ >= 3) break;
+                var stored = fragments.addObject(); stored.put("segmentId", segmentId);
+                stored.put("speakerId", fragment.path("speakerId").asText(null)); stored.put("startMs", fragment.path("startMs").asLong());
+                stored.put("endMs", fragment.path("endMs").asLong()); stored.put("text", shortenText(fragment.path("text").asText(""), 800));
+            }
+        }
+        output.put("topicCount", total); return output;
+    }
+
+    private JsonNode parseArray(String value) {
+        if (value == null || value.isBlank()) return mapper.createArrayNode();
+        try { JsonNode parsed = mapper.readTree(value); return parsed.isArray() ? parsed : mapper.createArrayNode(); }
+        catch (Exception exception) { return mapper.createArrayNode(); }
+    }
+
+    private static String shortenText(String value, int max) { return value.length() <= max ? value : value.substring(0, max) + "…"; }
 
     @Transactional public void markQueued(String runId) { runs.findById(runId).orElseThrow().queue(); }
     @Transactional(readOnly = true) public List<KnowledgeRun> ownedRuns(String ownerId) { return runs.findByOwnerIdOrderByCreatedAtDesc(ownerId); }
@@ -162,17 +236,40 @@ public class KnowledgeAgentService {
     }
     @Transactional(readOnly = true) public List<KnowledgeRunDocument> runDocuments(String runId) { return runDocuments.findByKnowledgeRunIdOrderByCreatedAtAsc(runId); }
     @Transactional(readOnly = true) public List<KnowledgeRunStep> runSteps(String runId) { return steps.findByKnowledgeRunIdOrderByStepIndexAsc(runId); }
+    @Transactional(readOnly = true) public List<AgentCheckpoint> runCheckpoints(String runId) { return checkpoints == null ? List.of() : checkpoints.list(runId); }
+    @Transactional(readOnly = true) public List<String> childRunIds(String ownerId, String runId) {
+        return runs.findByParentRunIdOrderByCreatedAtAsc(runId).stream()
+                .filter(run -> run.getOwnerId().equals(ownerId)).map(KnowledgeRun::getId).toList();
+    }
     @Transactional(readOnly = true) public List<String> queuedRunIds() {
         LinkedHashSet<String> ids = new LinkedHashSet<>(runs.findTop10ByStatusOrderByCreatedAtAsc(KnowledgeRunStatus.QUEUED).stream().map(KnowledgeRun::getId).toList());
         ids.addAll(runs.findTop10ByStatusAndLeaseUntilBeforeOrderByCreatedAtAsc(KnowledgeRunStatus.RUNNING, Instant.now()).stream().map(KnowledgeRun::getId).toList());
         return List.copyOf(ids);
     }
     @Transactional public RunWork claim(String runId) {
-        KnowledgeRun run = runs.findById(runId).orElse(null); if (run == null || !run.start()) return null; runs.save(run);
-        return new RunWork(run.getId(), run.getOwnerId(), run.getQuestion(), run.isLegacy());
+        KnowledgeRun run = runs.findById(runId).orElse(null);
+        if (run == null) return null;
+        boolean recovered = run.getStatus() == KnowledgeRunStatus.RUNNING;
+        if (!run.start()) return null;
+        if (recovered && !run.isLegacy()) {
+            steps.findByKnowledgeRunIdAndStatus(runId, AgentStepStatus.RUNNING).forEach(step -> {
+                step.interrupt("Worker lease expired before the step committed"); steps.save(step);
+            });
+            KnowledgeRunStep recovery = new KnowledgeRunStep(runId, run.allocateStepIndex(), AgentStepType.RECOVERY,
+                    null, null, json(Map.of("checkpointId", Objects.toString(run.getCurrentCheckpointId(), ""),
+                    "recoveryCount", run.getRecoveryCount())), run.getExecutionEpoch(), run.getCurrentCheckpointId());
+            recovery.succeed(json(Map.of("executionEpoch", run.getExecutionEpoch())), "已从最近的 Checkpoint 恢复", 0);
+            steps.save(recovery);
+        }
+        runs.save(run);
+        return new RunWork(run.getId(), run.getOwnerId(), run.getQuestion(), run.isLegacy(), run.getExecutionEpoch(), recovered);
     }
     @Transactional public void selectSkill(String runId, AgentSkill skill) {
         KnowledgeRun run = runs.findById(runId).orElseThrow(); String snapshot = json(skill);
+        run.selectSkill(skill.id(), skill.version(), skill.versionId(), snapshot, Hashing.sha256(snapshot)); runs.save(run);
+    }
+    @Transactional public void selectSkill(String runId, long epoch, AgentSkill skill) {
+        KnowledgeRun run = requireExecution(runId, epoch); String snapshot = json(skill);
         run.selectSkill(skill.id(), skill.version(), skill.versionId(), snapshot, Hashing.sha256(snapshot)); runs.save(run);
     }
     @Transactional public boolean consumeModel(String runId) { KnowledgeRun run = runs.findById(runId).orElseThrow(); boolean value = run.consumeModelCall(); runs.save(run); return value; }
@@ -183,11 +280,13 @@ public class KnowledgeAgentService {
         run.renewLease(); runs.save(run);
     }
     @Transactional public String beginStep(String runId, AgentStepType type, String callId, String toolName, String input) {
-        int index = Math.toIntExact(steps.countByKnowledgeRunId(runId));
-        return steps.save(new KnowledgeRunStep(runId, index, type, callId, toolName, input)).getId();
+        KnowledgeRun run = runs.findById(runId).orElseThrow();
+        KnowledgeRunStep step = steps.save(new KnowledgeRunStep(runId, run.allocateStepIndex(), type, callId, toolName,
+                traceDocument(input), run.getExecutionEpoch(), run.getCurrentCheckpointId()));
+        runs.save(run); return step.getId();
     }
-    @Transactional public void succeedStep(String stepId, String output, String summary, long durationMs) { KnowledgeRunStep step = steps.findById(stepId).orElseThrow(); step.succeed(output, summary, durationMs); steps.save(step); }
-    @Transactional public void failStep(String stepId, String code, String message, long durationMs) { KnowledgeRunStep step = steps.findById(stepId).orElseThrow(); step.fail(code, message, durationMs); steps.save(step); }
+    @Transactional public void succeedStep(String stepId, String output, String summary, long durationMs) { KnowledgeRunStep step = steps.findById(stepId).orElseThrow(); step.succeed(traceDocument(output), summary, durationMs); steps.save(step); }
+    @Transactional public void failStep(String stepId, String code, String message, long durationMs) { KnowledgeRunStep step = steps.findById(stepId).orElseThrow(); step.fail(code, traceMessage(message), durationMs); steps.save(step); }
     @Transactional public void persistLedger(String runId, AgentEvidenceLedger ledger) {
         for (AgentEvidenceLedger.EvidenceSource source : ledger.all()) {
             if (!sources.existsByKnowledgeRunIdAndSourceRef(runId, source.ref())) sources.save(new KnowledgeRunSource(runId, source));
@@ -196,9 +295,263 @@ public class KnowledgeAgentService {
     @Transactional(readOnly = true) public List<AgentEvidenceLedger.EvidenceSource> storedSources(String runId) {
         return sources.findByKnowledgeRunIdOrderByCreatedAtAsc(runId).stream().map(KnowledgeRunSource::toEvidenceSource).toList();
     }
-    @Transactional public void fail(String runId, String message) { KnowledgeRun run = runs.findById(runId).orElseThrow(); run.fail(shorten(message)); runs.save(run); recordSettled(run); notifySettled(run); }
+    @Transactional public void fail(String runId, String message) { KnowledgeRun run = runs.findById(runId).orElseThrow(); run.fail(shorten(traceMessage(message))); runs.save(run); recordSettled(run); notifySettled(run); }
     @Transactional public void budgetExhausted(String runId) { KnowledgeRun run = runs.findById(runId).orElseThrow(); run.budgetExhausted("Agent execution budget exhausted before a valid final answer"); runs.save(run); recordSettled(run); notifySettled(run); }
     @Transactional public void timedOut(String runId) { KnowledgeRun run = runs.findById(runId).orElseThrow(); run.timedOut("Agent execution exceeded the configured time limit"); runs.save(run); recordSettled(run); notifySettled(run); }
+
+    @Transactional(readOnly = true)
+    public AgentState loadCurrentState(String runId, long epoch) {
+        KnowledgeRun run = requireExecution(runId, epoch);
+        if (run.getCurrentCheckpointId() == null) return null;
+        AgentCheckpoint checkpoint = checkpoints.require(run.getCurrentCheckpointId());
+        if (!checkpoint.getKnowledgeRunId().equals(runId)) throw new AgentCheckpointStore.CheckpointException("CHECKPOINT_RUN_MISMATCH", "Checkpoint does not belong to the Agent Run");
+        return checkpoints.read(checkpoint);
+    }
+
+    @Transactional
+    public AgentCheckpoint saveInitialCheckpoint(String runId, long epoch, AgentState state, boolean replayable) {
+        KnowledgeRun run = requireExecution(runId, epoch);
+        if (run.getCurrentCheckpointId() != null) return checkpoints.require(run.getCurrentCheckpointId());
+        AgentCheckpoint checkpoint = checkpoints.save(run, state, null, replayable);
+        runs.save(run); return checkpoint;
+    }
+
+    @Transactional
+    public StepWork beginRoutingStep(String runId, long epoch, String input) {
+        KnowledgeRun run = requireExecution(runId, epoch);
+        if (!run.consumeModelCall()) return null;
+        return beginAgentStep(run, AgentStepType.ROUTE, null, null, input);
+    }
+
+    @Transactional
+    public StepWork beginModelStep(String runId, long epoch, String input) {
+        KnowledgeRun run = requireExecution(runId, epoch);
+        if (!run.consumeModelTurn()) return null;
+        return beginAgentStep(run, AgentStepType.MODEL, null, null, input);
+    }
+
+    @Transactional
+    public StepWork beginToolStep(String runId, long epoch, AgentStepType type, String callId, String toolName,
+                                  String input, boolean chargeBudget) {
+        KnowledgeRun run = requireExecution(runId, epoch);
+        if (chargeBudget && !run.consumeAgentTool()) return null;
+        return beginAgentStep(run, type, callId, toolName, input);
+    }
+
+    private StepWork beginAgentStep(KnowledgeRun run, AgentStepType type, String callId, String toolName, String input) {
+        KnowledgeRunStep step = steps.save(new KnowledgeRunStep(run.getId(), run.allocateStepIndex(), type, callId,
+                toolName, traceDocument(input), run.getExecutionEpoch(), run.getCurrentCheckpointId()));
+        runs.save(run);
+        return new StepWork(step.getId(), step.getStepIndex(), run.getExecutionEpoch(), run.getCurrentCheckpointId());
+    }
+
+    @Transactional
+    public AgentCheckpoint succeedAgentStep(String runId, long epoch, String stepId, String output, String summary,
+                                             long durationMs, AgentModelClient.AgentUsage usage, String finishReason,
+                                             AgentState state, AgentEvidenceLedger ledger, boolean replayable) {
+        KnowledgeRun run = requireExecution(runId, epoch);
+        KnowledgeRunStep step = requireStep(runId, epoch, stepId);
+        step.succeed(traceDocument(output), summary, durationMs);
+        if (usage != null) step.modelUsage(finishReason, usage.inputTokens(), usage.outputTokens(), usage.totalTokens());
+        else if (finishReason != null) step.modelUsage(finishReason, null, null, null);
+        run.addActiveDuration(durationMs);
+        if (ledger != null) persistLedgerInternal(runId, ledger);
+        AgentCheckpoint checkpoint = checkpoints.save(run, state, stepId, replayable);
+        step.useOutputCheckpoint(checkpoint.getId());
+        steps.save(step); runs.save(run);
+        return checkpoint;
+    }
+
+    @Transactional
+    public AgentCheckpoint completeRouteStep(String runId, long epoch, String stepId, AgentSkill skill,
+                                             String output, String summary, long durationMs,
+                                             AgentModelClient.AgentUsage usage, String finishReason,
+                                             String handledErrorCode, String handledErrorMessage, AgentState state) {
+        KnowledgeRun run = requireExecution(runId, epoch);
+        KnowledgeRunStep step = requireStep(runId, epoch, stepId);
+        String snapshot = json(skill);
+        run.selectSkill(skill.id(), skill.version(), skill.versionId(), snapshot, Hashing.sha256(snapshot));
+        if (handledErrorCode == null) step.succeed(traceDocument(output), summary, durationMs);
+        else step.fail(handledErrorCode, shorten(traceMessage(handledErrorMessage)), durationMs);
+        if (usage != null) step.modelUsage(finishReason, usage.inputTokens(), usage.outputTokens(), usage.totalTokens());
+        run.addActiveDuration(durationMs);
+        AgentCheckpoint checkpoint = checkpoints.save(run, state, stepId, true);
+        step.useOutputCheckpoint(checkpoint.getId());
+        steps.save(step); runs.save(run);
+        return checkpoint;
+    }
+
+    @Transactional
+    public AgentCheckpoint failObservedStep(String runId, long epoch, String stepId, String code, String message,
+                                            long durationMs, AgentState state, AgentEvidenceLedger ledger, boolean replayable) {
+        KnowledgeRun run = requireExecution(runId, epoch);
+        KnowledgeRunStep step = requireStep(runId, epoch, stepId);
+        step.fail(code, shorten(traceMessage(message)), durationMs); run.addActiveDuration(durationMs);
+        if (ledger != null) persistLedgerInternal(runId, ledger);
+        AgentCheckpoint checkpoint = checkpoints.save(run, state, stepId, replayable);
+        step.useOutputCheckpoint(checkpoint.getId());
+        steps.save(step); runs.save(run);
+        return checkpoint;
+    }
+
+    @Transactional
+    public void failTerminalStep(String runId, long epoch, String stepId, String code, String stage, String message,
+                                 long durationMs, AgentState terminalState) {
+        KnowledgeRun run = requireExecution(runId, epoch);
+        KnowledgeRunStep step = requireStep(runId, epoch, stepId);
+        step.fail(code, shorten(traceMessage(message)), durationMs); run.addActiveDuration(durationMs);
+        run.fail(code, stage, shorten(traceMessage(message)));
+        AgentCheckpoint checkpoint = checkpoints.save(run, terminalState, stepId, false);
+        step.useOutputCheckpoint(checkpoint.getId());
+        steps.save(step); runs.save(run); recordSettled(run); notifySettled(run);
+    }
+
+    @Transactional
+    public void budgetExhausted(String runId, long epoch, AgentState terminalState) {
+        budgetExhausted(runId, epoch, "AGENT_BUDGET_EXHAUSTED", "BUDGET",
+                "Agent execution budget exhausted before a valid final answer", terminalState);
+    }
+
+    @Transactional
+    public void budgetExhausted(String runId, long epoch, String code, String stage, String message,
+                                AgentState terminalState) {
+        KnowledgeRun run = requireExecution(runId, epoch);
+        run.budgetExhausted(code, stage, message);
+        checkpoints.save(run, terminalState, null, false); runs.save(run); recordSettled(run); notifySettled(run);
+        log.warn("Agent Run {} exhausted budget: code={}, stage={}, modelCalls={}/{}, turns={}/{}, tools={}/{}",
+                runId, code, stage, run.getModelCallsUsed(), run.getMaxModelCalls(), run.getAgentTurnsUsed(),
+                run.getMaxAgentTurns(), run.getToolCallsUsed(), run.getMaxToolCalls());
+    }
+
+    @Transactional
+    public void timedOut(String runId, long epoch, AgentState terminalState) {
+        KnowledgeRun run = requireExecution(runId, epoch);
+        run.timedOut("Agent execution exceeded the configured active time limit");
+        checkpoints.save(run, terminalState, null, false); runs.save(run); recordSettled(run); notifySettled(run);
+    }
+
+    @Transactional
+    public void failExecution(String runId, long epoch, String code, String stage, String message, AgentState terminalState) {
+        KnowledgeRun run = requireExecution(runId, epoch);
+        run.fail(code, stage, shorten(traceMessage(message)));
+        checkpoints.save(run, terminalState, null, false); runs.save(run); recordSettled(run); notifySettled(run);
+    }
+
+    @Transactional
+    public void completeAgentStep(String runId, long epoch, String stepId, String output, String summary,
+                                  long durationMs, JsonNode result, AgentState terminalState, AgentEvidenceLedger ledger) {
+        KnowledgeRun run = requireExecution(runId, epoch);
+        KnowledgeRunStep step = requireStep(runId, epoch, stepId);
+        Set<String> persisted = new HashSet<>();
+        persistLedgerInternal(runId, ledger);
+        persistResultEvidence(run, result, "", ledger, persisted);
+        try {
+            step.succeed(traceDocument(output), summary, durationMs); run.addActiveDuration(durationMs);
+            run.succeed(mapper.writeValueAsString(result));
+            AgentCheckpoint checkpoint = checkpoints.save(run, terminalState, stepId, false);
+            step.useOutputCheckpoint(checkpoint.getId());
+            steps.save(step); runs.save(run);
+            if (metrics != null && result.path("coverage").isObject()) metrics.coverage(mapper.treeToValue(result.path("coverage"), AgentExecutionContext.Coverage.class));
+            recordSettled(run); notifySettled(run);
+        } catch (ApiException exception) { throw exception; }
+        catch (Exception exception) { throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "AGENT_RESULT_INVALID", "Cannot persist the final Agent answer"); }
+    }
+
+    @Transactional
+    public KnowledgeRun replayAgent(String ownerId, String key, String parentRunId, String checkpointId) {
+        KnowledgeRun parent = ownedRun(ownerId, parentRunId);
+        if (parent.isLegacy()) throw new ApiException(HttpStatus.CONFLICT, "AGENT_REPLAY_UNSUPPORTED", "Legacy Agent Runs cannot be replayed");
+        if (!parent.isTerminal()) throw new ApiException(HttpStatus.CONFLICT, "AGENT_RUN_NOT_TERMINAL", "Only settled Agent Runs can be replayed");
+        AgentCheckpoint source;
+        try { source = checkpoints.require(checkpointId); }
+        catch (AgentCheckpointStore.CheckpointException exception) { throw new ApiException(HttpStatus.CONFLICT, exception.getCode(), exception.getMessage()); }
+        if (!source.getKnowledgeRunId().equals(parentRunId) || !source.isReplayable()) {
+            throw new ApiException(HttpStatus.CONFLICT, "CHECKPOINT_NOT_REPLAYABLE", "Checkpoint is not replayable for this Agent Run");
+        }
+        AgentState state;
+        try { state = checkpoints.read(source); }
+        catch (AgentCheckpointStore.CheckpointException exception) { throw new ApiException(HttpStatus.CONFLICT, exception.getCode(), exception.getMessage()); }
+        validateReplayState(state);
+        IdempotencyRecord record = idempotency.reserve(ownerId, REPLAY_AGENT_OPERATION, key,
+                Hashing.canonicalJsonHash(Map.of("parentRunId", parentRunId, "checkpointId", checkpointId)));
+        if (record.getResourceId() != null) return ownedRun(ownerId, record.getResourceId());
+
+        KnowledgeRun replay = runs.save(KnowledgeRun.replayOf(parent, checkpointId, state));
+        for (AgentState.DocumentSnapshot document : state.documentSnapshots()) {
+            runDocuments.save(new KnowledgeRunDocument(replay.getId(), document.transcriptionTaskId(),
+                    document.knowledgeDocumentId(), document.knowledgeIndexVersionId(), document.metadataSnapshot()));
+        }
+        Set<String> allowedSources = new HashSet<>(state.evidenceSourceRefs());
+        sources.findByKnowledgeRunIdOrderByCreatedAtAsc(parentRunId).stream()
+                .filter(value -> allowedSources.contains(value.getSourceRef()))
+                .forEach(value -> sources.save(new KnowledgeRunSource(replay.getId(), value.toEvidenceSource())));
+        checkpoints.save(replay, state, null, true); runs.save(replay);
+        outbox.enqueue("knowledge_run", replay.getId(), EventType.KNOWLEDGE_RUN_REQUESTED);
+        completeIdempotency(record, replay, AgentRunView.from(replay, runDocuments(replay.getId()).size(), skillDisplayName(replay)));
+        return replay;
+    }
+
+    private void validateReplayState(AgentState state) {
+        boolean invalid = state.modelId() == null || state.modelId().isBlank() || state.skillId() == null
+                || state.skillVersion() == null || state.skillSnapshot() == null || state.documentSnapshots().isEmpty()
+                || state.maxModelCalls() <= 0 || state.modelCallsUsed() < 0 || state.modelCallsUsed() > state.maxModelCalls()
+                || state.maxAgentTurns() <= 0 || state.agentTurnsUsed() < 0 || state.agentTurnsUsed() > state.maxAgentTurns()
+                || state.maxToolCalls() <= 0 || state.toolCallsUsed() < 0 || state.toolCallsUsed() > state.maxToolCalls()
+                || state.maxActiveDurationMs() <= 0 || state.activeDurationMs() < 0 || state.activeDurationMs() > state.maxActiveDurationMs();
+        if (!invalid && state.skillHash() != null) invalid = !state.skillHash().equals(Hashing.sha256(state.skillSnapshot()));
+        if (invalid) throw new ApiException(HttpStatus.CONFLICT, "CHECKPOINT_INCOMPATIBLE", "Checkpoint does not contain a compatible frozen Agent state");
+    }
+
+    @Transactional(readOnly = true)
+    public KnowledgeRunStep ownedStep(String ownerId, String runId, String stepId) {
+        ownedRun(ownerId, runId);
+        return steps.findById(stepId).filter(value -> value.getKnowledgeRunId().equals(runId))
+                .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "AGENT_STEP_NOT_FOUND", "Agent Step was not found"));
+    }
+
+    @Transactional(readOnly = true)
+    public List<AgentStepView> stepViews(String runId) {
+        Map<String, AgentCheckpoint> byStep = new HashMap<>();
+        runCheckpoints(runId).stream().filter(value -> value.getStepId() != null).forEach(value -> byStep.put(value.getStepId(), value));
+        return runSteps(runId).stream().map(step -> AgentStepView.from(step, byStep.get(step.getId()))).toList();
+    }
+
+    @Transactional(readOnly = true)
+    public List<AgentCheckpointView> checkpointViews(String runId) {
+        return runCheckpoints(runId).stream().map(AgentCheckpointView::from).toList();
+    }
+
+    @Transactional(readOnly = true)
+    public AgentStepDetailView stepDetail(String ownerId, String runId, String stepId) {
+        KnowledgeRunStep step = ownedStep(ownerId, runId, stepId);
+        return AgentStepDetailView.from(step, parseDocument(step.getInputDocument()), parseDocument(step.getOutputDocument()));
+    }
+
+    private KnowledgeRun requireExecution(String runId, long epoch) {
+        KnowledgeRun run = runs.findById(runId).orElseThrow();
+        if (run.getStatus() != KnowledgeRunStatus.RUNNING || run.getExecutionEpoch() != epoch) {
+            throw new StaleAgentExecutionException();
+        }
+        return run;
+    }
+
+    private KnowledgeRunStep requireStep(String runId, long epoch, String stepId) {
+        return steps.findById(stepId).filter(value -> value.getKnowledgeRunId().equals(runId)
+                        && value.getExecutionEpoch() == epoch && value.getStatus() == AgentStepStatus.RUNNING)
+                .orElseThrow(StaleAgentExecutionException::new);
+    }
+
+    private void persistLedgerInternal(String runId, AgentEvidenceLedger ledger) {
+        for (AgentEvidenceLedger.EvidenceSource source : ledger.all()) {
+            if (!sources.existsByKnowledgeRunIdAndSourceRef(runId, source.ref())) sources.save(new KnowledgeRunSource(runId, source));
+        }
+    }
+
+    private JsonNode parseDocument(String value) {
+        if (value == null || value.isBlank()) return null;
+        try { return mapper.readTree(value); }
+        catch (Exception exception) { return mapper.createObjectNode().put("unavailable", true); }
+    }
 
     @Transactional
     public void completeAgent(String runId, JsonNode result, AgentEvidenceLedger ledger) {
@@ -234,7 +587,7 @@ public class KnowledgeAgentService {
                                   String runId, JsonNode result, AgentEvidenceLedger ledger) {
         completeAgent(runId, result, ledger);
         KnowledgeRunStep step = steps.findById(stepId).orElseThrow();
-        step.succeed(output, summary, durationMs); steps.save(step);
+        step.succeed(traceDocument(output), summary, durationMs); steps.save(step);
     }
 
     private void validateSource(KnowledgeRun run, AgentEvidenceLedger.EvidenceSource source) {
@@ -291,6 +644,8 @@ public class KnowledgeAgentService {
         try { return skills.require(ownerId, id); } catch (IllegalArgumentException exception) { throw new ApiException(HttpStatus.BAD_REQUEST, "AGENT_SKILL_NOT_FOUND", exception.getMessage()); }
     }
     private String json(Object value) { try { return mapper.writeValueAsString(value); } catch (Exception exception) { throw new IllegalStateException("Cannot serialize Agent state", exception); } }
+    private String traceDocument(String value) { return AgentTraceSanitizer.sanitizeJson(mapper, value); }
+    private static String traceMessage(String value) { return AgentTraceSanitizer.sanitizeText(value); }
     private void completeIdempotency(IdempotencyRecord record, KnowledgeRun run, Object view) {
         try { idempotency.complete(record, run.getId(), mapper.writeValueAsString(view)); }
         catch (Exception exception) { throw new IllegalStateException("Cannot persist idempotent Agent response", exception); }
@@ -303,20 +658,59 @@ public class KnowledgeAgentService {
         else progressEvents.publish(new ProgressEventPublisher.ProgressNotification(run.getOwnerId(), "knowledge-run-settled", run.getId()));
     }
 
-    private record ResolvedDocument(TranscriptionTask task, KnowledgeDocument document) { }
+    private record ResolvedDocument(TranscriptionTask task, KnowledgeDocument document, OrganizedDocument organized,
+                                    KnowledgeIndexVersion indexVersion, QaRetrievalMode mode) { }
     public record AgentScopeCommand(AgentScopeType type, List<String> transcriptionTaskIds) { }
     public record CreateAgentCommand(String question, AgentScopeCommand scope, String skillId, String timeZone) { }
-    public record RunWork(String runId, String ownerId, String question, boolean legacy) { }
+    public record RunWork(String runId, String ownerId, String question, boolean legacy, long executionEpoch, boolean recovered) { }
+    public record StepWork(String stepId, int stepIndex, long executionEpoch, String inputCheckpointId) { }
     public record KnowledgeRunView(String id, KnowledgeRunStatus status, int toolCallsUsed, int maxToolCalls, String resultDocument, String failureMessage) {
         public static KnowledgeRunView from(KnowledgeRun run) { return new KnowledgeRunView(run.getId(), run.getStatus(), run.getToolCallsUsed(), run.getMaxToolCalls(), run.getResultDocument(), run.getFailureMessage()); }
     }
     public record AgentRunView(String id, String question, KnowledgeRunStatus status, AgentScopeType scopeType, String skillId, String skillVersion, String skillDisplayName,
                                int scopeDocumentCount, int modelCallsUsed, int maxModelCalls, int agentTurnsUsed, int maxAgentTurns,
-                               int toolCallsUsed, int maxToolCalls, String resultDocument, String failureMessage, Instant createdAt) {
+                               int toolCallsUsed, int maxToolCalls, String resultDocument, String failureMessage,
+                               String failureCode, String failureStage, String parentRunId, String rootRunId,
+                               String replayFromCheckpointId, int recoveryCount, Instant createdAt, Instant completedAt) {
         public static AgentRunView from(KnowledgeRun run, int scopeCount, String skillDisplayName) { return new AgentRunView(run.getId(), run.getQuestion(), run.getStatus(), run.getScopeType(), run.getSkillId(), run.getSkillVersion(), skillDisplayName,
-                scopeCount, run.getModelCallsUsed(), run.getMaxModelCalls(), run.getAgentTurnsUsed(), run.getMaxAgentTurns(), run.getToolCallsUsed(), run.getMaxToolCalls(), run.getResultDocument(), run.getFailureMessage(), run.getCreatedAt()); }
+                scopeCount, run.getModelCallsUsed(), run.getMaxModelCalls(), run.getAgentTurnsUsed(), run.getMaxAgentTurns(),
+                run.getToolCallsUsed(), run.getMaxToolCalls(), run.getResultDocument(), run.getFailureMessage(), run.getFailureCode(),
+                run.getFailureStage(), run.getParentRunId(), run.getRootRunId(), run.getReplayFromCheckpointId(), run.getRecoveryCount(),
+                run.getCreatedAt(), run.getCompletedAt()); }
     }
-    public record AgentStepView(int index, AgentStepType type, AgentStepStatus status, String toolName, String summary, String errorCode, String errorMessage, Long durationMs, Instant createdAt) {
-        public static AgentStepView from(KnowledgeRunStep step) { return new AgentStepView(step.getStepIndex(), step.getStepType(), step.getStatus(), step.getToolName(), step.getSummaryText(), step.getErrorCode(), step.getErrorMessage(), step.getDurationMs(), step.getCreatedAt()); }
+    public record AgentStepView(String id, int index, AgentStepType type, AgentStepStatus status, long executionEpoch,
+                                String toolName, String summary, String errorCode, String errorMessage, Long durationMs,
+                                String finishReason, Integer inputTokens, Integer outputTokens, Integer totalTokens,
+                                String checkpointId, boolean replayable, Instant createdAt, Instant completedAt) {
+        public static AgentStepView from(KnowledgeRunStep step) { return from(step, null); }
+        public static AgentStepView from(KnowledgeRunStep step, AgentCheckpoint checkpoint) {
+            return new AgentStepView(step.getId(), step.getStepIndex(), step.getStepType(), step.getStatus(), step.getExecutionEpoch(),
+                    step.getToolName(), step.getSummaryText(), step.getErrorCode(), step.getErrorMessage(), step.getDurationMs(),
+                    step.getFinishReason(), step.getInputTokens(), step.getOutputTokens(), step.getTotalTokens(),
+                    checkpoint == null ? step.getOutputCheckpointId() : checkpoint.getId(), checkpoint != null && checkpoint.isReplayable(),
+                    step.getCreatedAt(), step.getCompletedAt());
+        }
+    }
+    public record AgentCheckpointView(String id, int sequence, AgentPhase phase, String stepId, boolean replayable, Instant createdAt) {
+        public static AgentCheckpointView from(AgentCheckpoint checkpoint) {
+            return new AgentCheckpointView(checkpoint.getId(), checkpoint.getCheckpointSequence(), checkpoint.getPhase(),
+                    checkpoint.getStepId(), checkpoint.isReplayable(), checkpoint.getCreatedAt());
+        }
+    }
+    public record AgentStepDetailView(String id, int index, AgentStepType type, AgentStepStatus status, long executionEpoch,
+                                      String toolName, JsonNode input, JsonNode output, String summary, String errorCode,
+                                      String errorMessage, Long durationMs, String finishReason, Integer inputTokens,
+                                      Integer outputTokens, Integer totalTokens, String inputCheckpointId,
+                                      String outputCheckpointId, Instant createdAt, Instant completedAt) {
+        public static AgentStepDetailView from(KnowledgeRunStep step, JsonNode input, JsonNode output) {
+            return new AgentStepDetailView(step.getId(), step.getStepIndex(), step.getStepType(), step.getStatus(),
+                    step.getExecutionEpoch(), step.getToolName(), input, output, step.getSummaryText(), step.getErrorCode(),
+                    step.getErrorMessage(), step.getDurationMs(), step.getFinishReason(), step.getInputTokens(),
+                    step.getOutputTokens(), step.getTotalTokens(), step.getInputCheckpointId(), step.getOutputCheckpointId(),
+                    step.getCreatedAt(), step.getCompletedAt());
+        }
+    }
+    public static class StaleAgentExecutionException extends RuntimeException {
+        public StaleAgentExecutionException() { super("Agent execution lease is no longer current"); }
     }
 }

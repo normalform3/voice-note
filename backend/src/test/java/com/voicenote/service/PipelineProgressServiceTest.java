@@ -9,6 +9,8 @@ import com.voicenote.domain.TaskStatus;
 import com.voicenote.domain.TranscriptionTask;
 import com.voicenote.domain.EventType;
 import com.voicenote.domain.OutboxEvent;
+import com.voicenote.domain.OrganizedDocument;
+import com.voicenote.domain.QaRetrievalMode;
 import com.voicenote.repository.KnowledgeDocumentRepository;
 import com.voicenote.repository.OrganizedDocumentRepository;
 import com.voicenote.repository.TaskStageAttemptRepository;
@@ -48,6 +50,27 @@ class PipelineProgressServiceTest {
         assertThat(view.tags()).containsExactly("Java", "backend");
         assertThat(view.createdAt()).isEqualTo(task.getCreatedAt());
         assertThat(view.durationMs()).isEqualTo(125_000L);
+        assertThat(view.qaCapabilities().currentDocumentAvailable()).isFalse();
+    }
+
+    @Test
+    void exposesFormalDocumentQuestionAnsweringWithoutCrossDocumentSearch() {
+        TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class); TaskStageAttemptRepository stages = mock(TaskStageAttemptRepository.class);
+        KnowledgeDocumentRepository documents = mock(KnowledgeDocumentRepository.class); OrganizedDocumentRepository organizedDocuments = mock(OrganizedDocumentRepository.class);
+        TranscriptionTask task = new TranscriptionTask("owner", "audio", "a".repeat(64), "pipeline"); task.transcriptPersisted();
+        OrganizedDocument organized = new OrganizedDocument("owner", task.getId(), task.getTranscriptVersion(), "正式文档"); organized.ready("{}", "正文");
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(stages.findByTranscriptionTaskIdOrderByQueuedAtAsc(task.getId())).thenReturn(List.of());
+        when(documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion("owner", task.getId(), task.getTranscriptVersion())).thenReturn(Optional.empty());
+        when(organizedDocuments.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion("owner", task.getId(), task.getTranscriptVersion())).thenReturn(Optional.of(organized));
+        PipelineProgressService service = new PipelineProgressService(tasks, stages, documents, organizedDocuments,
+                mock(ProgressEventPublisher.class), mock(OutboxService.class), new AppProperties());
+
+        PipelineProgressService.TaskProgressView view = service.ownedView("owner", task.getId());
+
+        assertThat(view.qaCapabilities().currentDocumentAvailable()).isTrue();
+        assertThat(view.qaCapabilities().currentMode()).isEqualTo(QaRetrievalMode.FORMAL_OVERVIEW);
+        assertThat(view.qaCapabilities().crossDocumentEligible()).isFalse();
     }
 
     @Test

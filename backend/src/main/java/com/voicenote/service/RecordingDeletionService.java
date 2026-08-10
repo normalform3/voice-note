@@ -35,6 +35,7 @@ public class RecordingDeletionService {
     private final KnowledgeRunDocumentRepository knowledgeRunDocuments;
     private final KnowledgeRunStepRepository knowledgeRunSteps;
     private final KnowledgeRunSourceRepository knowledgeRunSources;
+    private final AgentCheckpointRepository agentCheckpoints;
     private final KnowledgeRunRepository knowledgeRuns;
     private final AnalysisRunRepository analysisRuns;
     private final AnalysisEvidenceRepository analysisEvidence;
@@ -55,6 +56,7 @@ public class RecordingDeletionService {
                                     KnowledgeIndexStageAttemptRepository knowledgeIndexStages, KnowledgeTopicRepository knowledgeTopics, KnowledgeChunkTopicRepository knowledgeChunkTopics,
                                     KnowledgeRunEvidenceRepository knowledgeEvidence, KnowledgeRunDocumentRepository knowledgeRunDocuments,
                                     KnowledgeRunStepRepository knowledgeRunSteps, KnowledgeRunSourceRepository knowledgeRunSources,
+                                    AgentCheckpointRepository agentCheckpoints,
                                     KnowledgeRunRepository knowledgeRuns, AnalysisRunRepository analysisRuns,
                                     AnalysisEvidenceRepository analysisEvidence, AnalysisInvocationRepository analysisInvocations, OrganizationInvocationRepository organizationInvocations,
                                     OutboxEventRepository outbox, IdempotencyRecordRepository idempotencyRecords,
@@ -65,6 +67,7 @@ public class RecordingDeletionService {
         this.knowledgeDocuments = knowledgeDocuments; this.knowledgeChunks = knowledgeChunks; this.knowledgeIndexVersions = knowledgeIndexVersions; this.knowledgeIndexStages = knowledgeIndexStages;
         this.knowledgeTopics = knowledgeTopics; this.knowledgeChunkTopics = knowledgeChunkTopics; this.knowledgeEvidence = knowledgeEvidence;
         this.knowledgeRunDocuments = knowledgeRunDocuments; this.knowledgeRunSteps = knowledgeRunSteps; this.knowledgeRunSources = knowledgeRunSources;
+        this.agentCheckpoints = agentCheckpoints;
         this.knowledgeRuns = knowledgeRuns; this.analysisRuns = analysisRuns; this.analysisEvidence = analysisEvidence;
         this.analysisInvocations = analysisInvocations; this.organizationInvocations = organizationInvocations; this.outbox = outbox; this.idempotencyRecords = idempotencyRecords;
         this.idempotency = idempotency; this.vectors = vectors; this.storage = storage;
@@ -110,8 +113,10 @@ public class RecordingDeletionService {
         for (String runId : relatedKnowledgeRuns) {
             knowledgeEvidence.deleteByKnowledgeRunId(runId);
             knowledgeRunSources.deleteByKnowledgeRunId(runId);
+            agentCheckpoints.deleteByKnowledgeRunId(runId);
             knowledgeRunSteps.deleteByKnowledgeRunId(runId);
             knowledgeRunDocuments.deleteByKnowledgeRunId(runId);
+            idempotencyRecords.deleteByOwnerIdAndResourceId(ownerId, runId);
             knowledgeRuns.deleteById(runId);
             outbox.deleteByAggregateTypeAndAggregateId("knowledge_run", runId);
         }

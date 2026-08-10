@@ -1,5 +1,7 @@
 package com.voicenote.service;
 
+import com.voicenote.domain.KnowledgeDocument;
+import com.voicenote.domain.KnowledgeDocumentStatus;
 import com.voicenote.domain.TranscriptSegment;
 import org.junit.jupiter.api.Test;
 import java.util.List;
@@ -16,5 +18,18 @@ class KnowledgeDocumentChunkingTest {
         assertThat(chunks.get(1).segmentIds()).containsExactly(second.getId());
         assertThat(chunks.get(1).startMs()).isEqualTo(1_000);
         assertThat(chunks.get(1).endMs()).isEqualTo(2_000);
+    }
+
+    @Test
+    void keepsThePriorIndexPointerWhileAStaleDocumentIsRebuilt() {
+        KnowledgeDocument document = new KnowledgeDocument("owner", "task", 1, "旧文档", "formal-old", 1);
+        document.activateIndexVersion("index-old");
+        document.stale();
+
+        document.refreshSource("formal-new", 2, "新文档");
+
+        assertThat(document.getStatus()).isEqualTo(KnowledgeDocumentStatus.STALE);
+        assertThat(document.getActiveIndexVersionId()).isEqualTo("index-old");
+        assertThat(document.getOrganizedDocumentId()).isEqualTo("formal-new");
     }
 }
