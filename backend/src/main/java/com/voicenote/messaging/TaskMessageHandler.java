@@ -10,6 +10,8 @@ import com.voicenote.service.DocumentOrganizationService;
 import com.voicenote.service.OrganizedDocumentWorker;
 import com.voicenote.service.KnowledgeIndexWorker;
 import com.voicenote.service.TranscriptionTaskService;
+import com.voicenote.service.SpeakerCorrectionService;
+import com.voicenote.service.SpeakerCorrectionWorker;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,13 +28,17 @@ public class TaskMessageHandler {
     private final KnowledgeIndexWorker knowledgeIndexWorker;
     private final KnowledgeAgentService knowledgeRuns;
     private final ProgressMessageHandler progress;
+    private final SpeakerCorrectionService speakerCorrections;
+    private final SpeakerCorrectionWorker speakerCorrectionWorker;
     public TaskMessageHandler(JdbcTemplate jdbc, OutboxEventRepository outbox, TranscriptionTaskService transcriptionTasks, AnalysisService analyses,
                               KnowledgeDocumentService knowledgeDocuments, DocumentOrganizationService organizedDocuments,
                               OrganizedDocumentWorker organizedDocumentWorker, KnowledgeIndexWorker knowledgeIndexWorker,
-                              KnowledgeAgentService knowledgeRuns, ProgressMessageHandler progress) {
+                              KnowledgeAgentService knowledgeRuns, ProgressMessageHandler progress,
+                              SpeakerCorrectionService speakerCorrections, SpeakerCorrectionWorker speakerCorrectionWorker) {
         this.jdbc = jdbc; this.outbox = outbox; this.transcriptionTasks = transcriptionTasks; this.analyses = analyses;
         this.knowledgeDocuments = knowledgeDocuments; this.organizedDocuments = organizedDocuments; this.organizedDocumentWorker = organizedDocumentWorker;
         this.knowledgeIndexWorker = knowledgeIndexWorker; this.knowledgeRuns = knowledgeRuns; this.progress = progress;
+        this.speakerCorrections = speakerCorrections; this.speakerCorrectionWorker = speakerCorrectionWorker;
     }
     @Transactional
     public void consume(String consumerName, String eventId) {
@@ -46,6 +52,10 @@ public class TaskMessageHandler {
             afterCommit(() -> organizedDocumentWorker.process(event.getAggregateId()));
         }
         if (event.getEventType() == EventType.ANALYSIS_REQUESTED) analyses.markQueued(event.getAggregateId());
+        if (event.getEventType() == EventType.SPEAKER_CORRECTION_REQUESTED) {
+            speakerCorrections.markQueued(event.getAggregateId());
+            afterCommit(() -> speakerCorrectionWorker.process(event.getAggregateId()));
+        }
         if (event.getEventType() == EventType.KNOWLEDGE_INDEX_REQUESTED) {
             knowledgeDocuments.markQueuedIndex(event.getAggregateId());
             afterCommit(() -> knowledgeIndexWorker.process(event.getAggregateId()));

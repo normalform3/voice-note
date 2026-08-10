@@ -32,7 +32,8 @@ class TaskMessageHandlerTest {
         when(outbox.findById(event.getId())).thenReturn(Optional.of(event));
         TaskMessageHandler handler = new TaskMessageHandler(jdbc, outbox, transcriptionTasks, mock(AnalysisService.class),
                 mock(KnowledgeDocumentService.class), mock(DocumentOrganizationService.class), mock(OrganizedDocumentWorker.class),
-                mock(KnowledgeIndexWorker.class), mock(KnowledgeAgentService.class), mock(ProgressMessageHandler.class));
+                mock(KnowledgeIndexWorker.class), mock(KnowledgeAgentService.class), mock(ProgressMessageHandler.class),
+                mock(com.voicenote.service.SpeakerCorrectionService.class), mock(com.voicenote.service.SpeakerCorrectionWorker.class));
 
         handler.consume("rocketmq-transcription", event.getId());
 

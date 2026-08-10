@@ -31,10 +31,12 @@ public class TranscriptionTaskController {
     private final TranscriptionTaskService taskService; private final TranscriptSegmentRepository segments; private final PipelineProgressService progress; private final com.voicenote.service.RecordingDeletionService deletion;
     private final com.voicenote.service.TranscriptSpeakerService speakers;
     private final TranscriptSpeakerCorrectionService speakerCorrections;
+    private final com.voicenote.service.SpeakerCorrectionService aiSpeakerCorrections;
     public TranscriptionTaskController(TranscriptionTaskService taskService, TranscriptSegmentRepository segments, PipelineProgressService progress,
                                        com.voicenote.service.RecordingDeletionService deletion, com.voicenote.service.TranscriptSpeakerService speakers,
-                                       TranscriptSpeakerCorrectionService speakerCorrections) {
-        this.taskService = taskService; this.segments = segments; this.progress = progress; this.deletion = deletion; this.speakers = speakers; this.speakerCorrections = speakerCorrections;
+                                       TranscriptSpeakerCorrectionService speakerCorrections, com.voicenote.service.SpeakerCorrectionService aiSpeakerCorrections) {
+        this.taskService = taskService; this.segments = segments; this.progress = progress; this.deletion = deletion; this.speakers = speakers;
+        this.speakerCorrections = speakerCorrections; this.aiSpeakerCorrections = aiSpeakerCorrections;
     }
     @PostMapping PipelineProgressService.TaskProgressView create(@RequestHeader("Idempotency-Key") String key, @Valid @RequestBody CreateTaskRequest request, Authentication authentication) {
         UserPrincipal user = CurrentUser.require(authentication); TranscriptionTask task = taskService.create(user.id(), key, new TranscriptionTaskService.CreateTaskCommand(request.audioBlobId(), request.asrConfig()));
@@ -82,6 +84,18 @@ public class TranscriptionTaskController {
         var result = speakerCorrections.correct(ownerId, taskId, request.segmentIds(), request.speakerId(), request.expectedRevision());
         return new SpeakerCorrectionView(result.changedSegmentCount(), result.revision(), progress.ownedView(ownerId, taskId));
     }
+    @PostMapping("/{taskId}/speaker-correction-runs") com.voicenote.service.SpeakerCorrectionService.RunDetail createAiSpeakerCorrection(
+            @PathVariable String taskId, @RequestHeader("Idempotency-Key") String key,
+            @Valid @RequestBody CreateAiSpeakerCorrectionRequest request, Authentication authentication) {
+        String ownerId = CurrentUser.require(authentication).id();
+        var run = aiSpeakerCorrections.create(ownerId, key, taskId, request.expectedRevision());
+        return aiSpeakerCorrections.detail(ownerId, run.getId());
+    }
+    @GetMapping("/{taskId}/speaker-correction-runs/latest") ResponseEntity<com.voicenote.service.SpeakerCorrectionService.RunDetail> latestAiSpeakerCorrection(
+            @PathVariable String taskId, Authentication authentication) {
+        var detail = aiSpeakerCorrections.latest(CurrentUser.require(authentication).id(), taskId);
+        return detail == null ? ResponseEntity.noContent().build() : ResponseEntity.ok(detail);
+    }
     @GetMapping("/{taskId}/speakers") List<SpeakerView> listSpeakers(@PathVariable String taskId, Authentication authentication) {
         return speakers.list(CurrentUser.require(authentication).id(), taskId).stream().map(SpeakerView::from).toList();
     }
@@ -91,17 +105,20 @@ public class TranscriptionTaskController {
     }
     public record CreateTaskRequest(@NotBlank String audioBlobId, TranscriptionTaskService.AsrConfig asrConfig) { }
     public record SegmentView(String id, int index, String speakerId, String asrSpeakerId, String correctedSpeakerId, boolean speakerCorrected,
+                              String correctionSource, String timingSource, String rootSegmentId, String parentSegmentId,
                               String speaker, String role, long startMs, long endMs, String text) {
         static SegmentView from(TranscriptSegment value, TranscriptSpeaker speaker) {
             String name = speaker == null || speaker.getDisplayName() == null ? value.getEffectiveSpeakerId() : speaker.getDisplayName();
             String role = speaker == null ? SpeakerRole.UNKNOWN.name() : speaker.getResolvedRole().name();
             return new SegmentView(value.getId(), value.getSegmentIndex(), value.getEffectiveSpeakerId(), value.getAsrSpeakerId(), value.getCorrectedSpeakerId(),
-                    value.isSpeakerCorrected(), name, role, value.getStartMs(), value.getEndMs(), value.getTextContent());
+                    value.isSpeakerCorrected(), value.getCorrectionSource().name(), value.getTimingSource().name(), value.getRootSegmentId(), value.getParentSegmentId(),
+                    name, role, value.getStartMs(), value.getEndMs(), value.getTextContent());
         }
     }
     public record CorrectSegmentSpeakersRequest(@NotEmpty @Size(max = 1000) List<@NotBlank String> segmentIds,
                                                 @Size(max = 128) String speakerId, @NotNull @PositiveOrZero Integer expectedRevision) { }
     public record SpeakerCorrectionView(int changedSegmentCount, int revision, PipelineProgressService.TaskProgressView task) { }
+    public record CreateAiSpeakerCorrectionRequest(@NotNull @PositiveOrZero Integer expectedRevision) { }
     public record UpdateSpeakerRequest(@Size(max = 128) String displayName) { }
     public record UpdateMetadataRequest(@NotNull Instant occurredAt, @NotNull SceneType sceneType, @Size(max = 512) String subject,
                                         @Size(max = 20) List<@Size(max = 50) String> tags) { }

@@ -5,6 +5,7 @@ import com.voicenote.repository.OutboxEventRepository;
 import com.voicenote.repository.AnalysisRunRepository;
 import com.voicenote.repository.KnowledgeRunRepository;
 import com.voicenote.repository.TranscriptionTaskRepository;
+import com.voicenote.repository.SpeakerCorrectionRunRepository;
 import com.voicenote.service.ProgressEventPublisher;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -16,9 +17,11 @@ public class ProgressMessageHandler {
     private final AnalysisRunRepository analyses;
     private final KnowledgeRunRepository knowledgeRuns;
     private final ProgressEventPublisher events;
+    private final SpeakerCorrectionRunRepository speakerCorrections;
 
-    public ProgressMessageHandler(OutboxEventRepository outbox, TranscriptionTaskRepository tasks, AnalysisRunRepository analyses, KnowledgeRunRepository knowledgeRuns, ProgressEventPublisher events) {
-        this.outbox = outbox; this.tasks = tasks; this.analyses = analyses; this.knowledgeRuns = knowledgeRuns; this.events = events;
+    public ProgressMessageHandler(OutboxEventRepository outbox, TranscriptionTaskRepository tasks, AnalysisRunRepository analyses, KnowledgeRunRepository knowledgeRuns,
+                                  SpeakerCorrectionRunRepository speakerCorrections, ProgressEventPublisher events) {
+        this.outbox = outbox; this.tasks = tasks; this.analyses = analyses; this.knowledgeRuns = knowledgeRuns; this.speakerCorrections = speakerCorrections; this.events = events;
     }
 
     @Transactional
@@ -31,6 +34,8 @@ public class ProgressMessageHandler {
             analyses.findById(event.getAggregateId()).ifPresent(run -> events.publish(new ProgressEventPublisher.ProgressNotification(run.getOwnerId(), "analysis-run-settled", run.getId())));
         } else if ("knowledge_run".equals(event.getAggregateType())) {
             knowledgeRuns.findById(event.getAggregateId()).ifPresent(run -> events.publish(new ProgressEventPublisher.ProgressNotification(run.getOwnerId(), "knowledge-run-settled", run.getId())));
+        } else if ("speaker_correction_run".equals(event.getAggregateType())) {
+            speakerCorrections.findById(event.getAggregateId()).ifPresent(run -> events.publish(new ProgressEventPublisher.ProgressNotification(run.getOwnerId(), "speaker-correction-run-settled", run.getId())));
         }
     }
 }

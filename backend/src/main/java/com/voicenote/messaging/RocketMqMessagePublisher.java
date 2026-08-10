@@ -17,7 +17,7 @@ public class RocketMqMessagePublisher implements MessagePublisher {
             case TRANSCRIPTION_REQUESTED, PROGRESS_CHANGED -> properties.getRocketmq().getTranscriptionTopic();
             case DOCUMENT_ORGANIZATION_REQUESTED -> properties.getRocketmq().getDocumentTopic();
             case KNOWLEDGE_INDEX_REQUESTED -> properties.getRocketmq().getKnowledgeTopic();
-            case ANALYSIS_REQUESTED, KNOWLEDGE_RUN_REQUESTED -> properties.getRocketmq().getAnalysisTopic();
+            case ANALYSIS_REQUESTED, SPEAKER_CORRECTION_REQUESTED, KNOWLEDGE_RUN_REQUESTED -> properties.getRocketmq().getAnalysisTopic();
         };
         rocket.syncSend(topic + ":" + event.getEventType().name(), event.getId());
     }

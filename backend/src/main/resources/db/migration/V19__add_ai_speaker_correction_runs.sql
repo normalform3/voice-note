@@ -1,0 +1,61 @@
+CREATE TABLE speaker_correction_runs (
+    id CHAR(36) PRIMARY KEY,
+    version BIGINT NOT NULL DEFAULT 0,
+    owner_id CHAR(36) NOT NULL,
+    transcription_task_id CHAR(36) NOT NULL,
+    transcript_version INT NOT NULL,
+    base_revision INT NOT NULL,
+    snapshot_hash CHAR(64) NOT NULL,
+    template_version VARCHAR(64) NOT NULL,
+    model_id VARCHAR(128) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    suggestion_count INT NOT NULL DEFAULT 0,
+    rejected_count INT NOT NULL DEFAULT 0,
+    failure_code VARCHAR(128),
+    failure_message VARCHAR(1000),
+    created_at DATETIME(6) NOT NULL,
+    updated_at DATETIME(6) NOT NULL,
+    completed_at DATETIME(6),
+    CONSTRAINT fk_speaker_correction_run_owner FOREIGN KEY (owner_id) REFERENCES users(id),
+    CONSTRAINT fk_speaker_correction_run_task FOREIGN KEY (transcription_task_id) REFERENCES transcription_tasks(id),
+    KEY ix_speaker_correction_run_task (owner_id, transcription_task_id, created_at),
+    KEY ix_speaker_correction_run_status (status, created_at)
+);
+
+CREATE TABLE speaker_correction_suggestions (
+    id CHAR(36) PRIMARY KEY,
+    run_id CHAR(36) NOT NULL,
+    suggestion_index INT NOT NULL,
+    source_segment_id CHAR(36) NOT NULL,
+    suggestion_type VARCHAR(16) NOT NULL,
+    original_speaker_id VARCHAR(128) NOT NULL,
+    original_start_ms BIGINT NOT NULL,
+    original_end_ms BIGINT NOT NULL,
+    original_text TEXT NOT NULL,
+    target_speaker_id VARCHAR(128),
+    proposal_document JSON NOT NULL,
+    confidence DOUBLE NOT NULL,
+    reason VARCHAR(512) NOT NULL,
+    default_selected BOOLEAN NOT NULL DEFAULT FALSE,
+    timing_source VARCHAR(24) NOT NULL,
+    applied BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at DATETIME(6) NOT NULL,
+    applied_at DATETIME(6),
+    CONSTRAINT fk_speaker_correction_suggestion_run FOREIGN KEY (run_id) REFERENCES speaker_correction_runs(id),
+    CONSTRAINT fk_speaker_correction_suggestion_segment FOREIGN KEY (source_segment_id) REFERENCES transcript_segments(id),
+    UNIQUE KEY uk_speaker_correction_suggestion_index (run_id, suggestion_index)
+);
+
+CREATE TABLE speaker_correction_invocations (
+    id CHAR(36) PRIMARY KEY,
+    run_id CHAR(36) NOT NULL,
+    chunk_index INT NOT NULL,
+    attempt_number INT NOT NULL,
+    request_hash CHAR(64) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    response_document MEDIUMTEXT,
+    created_at DATETIME(6) NOT NULL,
+    updated_at DATETIME(6) NOT NULL,
+    CONSTRAINT fk_speaker_correction_invocation_run FOREIGN KEY (run_id) REFERENCES speaker_correction_runs(id),
+    UNIQUE KEY uk_speaker_correction_invocation (run_id, chunk_index, attempt_number)
+);

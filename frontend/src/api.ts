@@ -22,8 +22,13 @@ export type Task = {
   occurredAt: string; sceneType: 'INTERVIEW' | 'MEETING' | 'OTHER'; subject?: string; tags: string[]
   retryableStages?: PipelineStage[]; stages?: StageAttempt[]; qaCapabilities?: QaCapabilities; knowledgeDocument?: { id: string; title: string; status: string; failureMessage?: string; currentBuild?: KnowledgeIndexBuild }; organizedDocument?: { id: string; title: string; status: string; failureMessage?: string }
 }
-export type Segment = { id: string; index: number; speakerId?: string; asrSpeakerId?: string; correctedSpeakerId?: string; speakerCorrected: boolean; speaker?: string; role?: string; startMs: number; endMs: number; text: string }
+export type Segment = { id: string; index: number; speakerId?: string; asrSpeakerId?: string; correctedSpeakerId?: string; speakerCorrected: boolean; correctionSource: 'ASR' | 'AI' | 'HUMAN'; timingSource: 'ASR' | 'WORD_ALIGNED' | 'PROPORTIONAL'; rootSegmentId: string; parentSegmentId?: string; speaker?: string; role?: string; startMs: number; endMs: number; text: string }
 export type SpeakerCorrectionResult = { changedSegmentCount: number; revision: number; task: Task }
+export type SpeakerCorrectionProposalPart = { startOffset: number; endOffset: number; speakerId: string; text: string; startMs: number; endMs: number; timingSource: 'WORD_ALIGNED' | 'PROPORTIONAL' }
+export type AiSpeakerCorrectionSuggestion = { id: string; index: number; sourceSegmentId: string; type: 'RELABEL' | 'SPLIT'; originalSpeakerId: string; originalStartMs: number; originalEndMs: number; originalText: string; targetSpeakerId?: string; proposalDocument: string; confidence: number; reason: string; defaultSelected: boolean; timingSource: 'ASR' | 'WORD_ALIGNED' | 'PROPORTIONAL'; applied: boolean }
+export type AiSpeakerCorrectionRun = { id: string; transcriptionTaskId: string; transcriptVersion: number; baseRevision: number; templateVersion: string; modelId: string; status: 'QUEUED' | 'RUNNING' | 'READY' | 'APPLIED' | 'FAILED' | 'STALE'; suggestionCount: number; rejectedCount: number; failureCode?: string; failureMessage?: string; createdAt: string; completedAt?: string }
+export type AiSpeakerCorrectionDetail = { run: AiSpeakerCorrectionRun; suggestions: AiSpeakerCorrectionSuggestion[] }
+export type AiSpeakerCorrectionApplyResult = { relabeledSegmentCount: number; splitSegmentCount: number; revision: number; run: AiSpeakerCorrectionRun; task: Task }
 export type Speaker = { speakerId: string; suggestedRole: string; suggestedConfidence?: number; confirmedRole?: string; resolvedRole: string; displayName?: string }
 export type OrganizedBlock = { id: string; index: number; type: string; parentBlockId?: string; speaker?: string; speakerIds?: string; topic?: string; summary?: string; startMs: number; endMs: number; sourceSegmentIds: string; sourceFragments?: string; text: string }
 export type OrganizedDocumentDetail = { document: { id: string; taskId: string; title: string; summary?: string; organizationMode?: string; status: string; structureDocument?: string; plainText?: string; failureMessage?: string }; blocks: OrganizedBlock[] }
@@ -94,6 +99,25 @@ export const key = () => crypto.randomUUID()
 
 type UploadPhase = 'intent' | 'content' | 'task'
 type ErrorBody = { code?: string; message?: string }
+
+export const SESSION_EXPIRED_EVENT = 'voicenote:session-expired'
+
+export function isSessionExpiredError(error: unknown): boolean {
+  if (!axios.isAxiosError(error)) return false
+  const authorization = error.config?.headers?.Authorization || error.config?.headers?.authorization
+  if (!authorization) return false
+  if (error.response?.status === 401) return true
+  // Older backend versions returned an empty 403 when Spring Security rejected
+  // an expired token. A business-level 403 has a structured response body.
+  return error.response?.status === 403 && !error.response.data
+}
+
+api.interceptors.response.use(response => response, (error: unknown) => {
+  if (isSessionExpiredError(error) && typeof window !== 'undefined') {
+    window.dispatchEvent(new Event(SESSION_EXPIRED_EVENT))
+  }
+  return Promise.reject(error)
+})
 
 export function uploadErrorMessage(error: unknown, phase: UploadPhase): string {
   const response = axios.isAxiosError<ErrorBody>(error) ? error.response : undefined

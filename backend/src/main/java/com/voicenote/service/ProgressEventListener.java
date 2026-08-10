@@ -13,9 +13,11 @@ public class ProgressEventListener {
     private final PipelineProgressService pipeline;
     private final AnalysisService analyses;
     private final KnowledgeRunRepository knowledgeRuns;
+    private final SpeakerCorrectionService speakerCorrections;
 
-    public ProgressEventListener(ProgressSseHub hub, PipelineProgressService pipeline, AnalysisService analyses, KnowledgeRunRepository knowledgeRuns) {
-        this.hub = hub; this.pipeline = pipeline; this.analyses = analyses; this.knowledgeRuns = knowledgeRuns;
+    public ProgressEventListener(ProgressSseHub hub, PipelineProgressService pipeline, AnalysisService analyses, KnowledgeRunRepository knowledgeRuns,
+                                 SpeakerCorrectionService speakerCorrections) {
+        this.hub = hub; this.pipeline = pipeline; this.analyses = analyses; this.knowledgeRuns = knowledgeRuns; this.speakerCorrections = speakerCorrections;
     }
 
     @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
@@ -28,6 +30,7 @@ public class ProgressEventListener {
                 yield run == null ? Map.<String, Object>of("runId", notification.resourceId())
                         : Map.<String, Object>of("run", KnowledgeAgentService.KnowledgeRunView.from(run));
             }
+            case "speaker-correction-run-settled" -> Map.of("run", speakerCorrections.detail(notification.ownerId(), notification.resourceId()).run());
             default -> Map.of("resourceId", notification.resourceId());
         };
         hub.send(notification.ownerId(), notification.type(), payload);

@@ -20,6 +20,7 @@ import org.springframework.security.web.FilterChainProxy;
 import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.assertj.core.api.Assertions.assertThat;
+import static org.mockito.Mockito.when;
 
 @WebMvcTest(controllers = ProgressEventsController.class)
 @Import(SecurityConfiguration.class)
@@ -57,5 +58,22 @@ class SecurityConfigurationTest {
 
         assertThat(downstreamInvoked).isTrue();
         assertThat(response.getStatus()).isEqualTo(200);
+    }
+
+    @Test
+    void returnsUnauthorizedWhenBearerTokenCannotBeParsed() throws Exception {
+        MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/progress-events");
+        request.addHeader("Authorization", "Bearer expired-token");
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        AtomicBoolean downstreamInvoked = new AtomicBoolean();
+        when(jwtService.parse("expired-token")).thenThrow(new IllegalArgumentException("expired"));
+
+        springSecurityFilterChain.doFilter(request, response,
+                (ignoredRequest, ignoredResponse) -> downstreamInvoked.set(true));
+
+        assertThat(downstreamInvoked).isFalse();
+        assertThat(response.getStatus()).isEqualTo(401);
+        assertThat(response.getContentType()).isEqualTo("application/json");
+        assertThat(response.getContentAsString()).contains("UNAUTHORIZED");
     }
 }

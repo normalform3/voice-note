@@ -4,7 +4,7 @@ import AgentResultBlocks from './AgentResult.vue'
 import ProfilePage from './ProfilePage.vue'
 import SkillManager from './SkillManager.vue'
 import ToolsCenter from './ToolsCenter.vue'
-import { api, hashFile, key, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentCapabilities, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AgentStep, type AgentStepDetail, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PipelineStage, type Segment, type Speaker, type SpeakerCorrectionResult, type Task, type WorkspaceSnapshot } from './api'
+import { api, hashFile, isSessionExpiredError, key, SESSION_EXPIRED_EVENT, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentCapabilities, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AgentStep, type AgentStepDetail, type AiSpeakerCorrectionApplyResult, type AiSpeakerCorrectionDetail, type AiSpeakerCorrectionSuggestion, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PipelineStage, type Segment, type Speaker, type SpeakerCorrectionProposalPart, type SpeakerCorrectionResult, type Task, type WorkspaceSnapshot } from './api'
 
 type WorkspaceView = 'library' | 'document' | 'skills' | 'tools' | 'profile'
 type DetailTab = 'transcript' | 'summary' | 'organized'
@@ -74,6 +74,11 @@ const speakerCorrectionTarget = ref('')
 const savingSpeakerCorrection = ref(false)
 const speakerCorrectionMessage = ref('')
 const speakerCorrectionError = ref('')
+const aiSpeakerCorrection = ref<AiSpeakerCorrectionDetail | null>(null)
+const selectedAiSuggestionIds = ref<string[]>([])
+const startingAiSpeakerCorrection = ref(false)
+const applyingAiSpeakerCorrection = ref(false)
+const aiSpeakerCorrectionError = ref('')
 let lastSelectedSegmentIndex: number | null = null
 const startingFormalDocument = ref(false)
 const startingKnowledgeBuild = ref(false)
@@ -143,8 +148,12 @@ const existingSummaryRun = computed(() => {
   if (!task || !document) return undefined
   return analysisRuns.value.find(run => run.status !== 'STALE' && run.transcriptionTaskId === task.id && run.analysisMode === 'summary' && run.organizedDocumentId === document.id)
 })
-const speakerCorrectionBlocked = computed(() => Boolean(selected.value && selected.value.status === 'RUNNING'
-  && ['DOCUMENT_ORGANIZATION', 'KNOWLEDGE_PREPARE', 'KNOWLEDGE_INDEX'].includes(selected.value.currentStage || '')))
+const speakerCorrectionBlocked = computed(() => Boolean(selected.value && ((selected.value.status === 'RUNNING'
+  && ['DOCUMENT_ORGANIZATION', 'KNOWLEDGE_PREPARE', 'KNOWLEDGE_INDEX'].includes(selected.value.currentStage || ''))
+  || analysisRuns.value.some(run => run.transcriptionTaskId === selected.value?.id && run.organizedDocumentId
+    && ['QUEUED', 'RUNNING'].includes(run.status)))))
+const aiSpeakerCorrectionRunning = computed(() => Boolean(aiSpeakerCorrection.value && ['QUEUED', 'RUNNING'].includes(aiSpeakerCorrection.value.run.status)))
+const selectedAiSuggestionCount = computed(() => selectedAiSuggestionIds.value.length)
 const parsedSummary = computed(() => parseResultDocument(summaryDetail.value?.run.resultDocument))
 const summaryLoading = computed(() => summaryLoadingTaskId.value === selected.value?.id)
 const agentTitle = computed(() => agentScopeType.value === 'CURRENT_DOCUMENT' ? '当前文档问答' : '自主知识问答')
@@ -282,7 +291,9 @@ async function loadWorkspace() {
   workspaceRequest = Promise.all([loadTasks(), loadDocuments(), loadRuns(), loadAnalysisRuns(), loadAgentRuns(), loadAgentSkills(), loadAgentCapabilities()])
     .then(() => { workspaceLoadError.value = '' })
     .catch((error) => {
-      workspaceLoadError.value = error.response?.data?.message || '后端服务暂时不可用，正在等待恢复连接。'
+      workspaceLoadError.value = isSessionExpiredError(error)
+        ? ''
+        : error.response?.data?.message || '后端服务暂时不可用，正在等待恢复连接。'
       throw error
     })
     .finally(() => {
@@ -323,6 +334,9 @@ async function choose(task: Task) {
   speakerCorrectionTarget.value = ''
   speakerCorrectionMessage.value = ''
   speakerCorrectionError.value = ''
+  aiSpeakerCorrection.value = null
+  selectedAiSuggestionIds.value = []
+  aiSpeakerCorrectionError.value = ''
   lastSelectedSegmentIndex = null
   organized.value = null
   syncMetadataForm(task)
@@ -337,15 +351,17 @@ async function loadDocumentDetails(task: Task) {
   documentLoading.value = true
   documentLoadError.value = ''
   try {
-    const [transcript, speakerResponse, organizedResponse] = await Promise.all([
+    const [transcript, speakerResponse, organizedResponse, aiCorrectionResponse] = await Promise.all([
       api.get<Segment[]>(`/transcription-tasks/${task.id}/segments`),
       api.get<Speaker[]>(`/transcription-tasks/${task.id}/speakers`),
-      task.organizedDocument?.status === 'READY' ? api.get<OrganizedDocumentDetail>(`/organized-documents/${task.organizedDocument.id}`) : Promise.resolve(null)
+      task.organizedDocument?.status === 'READY' ? api.get<OrganizedDocumentDetail>(`/organized-documents/${task.organizedDocument.id}`) : Promise.resolve(null),
+      api.get<AiSpeakerCorrectionDetail>(`/transcription-tasks/${task.id}/speaker-correction-runs/latest`)
     ])
     if (selected.value?.id !== task.id || requestVersion !== documentRequestVersion) return
     segments.value = transcript.data
     speakers.value = speakerResponse.data
     organized.value = organizedResponse?.data || null
+    setAiSpeakerCorrection(aiCorrectionResponse.data || null)
   } catch (error: any) {
     if (selected.value?.id === task.id && requestVersion === documentRequestVersion) {
       documentLoadError.value = error.response?.data?.message || '文档读取失败。后端恢复连接后将自动重试，也可以立即重试。'
@@ -389,6 +405,64 @@ async function refreshTranscript(taskId: string) {
   if (selected.value?.id !== taskId) return
   segments.value = transcript.data
   speakers.value = speakerResponse.data
+}
+function setAiSpeakerCorrection(detail: AiSpeakerCorrectionDetail | null) {
+  aiSpeakerCorrection.value = detail
+  selectedAiSuggestionIds.value = detail?.run.status === 'READY'
+    ? detail.suggestions.filter(suggestion => suggestion.defaultSelected && !suggestion.applied).map(suggestion => suggestion.id)
+    : []
+}
+async function loadAiSpeakerCorrection(taskId: string, runId?: string) {
+  const url = runId ? `/speaker-correction-runs/${runId}` : `/transcription-tasks/${taskId}/speaker-correction-runs/latest`
+  const { data } = await api.get<AiSpeakerCorrectionDetail>(url)
+  if (selected.value?.id === taskId) setAiSpeakerCorrection(data || null)
+}
+async function startAiSpeakerCorrection() {
+  const task = selected.value
+  if (!task || startingAiSpeakerCorrection.value || aiSpeakerCorrectionRunning.value) return
+  startingAiSpeakerCorrection.value = true; aiSpeakerCorrectionError.value = ''
+  try {
+    const { data } = await api.post<AiSpeakerCorrectionDetail>(`/transcription-tasks/${task.id}/speaker-correction-runs`, {
+      expectedRevision: task.speakerCorrectionRevision || 0
+    }, { headers: { 'Idempotency-Key': key() } })
+    if (selected.value?.id === task.id) setAiSpeakerCorrection(data)
+  } catch (error: any) { aiSpeakerCorrectionError.value = error.response?.data?.message || 'AI 说话人分析启动失败。' }
+  finally { startingAiSpeakerCorrection.value = false }
+}
+function toggleAiSuggestion(suggestionId: string) {
+  selectedAiSuggestionIds.value = selectedAiSuggestionIds.value.includes(suggestionId)
+    ? selectedAiSuggestionIds.value.filter(id => id !== suggestionId)
+    : [...selectedAiSuggestionIds.value, suggestionId]
+}
+function selectHighConfidenceAiSuggestions() {
+  selectedAiSuggestionIds.value = aiSpeakerCorrection.value?.suggestions.filter(value => value.confidence >= .8 && !value.applied).map(value => value.id) || []
+}
+function proposalParts(suggestion: AiSpeakerCorrectionSuggestion): SpeakerCorrectionProposalPart[] {
+  if (suggestion.type !== 'SPLIT') return []
+  try { return JSON.parse(suggestion.proposalDocument) as SpeakerCorrectionProposalPart[] }
+  catch { return [] }
+}
+async function applyAiSpeakerCorrections() {
+  const task = selected.value; const detail = aiSpeakerCorrection.value
+  if (!task || !detail || !selectedAiSuggestionIds.value.length || applyingAiSpeakerCorrection.value || speakerCorrectionBlocked.value) return
+  const invalidatesDerived = task.organizedDocument?.status === 'READY' || task.knowledgeDocument?.status === 'READY'
+  if (invalidatesDerived && !window.confirm('应用 AI 说话人校正后，现有正式文档、摘要和知识索引需要重新生成。继续吗？')) return
+  applyingAiSpeakerCorrection.value = true; aiSpeakerCorrectionError.value = ''
+  try {
+    const { data } = await api.post<AiSpeakerCorrectionApplyResult>(`/speaker-correction-runs/${detail.run.id}/apply`, {
+      suggestionIds: selectedAiSuggestionIds.value, expectedRevision: task.speakerCorrectionRevision || 0
+    }, { headers: { 'Idempotency-Key': key() } })
+    upsertTask(data.task); organized.value = null
+    const summaries = { ...summaryByTaskId.value }; delete summaries[task.id]; summaryByTaskId.value = summaries
+    await Promise.all([refreshTranscript(task.id), loadDocuments(), loadAnalysisRuns(), loadAiSpeakerCorrection(task.id, detail.run.id)])
+    speakerCorrectionMessage.value = `AI 已改派 ${data.relabeledSegmentCount} 句、拆分 ${data.splitSegmentCount} 句。${data.task.organizedDocument?.status === 'STALE' ? '请重新生成正式文档和知识库。' : ''}`
+  } catch (error: any) {
+    aiSpeakerCorrectionError.value = error.response?.data?.message || 'AI 说话人校正应用失败。'
+    if (error.response?.data?.code === 'SPEAKER_REVISION_CONFLICT') {
+      const { data } = await api.get<Task>(`/transcription-tasks/${task.id}`); upsertTask(data)
+      await Promise.all([refreshTranscript(task.id), loadAiSpeakerCorrection(task.id)])
+    }
+  } finally { applyingAiSpeakerCorrection.value = false }
 }
 function speakerName(speakerId?: string) {
   const speaker = speakers.value.find(value => value.speakerId === speakerId)
@@ -460,6 +534,7 @@ async function applySpeakerCorrection(segmentIds: string[], speakerId: string | 
     organized.value = null
     const summaries = { ...summaryByTaskId.value }; delete summaries[task.id]; summaryByTaskId.value = summaries
     await Promise.all([refreshTranscript(task.id), loadDocuments(), loadAnalysisRuns()])
+    await loadAiSpeakerCorrection(task.id)
     clearSegmentSelection()
     speakerCorrectionMessage.value = data.changedSegmentCount
       ? `已修正 ${data.changedSegmentCount} 句。${data.task.organizedDocument?.status === 'STALE' ? '请重新生成正式文档和知识库。' : ''}`
@@ -848,6 +923,11 @@ function handleProgressEvent(name: string, payload: any) {
       : Object.entries(summaryByTaskId.value).find(([, detail]) => detail.run.id === run.id)?.[0]
     if (summaryTaskId) void loadSummaryDetail(summaryTaskId, run.id)
     else void loadAnalysisDetail(payload.run.id)
+    return
+  }
+  if (name === 'speaker-correction-run-settled' && payload.run) {
+    const run = payload.run as { id: string; transcriptionTaskId: string }
+    if (selected.value?.id === run.transcriptionTaskId) void loadAiSpeakerCorrection(run.transcriptionTaskId, run.id)
   }
 }
 function parseSseFrame(frame: string) {
@@ -860,6 +940,10 @@ async function connectProgressEvents() {
   streamClosed = false; streamController = new AbortController()
   try {
     const response = await fetch('/api/progress-events', { headers: { Authorization: `Bearer ${token.value}`, Accept: 'text/event-stream' }, signal: streamController.signal })
+    if (response.status === 401 || response.status === 403) {
+      handleSessionExpired()
+      return
+    }
     if (!response.ok || !response.body) throw new Error('Progress stream is unavailable')
     reconnectDelay = 1000
     if (workspaceLoadError.value || documentLoadError.value) void recoverAfterReconnect()
@@ -950,6 +1034,12 @@ function logout() {
   selectedSkillId.value = ''
   skillSelectionNotice.value = ''
 }
+function handleSessionExpired() {
+  if (!token.value) return
+  logout()
+  loginMode.value = 'login'
+  authError.value = '登录状态已过期，请重新登录。'
+}
 watch(speakerDiarization, enabled => { if (!enabled) speakerCount.value = null })
 watch(selectedSkillIssue, issue => {
   if (selectedSkillId.value && issue) {
@@ -958,10 +1048,12 @@ watch(selectedSkillIssue, issue => {
   }
 })
 onMounted(() => {
+  window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired)
   clockTimer = window.setInterval(() => { clockNow.value = Date.now() }, 1000)
   if (token.value) { void loadWorkspace().catch(() => {}); void connectProgressEvents() }
 })
 onBeforeUnmount(() => {
+  window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired)
   stopProgressEvents()
   if (clockTimer) window.clearInterval(clockTimer)
 })
@@ -1120,15 +1212,34 @@ onBeforeUnmount(() => {
 
           <section v-if="detailTab === 'transcript'" class="detail-content transcript" role="tabpanel">
             <div v-if="speakers.length" class="speaker-roster"><span>说话人名称</span><label v-for="speaker in speakers" :key="speaker.speakerId"><b :style="{ color: speakerColor(speaker.speakerId) }">{{ speaker.speakerId }}</b><input v-model="speaker.displayName" maxlength="128" placeholder="填写名称（可选）" @keyup.enter="saveSpeakerName(speaker)" @blur="saveSpeakerName(speaker)"><button type="button" class="speaker-save" :disabled="savingSpeakerId === speaker.speakerId" @click="saveSpeakerName(speaker)">{{ savingSpeakerId === speaker.speakerId ? '保存中' : '保存' }}</button></label></div>
-            <div v-if="segments.length" class="speaker-correction-guide" :class="{ editing: speakerEditMode }"><span><b>{{ speakerEditMode ? '正在修改说话人' : '局部说话人校对' }}</b><small>{{ speakerEditMode ? '点击整条句子即可选择，按住 Shift 可连续选择。' : '发现少量身份标错时，可进入修改模式人工校对。' }}</small></span><div class="speaker-correction-guide-actions"><em>修订 {{ selected?.speakerCorrectionRevision || 0 }}</em><button v-if="!speakerEditMode" type="button" :disabled="speakerCorrectionBlocked" @click="enterSpeakerEditMode">修改说话人</button><button v-else type="button" class="finish" :disabled="savingSpeakerCorrection" @click="finishSpeakerEditMode">完成</button></div></div>
+            <div v-if="segments.length" class="speaker-correction-guide" :class="{ editing: speakerEditMode }"><span><b>{{ speakerEditMode ? '正在修改说话人' : '说话人校对' }}</b><small>{{ speakerEditMode ? '点击整条句子即可选择，按住 Shift 可连续选择。' : '可让 AI 从语义分析整份原文，也可人工修改局部标注。' }}</small></span><div class="speaker-correction-guide-actions"><em>修订 {{ selected?.speakerCorrectionRevision || 0 }}</em><button v-if="!speakerEditMode" type="button" class="ai-correction-button" :disabled="startingAiSpeakerCorrection || aiSpeakerCorrectionRunning" @click="startAiSpeakerCorrection">{{ startingAiSpeakerCorrection || aiSpeakerCorrectionRunning ? 'AI 分析中…' : aiSpeakerCorrection && ['READY', 'APPLIED', 'FAILED', 'STALE'].includes(aiSpeakerCorrection.run.status) ? '重新 AI 分析' : 'AI 校正' }}</button><button v-if="!speakerEditMode" type="button" :disabled="speakerCorrectionBlocked" @click="enterSpeakerEditMode">修改说话人</button><button v-else type="button" class="finish" :disabled="savingSpeakerCorrection" @click="finishSpeakerEditMode">完成</button></div></div>
+            <section v-if="aiSpeakerCorrection" class="ai-correction-panel" :class="aiSpeakerCorrection.run.status.toLowerCase()" aria-label="AI 说话人校正建议">
+              <header><span><b>AI 语义校正</b><small>{{ aiSpeakerCorrection.run.modelId }} · {{ aiSpeakerCorrection.run.templateVersion }}</small></span><em>{{ ({ QUEUED: '等待分析', RUNNING: '正在分析', READY: '等待确认', APPLIED: '已应用', FAILED: '分析失败', STALE: '结果已过期' } as Record<string, string>)[aiSpeakerCorrection.run.status] }}</em></header>
+              <p v-if="aiSpeakerCorrectionRunning" class="ai-correction-state">AI 正在对照相邻发言和说话人语义，完成后会在这里显示建议；期间仍可使用人工校正。</p>
+              <p v-else-if="aiSpeakerCorrection.run.status === 'FAILED'" class="ai-correction-state error">{{ aiSpeakerCorrection.run.failureMessage || 'AI 分析失败，请重新尝试。' }}</p>
+              <p v-else-if="aiSpeakerCorrection.run.status === 'STALE'" class="ai-correction-state">说话人标注已在分析后发生变化，这批建议不能再应用，请重新分析。</p>
+              <p v-else-if="aiSpeakerCorrection.run.status === 'APPLIED'" class="ai-correction-state success">所选建议已经应用。你仍可以继续人工校正或重新运行 AI 分析。</p>
+              <p v-else-if="aiSpeakerCorrection.run.status === 'READY' && !aiSpeakerCorrection.suggestions.length" class="ai-correction-state success">AI 没有发现足够确定的说话人标注问题。</p>
+              <template v-else-if="aiSpeakerCorrection.run.status === 'READY'">
+                <div class="ai-correction-summary"><span>发现 {{ aiSpeakerCorrection.suggestions.length }} 条建议<small v-if="aiSpeakerCorrection.run.rejectedCount"> · 已过滤 {{ aiSpeakerCorrection.run.rejectedCount }} 条不安全输出</small></span><button type="button" @click="selectHighConfidenceAiSuggestions">只选高置信</button></div>
+                <article v-for="suggestion in aiSpeakerCorrection.suggestions" :key="suggestion.id" class="ai-suggestion" :class="{ selected: selectedAiSuggestionIds.includes(suggestion.id) }">
+                  <label><input type="checkbox" :checked="selectedAiSuggestionIds.includes(suggestion.id)" @change="toggleAiSuggestion(suggestion.id)"><span><b>{{ suggestion.type === 'SPLIT' ? '建议拆分说话人' : '建议改派说话人' }}</b><small>置信度 {{ Math.round(suggestion.confidence * 100) }}% · {{ suggestion.reason }}</small></span></label>
+                  <div class="ai-suggestion-original"><em>原标注</em><b :style="{ color: speakerColor(suggestion.originalSpeakerId) }">{{ speakerName(suggestion.originalSpeakerId) }}</b><time>{{ timecode(suggestion.originalStartMs) }}</time><p>{{ suggestion.originalText }}</p></div>
+                  <div v-if="suggestion.type === 'RELABEL'" class="ai-suggestion-proposal"><em>建议</em><b :style="{ color: speakerColor(suggestion.targetSpeakerId) }">{{ speakerName(suggestion.targetSpeakerId) }}</b><p>{{ suggestion.originalText }}</p></div>
+                  <div v-else class="ai-split-proposal"><article v-for="(part, partIndex) in proposalParts(suggestion)" :key="partIndex"><span><b :style="{ color: speakerColor(part.speakerId) }">{{ speakerName(part.speakerId) }}</b><time>{{ timecode(part.startMs) }}</time><small v-if="part.timingSource === 'PROPORTIONAL'">估算时间</small></span><p>{{ part.text }}</p></article></div>
+                </article>
+                <footer><span>已选 {{ selectedAiSuggestionCount }} 条；低置信建议默认不选。</span><button type="button" :disabled="!selectedAiSuggestionCount || applyingAiSpeakerCorrection || speakerCorrectionBlocked" @click="applyAiSpeakerCorrections">{{ applyingAiSpeakerCorrection ? '正在应用…' : '应用所选' }}</button></footer>
+              </template>
+            </section>
             <p v-if="selected?.organizedDocument?.status === 'STALE'" class="speaker-correction-notice">说话人标注已经修改。旧正式文档、摘要和知识索引已停用，请重新生成正式文档。</p>
             <div v-if="speakerEditMode" class="speaker-correction-toolbar" role="region" aria-label="批量修改所选句子的说话人"><b>{{ selectedSegmentIds.length ? `已选 ${selectedSegmentIds.length} 句` : '点击下方句子进行选择' }}</b><select v-model="speakerCorrectionTarget" :disabled="!selectedSegmentIds.length || savingSpeakerCorrection || speakerCorrectionBlocked"><option value="">选择正确的说话人</option><option v-for="speaker in speakers" :key="speaker.speakerId" :value="speaker.speakerId">{{ speaker.displayName || speaker.speakerId }}</option></select><button type="button" :disabled="!speakerCorrectionTarget || !selectedSegmentIds.length || savingSpeakerCorrection || speakerCorrectionBlocked" @click="applySelectedSpeakerCorrection">{{ savingSpeakerCorrection ? '保存中…' : '应用修改' }}</button><button type="button" class="speaker-reset" :disabled="!selectedSegmentIds.length || savingSpeakerCorrection || speakerCorrectionBlocked" @click="resetSelectedSpeakerCorrections">重置所选</button><button type="button" class="text-action" :disabled="!selectedSegmentIds.length || savingSpeakerCorrection" @click="clearSegmentSelection">清除选择</button></div>
-            <p v-if="speakerCorrectionBlocked" class="speaker-correction-notice">正式文档或知识索引正在处理，完成后才能修改说话人。</p>
+            <p v-if="speakerCorrectionBlocked" class="speaker-correction-notice">正式文档、摘要或知识索引正在处理，完成后才能应用说话人修改。</p>
             <p v-if="speakerCorrectionMessage" class="speaker-correction-feedback success" role="status">{{ speakerCorrectionMessage }}</p>
             <p v-if="speakerCorrectionError" class="speaker-correction-feedback error" role="alert">{{ speakerCorrectionError }}</p>
-            <article v-for="segment in segments" :key="segment.id" :id="`segment-${segment.id}`" class="segment" :class="{ editing: speakerEditMode, selected: selectedSegmentIds.includes(segment.id), corrected: segment.speakerCorrected }" :role="speakerEditMode ? 'option' : 'button'" :aria-selected="speakerEditMode ? selectedSegmentIds.includes(segment.id) : undefined" tabindex="0" @click="handleSegmentClick(segment, $event)" @keydown="handleSegmentKeydown(segment, $event)">
+            <p v-if="aiSpeakerCorrectionError" class="speaker-correction-feedback error" role="alert">{{ aiSpeakerCorrectionError }}</p>
+            <article v-for="segment in segments" :key="segment.id" :id="`segment-${segment.id}`" class="segment" :class="{ editing: speakerEditMode, selected: selectedSegmentIds.includes(segment.id), corrected: segment.correctionSource !== 'ASR' || segment.parentSegmentId }" :role="speakerEditMode ? 'option' : 'button'" :aria-selected="speakerEditMode ? selectedSegmentIds.includes(segment.id) : undefined" tabindex="0" @click="handleSegmentClick(segment, $event)" @keydown="handleSegmentKeydown(segment, $event)">
               <div class="segment-marker"><span v-if="speakerEditMode" class="selection-indicator" aria-hidden="true">{{ selectedSegmentIds.includes(segment.id) ? '✓' : '' }}</span><time>{{ timecode(segment.startMs) }}</time></div>
-              <div class="segment-copy"><b :style="{ color: speakerColor(segment.speakerId) }">{{ segment.speaker || '说话人' }}</b><small v-if="segment.speakerCorrected" class="corrected-badge">已人工修正 · 原标注 {{ speakerName(segment.asrSpeakerId) }}</small><p>{{ segment.text }}</p></div>
+              <div class="segment-copy"><b :style="{ color: speakerColor(segment.speakerId) }">{{ segment.speaker || '说话人' }}</b><small v-if="segment.correctionSource === 'HUMAN'" class="corrected-badge">已人工修正 · 原标注 {{ speakerName(segment.asrSpeakerId) }}</small><small v-else-if="segment.correctionSource === 'AI'" class="corrected-badge ai">{{ segment.parentSegmentId ? 'AI 拆分' : 'AI 修正' }} · 原标注 {{ speakerName(segment.asrSpeakerId) }}</small><small v-else-if="segment.parentSegmentId" class="corrected-badge">拆分片段 · 已恢复原标注</small><small v-if="segment.timingSource === 'PROPORTIONAL'" class="corrected-badge estimated">估算时间</small><p>{{ segment.text }}</p></div>
               <button class="segment-preview" type="button" :aria-label="`试听 ${timecode(segment.startMs)} 的原声`" @click.stop="seekToSegment(segment)" @keydown.stop><span>{{ speakerEditMode ? '试听' : '播放' }}</span><i aria-hidden="true">↗</i></button>
             </article>
             <div v-if="documentLoading && !segments.length" class="content-empty"><span aria-hidden="true">…</span><b>正在读取原始文档…</b><p>正在加载说话人和时间戳信息。</p></div>

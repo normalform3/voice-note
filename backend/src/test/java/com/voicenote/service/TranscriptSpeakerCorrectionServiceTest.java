@@ -117,6 +117,49 @@ class TranscriptSpeakerCorrectionServiceTest {
         verify(segments, never()).saveAll(any());
     }
 
+    @Test
+    void appliesAnAiSplitWithoutDeletingTheAsrSegment() {
+        TranscriptionTask task = readyTask();
+        TranscriptSegment segment = new TranscriptSegment(task.getId(), task.getTranscriptVersion(), 0, "SPEAKER_0", 0, 2_000, "你好我来回答");
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(segments.findAllById(any())).thenReturn(List.of(segment));
+        when(speakers.findByTranscriptionTaskIdAndTranscriptVersionOrderByAsrSpeakerId(task.getId(), task.getTranscriptVersion())).thenReturn(List.of(
+                new TranscriptSpeaker(task.getId(), task.getTranscriptVersion(), "SPEAKER_0"),
+                new TranscriptSpeaker(task.getId(), task.getTranscriptVersion(), "SPEAKER_1")));
+        when(pipeline.invalidateForSpeakerCorrection(task.getId())).thenReturn(1);
+
+        var result = service.applyAi("owner", task.getId(), List.of(new TranscriptSpeakerCorrectionService.AiCorrection(segment.getId(),
+                SpeakerCorrectionSuggestionType.SPLIT, null, List.of(
+                new TranscriptSpeakerCorrectionService.AiFragment(0, 2, "SPEAKER_0", 0, 700, SegmentTimingSource.WORD_ALIGNED),
+                new TranscriptSpeakerCorrectionService.AiFragment(2, 6, "SPEAKER_1", 800, 2_000, SegmentTimingSource.WORD_ALIGNED)
+        ))), 0);
+
+        assertThat(result.splitSegmentCount()).isEqualTo(1);
+        assertThat(segment.isActive()).isFalse();
+        var saved = org.mockito.ArgumentCaptor.forClass(List.class);
+        verify(segments).saveAll(saved.capture());
+        assertThat(saved.getValue()).hasSize(3);
+        assertThat(((TranscriptSegment) saved.getValue().get(1)).getTextContent()).isEqualTo("你好");
+        assertThat(((TranscriptSegment) saved.getValue().get(2)).getEffectiveSpeakerId()).isEqualTo("SPEAKER_1");
+    }
+
+    @Test
+    void refusesToOverwriteAHumanCorrectionWithAi() {
+        TranscriptionTask task = readyTask();
+        TranscriptSegment segment = new TranscriptSegment(task.getId(), task.getTranscriptVersion(), 0, "SPEAKER_0", 0, 1_000, "hello");
+        segment.correctSpeaker("SPEAKER_1");
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(segments.findAllById(any())).thenReturn(List.of(segment));
+        when(speakers.findByTranscriptionTaskIdAndTranscriptVersionOrderByAsrSpeakerId(task.getId(), task.getTranscriptVersion())).thenReturn(List.of(
+                new TranscriptSpeaker(task.getId(), task.getTranscriptVersion(), "SPEAKER_0"),
+                new TranscriptSpeaker(task.getId(), task.getTranscriptVersion(), "SPEAKER_1")));
+
+        assertThatThrownBy(() -> service.applyAi("owner", task.getId(), List.of(new TranscriptSpeakerCorrectionService.AiCorrection(
+                segment.getId(), SpeakerCorrectionSuggestionType.RELABEL, "SPEAKER_0", List.of())), 0))
+                .isInstanceOf(ApiException.class).hasMessageContaining("cannot overwrite");
+        verify(segments, never()).saveAll(any());
+    }
+
     private TranscriptionTask readyTask() {
         TranscriptionTask task = new TranscriptionTask("owner", "audio", "a".repeat(64), "pipeline");
         task.nextTranscriptVersion(); task.transcriptPersisted(); task.awaitFormalDocument();
