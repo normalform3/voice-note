@@ -19,11 +19,19 @@ public class AgentExecutionContext {
     private final Set<String> searched = new LinkedHashSet<>();
     private final List<String> limitations = new ArrayList<>();
     private final Instant deadline;
+    private final String conversationContext;
+    private final boolean memoryEnabled;
 
     public AgentExecutionContext(String runId, String ownerId, AgentScopeType scopeType, ZoneId timeZone, AgentSkill skill,
                                  List<ScopeDocument> documents, Instant deadline) {
         this.runId = runId; this.ownerId = ownerId; this.scopeType = scopeType; this.timeZone = timeZone; this.skill = skill;
-        this.documents = List.copyOf(documents); this.deadline = deadline;
+        this.documents = List.copyOf(documents); this.deadline = deadline; this.conversationContext = null; this.memoryEnabled = false;
+    }
+    public AgentExecutionContext(String runId, String ownerId, AgentScopeType scopeType, ZoneId timeZone, AgentSkill skill,
+                                 List<ScopeDocument> documents, Instant deadline, String conversationContext, boolean memoryEnabled) {
+        this.runId = runId; this.ownerId = ownerId; this.scopeType = scopeType; this.timeZone = timeZone; this.skill = skill;
+        this.documents = List.copyOf(documents); this.deadline = deadline; this.conversationContext = conversationContext;
+        this.memoryEnabled = memoryEnabled;
     }
     public String runId() { return runId; }
     public String ownerId() { return ownerId; }
@@ -33,6 +41,8 @@ public class AgentExecutionContext {
     public List<ScopeDocument> documents() { return documents; }
     public AgentEvidenceLedger evidence() { return evidence; }
     public Instant deadline() { return deadline; }
+    public String conversationContext() { return conversationContext; }
+    public boolean memoryEnabled() { return memoryEnabled; }
     public void markOverviewed(Collection<String> taskIds) { overviewed.addAll(taskIds); }
     public void markSearched(Collection<String> taskIds) { searched.addAll(taskIds); }
     public boolean hasOverviewedAllDocuments() { return documents.stream().allMatch(value -> overviewed.contains(value.taskId())); }

@@ -25,6 +25,7 @@ voicenote 是一个面向会议、访谈与面试的 AI 音频知识库。它把
 | 个人知识库 | 将确认后的正式文档按 Topic 建立版本化索引，保留每次构建状态。 |
 | 证据化问答 | 围绕当前录音、选定资料或全部已入库资料提问，并从结论回到原文和音频。 |
 | Skill 与工具权限 | 使用内置或私人 Skill 约束任务、结果结构和可调用的只读工具。 |
+| Agent 会话与记忆 | 在固定资料范围内继续追问；长期记忆必须由用户确认，并可随时编辑或删除。 |
 | 可观察执行 | 查看听记阶段、Agent 工具调用和 Checkpoint；可重试阶段或从稳定状态创建子 Run。 |
 
 ## 产品流程
@@ -99,7 +100,7 @@ flowchart LR
     Api -->|"SSE / 查询结果"| Browser
     Api --> Auth["JWT 用户隔离"]
     Api --> Minio["MinIO：原始音频"]
-    Api --> Mysql["MySQL：任务、文档、索引版本、Agent Run"]
+    Api --> Mysql["MySQL：任务、会话、记忆、索引版本、Agent Run"]
 
     Mysql --> Outbox["事务 Outbox"]
     Outbox -->|"可选 RocketMQ 或进程内发布"| Workers["异步流水线 Worker"]
@@ -127,7 +128,8 @@ MySQL 保存任务和版本的权威状态；RocketMQ 负责至少一次投递�
 | 持久化异步流水线 | 让任务状态、投递、消费和阶段重试可以恢复与审计。 |
 | 人审说话人校正 | AI 只生成受约束的建议，版本冲突或人工修改会阻止旧建议覆盖新结果。 |
 | 版本化知识索引 | 新索引完整可用后才切换活动版本，失败构建不会影响当前检索。 |
-| 有界证据 Agent | 冻结文档范围与 Skill，在工具和预算边界内执行，并由服务端复核引用。 |
+| 有界证据 Agent | 会话冻结文档身份、时区与 Skill；每轮重新冻结当前内容版本，并由服务端复核引用。 |
+| 用户可控记忆 | 短期历史留在会话内，长期候选经用户确认后才可按需检索；MySQL 始终是权威来源。 |
 
 <details>
 <summary><strong>三层上传幂等：避免重复转写</strong></summary>
@@ -187,7 +189,9 @@ AI 校正 Run 冻结转写版本、修订号和原文快照哈希。Worker 只�
 <details>
 <summary><strong>有界证据 Agent：范围、权限、预算和引用均可验证</strong></summary>
 
-每次提问创建独立 Run，并冻结用户、授权文档、活动索引版本、时区和 Skill。模型只能选择允许的只读 Tool，不能提交 ownerId 或扩大范围；Run 同时受模型调用、回合、工具次数、活动时间和输出大小限制。
+每个会话冻结用户、文档身份、时区和首次选定的 Skill；每轮提问仍创建独立 Run，并重新冻结这些文档当前可用的转写或索引版本。模型只能选择允许的只读 Tool，不能提交 ownerId 或扩大范围；Run 同时受模型调用、回合、工具次数、活动时间和输出大小限制。
+
+会话短期上下文由滚动摘要和最近 Turn 组成，只用于指代与任务连续性。长期记忆只从用户消息提取候选，用户确认后才进入 MySQL；Agent 仅在需要时调用 `user_memory_search`，Qdrant 命中还会按当前用户、有效状态和当前版本回查 MySQL。
 
 Tool 读取的来源先进入持久化证据账本。最终回答只接受账本内的 `sourceRef`，完成事务会再次复核文档、索引版本、Chunk、Segment 和结果结构；稳定 Checkpoint 可用于恢复或创建保留剩余预算的子 Run。
 
@@ -195,6 +199,9 @@ Tool 读取的来源先进入持久化证据账本。最终回答只接受账本
 
 - [AgentRuntime](backend/src/main/java/com/voicenote/service/AgentRuntime.java)：执行版本化状态机、Tool Call、预算和终止条件。
 - [KnowledgeAgentService](backend/src/main/java/com/voicenote/service/KnowledgeAgentService.java)：保存范围快照、Step、Checkpoint 与证据账本。
+- [AgentConversationService](backend/src/main/java/com/voicenote/service/AgentConversationService.java)：锁定会话范围并串行创建 Turn。
+- [UserMemoryService](backend/src/main/java/com/voicenote/service/UserMemoryService.java)：执行候选过滤、确认、版本、删除和 MySQL 复核。
+- [Agent 记忆设计](docs/agent-memory.md)：说明短期摘要、长期记忆生命周期、配置与安全边界。
 - [FinalizeAnswerTool](backend/src/main/java/com/voicenote/agent/tools/FinalizeAnswerTool.java)：约束结果结构和来源引用。
 - [SkillService](backend/src/main/java/com/voicenote/service/SkillService.java)：管理私人 Draft、发布版本、触发预览和所有者隔离。
 - [Agent 评测说明](docs/agent-evaluation.md)：说明脱敏评测集、结果格式和指标计算。
@@ -237,6 +244,7 @@ npm run dev
 | ASR、Chat 与 Embedding | `DASHSCOPE_ENABLED=true`，设置 `DASHSCOPE_API_KEY`。 |
 | 知识索引 | `VOICENOTE_KNOWLEDGE_ENABLED=true`，并配置 `VOICENOTE_QDRANT_URL`。 |
 | 自主 Agent | `VOICENOTE_AGENT_ENABLED=true`。默认 7 次模型调用、6 个回合、10 次工具调用和 120 秒。 |
+| Agent 记忆 | `VOICENOTE_MEMORY_ENABLED=true`。默认关闭；启用后使用独立 Qdrant collection，候选仍需用户确认。 |
 | 文本 Rerank | `VOICENOTE_RERANK_ENABLED=true`。失败时降级为 RRF 并在结果中披露。 |
 | 只读 MCP | `VOICENOTE_MCP_ENABLED=true`，通过 `VOICENOTE_MCP_SERVERS` 配置服务、认证变量名、只读工具和允许的内置 Skill。 |
 
@@ -283,7 +291,7 @@ npm run build
 
 - 项目仍处于开发阶段；外部 ASR、模型、Qdrant 和 RocketMQ 需要按环境启用，仓库不包含 Docker Compose 或生产部署配置。
 - 账号密码登录与 JWT 用户隔离已经实现，但项目不是具备组织、角色和权限管理的多租户后台。
-- Agent 由 `VOICENOTE_AGENT_ENABLED` 灰度启用；每个问题互相独立，目前没有会话记忆。
+- Agent 由 `VOICENOTE_AGENT_ENABLED` 灰度启用；会话短期上下文和长期记忆由独立的 `VOICENOTE_MEMORY_ENABLED` 灰度控制，长期记忆不支持团队共享。
 - 私人 Skill 仅创建者可见，不支持导入导出、组织共享或市场；私人 Skill 只能使用平台允许的本地只读工具。
 - MCP 仅支持部署环境配置、由内置 Skill 声明的只读工具。
 - 转写、检索和问答质量仍需在目标模型与脱敏业务数据上评估；README 不声明未复现的质量指标。

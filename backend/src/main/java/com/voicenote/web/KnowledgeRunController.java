@@ -7,6 +7,7 @@ import com.voicenote.repository.KnowledgeRunEvidenceRepository;
 import com.voicenote.repository.TranscriptSegmentRepository;
 import com.voicenote.repository.TranscriptSpeakerRepository;
 import com.voicenote.repository.KnowledgeChunkRepository;
+import com.voicenote.repository.KnowledgeRunSourceRepository;
 import com.voicenote.security.UserPrincipal;
 import com.voicenote.service.KnowledgeAgentService;
 import jakarta.validation.Valid;
@@ -24,9 +25,10 @@ public class KnowledgeRunController {
     private final TranscriptSegmentRepository segments;
     private final TranscriptSpeakerRepository speakers;
     private final KnowledgeChunkRepository chunks;
+    private final KnowledgeRunSourceRepository sources;
     public KnowledgeRunController(KnowledgeAgentService runs, KnowledgeRunEvidenceRepository evidence, KnowledgeDocumentRepository documents, TranscriptSegmentRepository segments,
-                                  TranscriptSpeakerRepository speakers, KnowledgeChunkRepository chunks) {
-        this.runs = runs; this.evidence = evidence; this.documents = documents; this.segments = segments; this.speakers = speakers; this.chunks = chunks;
+                                  TranscriptSpeakerRepository speakers, KnowledgeChunkRepository chunks, KnowledgeRunSourceRepository sources) {
+        this.runs = runs; this.evidence = evidence; this.documents = documents; this.segments = segments; this.speakers = speakers; this.chunks = chunks; this.sources = sources;
     }
     @PostMapping KnowledgeAgentService.KnowledgeRunView create(@RequestHeader("Idempotency-Key") String key, @Valid @RequestBody CreateKnowledgeRunRequest request, Authentication authentication) {
         return KnowledgeAgentService.KnowledgeRunView.from(runs.create(CurrentUser.require(authentication).id(), key, request.question()));
@@ -42,14 +44,20 @@ public class KnowledgeRunController {
         var segment = value.getTranscriptSegmentId() == null ? null : segments.findById(value.getTranscriptSegmentId()).orElse(null);
         var speaker = segment == null ? null : speakers.findByTranscriptionTaskIdAndTranscriptVersionAndAsrSpeakerId(segment.getTranscriptionTaskId(), segment.getTranscriptVersion(), segment.getEffectiveSpeakerId()).orElse(null);
         String topic = value.getKnowledgeChunkId() == null ? null : chunks.findById(value.getKnowledgeChunkId()).map(com.voicenote.domain.KnowledgeChunk::getTopicTitle).orElse(null);
+        String memoryText = value.getUserMemoryContentSnapshot();
+        if (memoryText == null && value.getSourceKind() == EvidenceSourceKind.USER_MEMORY && value.getSourceRef() != null) {
+            memoryText = sources.findByKnowledgeRunIdAndSourceRef(value.getKnowledgeRunId(), value.getSourceRef())
+                    .map(source -> source.toEvidenceSource().text()).orElse(null);
+        }
         return new EvidenceView(value.getResultPath(), value.getSourceKind(), value.getSourceRef(), value.getKnowledgeDocumentId(), value.getKnowledgeChunkId(), taskId, value.getTranscriptSegmentId(), topic,
                 segment == null ? null : segment.getEffectiveSpeakerId(), speaker == null ? null : speaker.getResolvedRole().name(), speaker == null ? null : speaker.getDisplayName(),
-                segment == null ? null : segment.getStartMs(), segment == null ? null : segment.getEndMs(), segment == null ? null : segment.getTextContent(),
-                value.getExternalLabel(), value.getExternalUrl());
+                segment == null ? null : segment.getStartMs(), segment == null ? null : segment.getEndMs(), segment == null ? memoryText : segment.getTextContent(),
+                value.getUserMemoryId(), value.getUserMemoryVersionId(), value.getExternalLabel(), value.getExternalUrl());
     }
     public record CreateKnowledgeRunRequest(@NotBlank String question) { }
     public record KnowledgeRunDetail(KnowledgeAgentService.KnowledgeRunView run, List<EvidenceView> evidence) { }
     public record EvidenceView(String resultPath, EvidenceSourceKind sourceKind, String sourceRef, String documentId, String chunkId,
                                String transcriptionTaskId, String segmentId, String topic, String speakerId, String role, String speaker,
-                               Long startMs, Long endMs, String text, String externalLabel, String externalUrl) { }
+                               Long startMs, Long endMs, String text, String memoryId, String memoryVersionId,
+                               String externalLabel, String externalUrl) { }
 }

@@ -29,6 +29,7 @@ public class AgentToolRegistry {
         LinkedHashSet<String> names = new LinkedHashSet<>(skill.allowedTools());
         if (skill.source() == SkillSource.USER) names.retainAll(USER_GRANTABLE);
         else tools.forEach((name, tool) -> { if (tool.allowedSkillIds().contains(skill.id())) names.add(name); });
+        if (tools.containsKey("user_memory_search")) names.add("user_memory_search");
         return names.stream().filter(name -> !finalOnly || name.equals("finalize_answer")).map(this::require).toList();
     }
 }

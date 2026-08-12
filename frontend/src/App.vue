@@ -4,7 +4,7 @@ import AgentResultBlocks from './AgentResult.vue'
 import ProfilePage from './ProfilePage.vue'
 import SkillManager from './SkillManager.vue'
 import ToolsCenter from './ToolsCenter.vue'
-import { api, hashFile, isSessionExpiredError, key, SESSION_EXPIRED_EVENT, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentCapabilities, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AgentStep, type AgentStepDetail, type AiSpeakerCorrectionApplyResult, type AiSpeakerCorrectionDetail, type AiSpeakerCorrectionSuggestion, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PipelineStage, type Segment, type Speaker, type SpeakerCorrectionProposalPart, type SpeakerCorrectionResult, type Task, type WorkspaceSnapshot } from './api'
+import { api, hashFile, isSessionExpiredError, key, SESSION_EXPIRED_EVENT, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentCapabilities, type AgentConversation, type AgentConversationDetail, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AgentStep, type AgentStepDetail, type AiSpeakerCorrectionApplyResult, type AiSpeakerCorrectionDetail, type AiSpeakerCorrectionSuggestion, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PageResult, type PipelineStage, type Segment, type Speaker, type SpeakerCorrectionProposalPart, type SpeakerCorrectionResult, type Task, type WorkspaceSnapshot } from './api'
 
 type WorkspaceView = 'library' | 'document' | 'skills' | 'tools' | 'profile'
 type DetailTab = 'transcript' | 'summary' | 'organized'
@@ -20,6 +20,11 @@ const documents = ref<KnowledgeDocument[]>([])
 const runs = ref<KnowledgeRun[]>([])
 const agentRuns = ref<AgentRun[]>([])
 const agent = ref<AgentRunDetail | null>(null)
+const conversations = ref<AgentConversation[]>([])
+const activeConversation = ref<AgentConversationDetail | null>(null)
+const conversationMemoryEnabled = ref(true)
+const conversationActionError = ref('')
+const pendingMemoryCandidateCount = ref(0)
 const activeStepId = ref<string | null>(null)
 const activeStepDetail = ref<AgentStepDetail | null>(null)
 const stepDetailLoading = ref(false)
@@ -100,7 +105,8 @@ const isSkillsView = computed(() => workspaceView.value === 'skills')
 const isToolsView = computed(() => workspaceView.value === 'tools')
 const isProfileView = computed(() => workspaceView.value === 'profile')
 const isUtilityView = computed(() => isSkillsView.value || isToolsView.value || isProfileView.value)
-const agentScopeType = computed<AgentScopeType>(() => isDocumentView.value ? 'CURRENT_DOCUMENT' : libraryScope.value === 'selected' ? 'SELECTED_DOCUMENTS' : 'ALL_DOCUMENTS')
+const agentScopeType = computed<AgentScopeType>(() => activeConversation.value?.conversation.scopeType
+  || (isDocumentView.value ? 'CURRENT_DOCUMENT' : libraryScope.value === 'selected' ? 'SELECTED_DOCUMENTS' : 'ALL_DOCUMENTS'))
 const selectedDocument = computed(() => documents.value.find(document => document.transcriptionTaskId === selected.value?.id))
 const knowledgeBuild = computed<KnowledgeIndexBuild | undefined>(() => selectedDocument.value?.currentBuild || selected.value?.knowledgeDocument?.currentBuild)
 const organizedTopics = computed(() => organized.value?.blocks.filter(block => block.type === 'TOPIC') || [])
@@ -113,6 +119,7 @@ const canSummarize = computed(() => selected.value?.organizedDocument?.status ==
 const canCreateFormalDocument = computed(() => selected.value?.status === 'WAITING_FOR_FORMAL_DOCUMENT' && (!selected.value?.organizedDocument || selected.value.organizedDocument.status === 'STALE'))
 const canCreateKnowledgeBuild = computed(() => selected.value?.status === 'WAITING_FOR_KNOWLEDGE_BUILD' && selected.value?.organizedDocument?.status === 'READY')
 const activeRun = computed(() => agent.value?.run)
+const conversationLocked = computed(() => Boolean(activeConversation.value))
 const activeEvidence = computed(() => agent.value?.evidence || [])
 const activeRunTerminal = computed(() => Boolean(activeRun.value && !['PENDING', 'QUEUED', 'RUNNING'].includes(activeRun.value.status)))
 const initialReplayCheckpoint = computed(() => agent.value?.checkpoints?.find(checkpoint => !checkpoint.stepId && checkpoint.replayable))
@@ -190,6 +197,13 @@ function parseResultDocument(raw?: string) {
   if (!raw) return null
   try { return JSON.parse(raw) as AgentResultDocument }
   catch { return { answer: raw, findings: [] } }
+}
+function conversationTurnAnswer(raw?: string) {
+  const result = parseResultDocument(raw)
+  if (!result) return 'Agent 正在处理…'
+  if (result.answer) return result.answer
+  const first = result.blocks?.find(block => block.content || block.items?.length)
+  return first?.content || first?.items?.[0]?.content || '已生成结构化结果'
 }
 function taskTitle(task: Task) {
   return task.subject || documents.value.find(document => document.transcriptionTaskId === task.id)?.title
@@ -288,7 +302,7 @@ async function authenticate() {
 async function loadWorkspace() {
   if (workspaceRequest) return workspaceRequest
   workspaceLoading.value = true
-  workspaceRequest = Promise.all([loadTasks(), loadDocuments(), loadRuns(), loadAnalysisRuns(), loadAgentRuns(), loadAgentSkills(), loadAgentCapabilities()])
+  workspaceRequest = Promise.all([loadTasks(), loadDocuments(), loadRuns(), loadAnalysisRuns(), loadAgentRuns(), loadAgentConversations(), loadPendingMemoryCount(), loadAgentSkills(), loadAgentCapabilities()])
     .then(() => { workspaceLoadError.value = '' })
     .catch((error) => {
       workspaceLoadError.value = isSessionExpiredError(error)
@@ -313,6 +327,22 @@ async function loadDocuments() { const { data } = await api.get<KnowledgeDocumen
 async function loadRuns() { const { data } = await api.get<KnowledgeRun[]>('/knowledge-runs'); runs.value = data }
 async function loadAnalysisRuns() { const { data } = await api.get<AnalysisRun[]>('/analysis-runs'); analysisRuns.value = data }
 async function loadAgentRuns() { const { data } = await api.get<AgentRun[]>('/agent-runs'); agentRuns.value = data }
+async function loadAgentConversations() {
+  if (agentCapabilities.value && !agentCapabilities.value.memoryEnabled) { conversations.value = []; return }
+  const { data } = await api.get<PageResult<AgentConversation>>('/agent-conversations', { params: { page: 0, size: 20 } })
+  conversations.value = data.content
+}
+async function loadConversationDetail(conversationId: string) {
+  const { data } = await api.get<AgentConversationDetail>(`/agent-conversations/${conversationId}`)
+  activeConversation.value = data
+  conversationMemoryEnabled.value = data.conversation.memoryEnabled
+  return data
+}
+async function loadPendingMemoryCount() {
+  if (!agentCapabilities.value?.memoryEnabled && agentCapabilities.value != null) { pendingMemoryCandidateCount.value = 0; return }
+  const { data } = await api.get<unknown[]>('/user-memory-candidates', { params: { status: 'PENDING' } })
+  pendingMemoryCandidateCount.value = data.length
+}
 async function loadAgentSkills() {
   const { data } = await api.get<AgentSkill[]>('/agent-runs/skills'); agentSkills.value = data
   if (selectedSkillId.value && !data.some(value => value.id === selectedSkillId.value)) {
@@ -320,9 +350,15 @@ async function loadAgentSkills() {
   }
 }
 async function refreshSkillCatalog() { try { await loadAgentSkills() } catch { /* Skill page keeps its own visible error state. */ } }
-async function loadAgentCapabilities() { const { data } = await api.get<AgentCapabilities>('/agent-runs/capabilities'); agentCapabilities.value = data }
+async function loadAgentCapabilities() {
+  const { data } = await api.get<AgentCapabilities>('/agent-runs/capabilities')
+  agentCapabilities.value = data
+  if (!data.memoryEnabled) conversationMemoryEnabled.value = false
+}
 async function choose(task: Task) {
   agent.value = null
+  activeConversation.value = null
+  conversationActionError.value = ''
   selected.value = task
   workspaceView.value = 'document'
   detailTab.value = 'transcript'
@@ -691,21 +727,47 @@ async function createKnowledgeBuild() {
 }
 async function askAgent() {
   if (!question.value.trim() || !agentCapabilities.value?.enabled) return
+  const message = question.value.trim()
   asking.value = true
+  conversationActionError.value = ''
   try {
     if (agentScopeType.value === 'CURRENT_DOCUMENT' && !selected.value?.transcriptReady) return
     if (agentScopeType.value === 'SELECTED_DOCUMENTS' && !selectedTaskIds.value.length) return
     const transcriptionTaskIds = agentScopeType.value === 'CURRENT_DOCUMENT' ? [selected.value!.id]
       : agentScopeType.value === 'SELECTED_DOCUMENTS' ? selectedTaskIds.value : []
-    const { data } = await api.post<AgentRun>('/agent-runs', {
-      question: question.value, scope: { type: agentScopeType.value, transcriptionTaskIds },
-      skillId: selectedSkillId.value || null, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
-    }, { headers: { 'Idempotency-Key': key() } })
+    let data: AgentRun
+    let conversationId: string | undefined
+    if (!agentCapabilities.value.memoryEnabled) {
+      const response = await api.post<AgentRun>('/agent-runs', {
+        question: message, scope: { type: agentScopeType.value, transcriptionTaskIds },
+        skillId: selectedSkillId.value || null, timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone
+      }, { headers: { 'Idempotency-Key': key() } })
+      data = response.data
+    } else {
+      conversationId = activeConversation.value?.conversation.id
+      if (!conversationId) {
+        const { data: created } = await api.post<AgentConversation>('/agent-conversations', {
+          scope: { type: agentScopeType.value, transcriptionTaskIds },
+          skillId: selectedSkillId.value || null,
+          timeZone: Intl.DateTimeFormat().resolvedOptions().timeZone,
+          memoryEnabled: conversationMemoryEnabled.value
+        })
+        conversationId = created.id
+        activeConversation.value = { conversation: created, transcriptionTaskIds, turns: [] }
+      }
+      const response = await api.post<AgentRun>(`/agent-conversations/${conversationId}/turns`, {
+        message
+      }, { headers: { 'Idempotency-Key': key() } })
+      data = response.data
+    }
     agent.value = { run: data, documentIds: transcriptionTaskIds, childRunIds: [], steps: [], checkpoints: [], evidence: [] }
     resetTraceSelection()
     upsertAgent(data)
+    question.value = ''
+    if (conversationId) await Promise.all([loadConversationDetail(conversationId), loadAgentConversations()])
   } catch (error: any) {
-    agent.value = { run: { id: '', question: question.value, status: 'FAILED', scopeType: agentScopeType.value, skillId: selectedSkillId.value || 'auto', skillVersion: '', scopeDocumentCount: 0,
+    conversationActionError.value = error.response?.data?.message || '无法创建或继续 Agent 会话。'
+    agent.value = { run: { id: '', question: message, status: 'FAILED', scopeType: agentScopeType.value, skillId: selectedSkillId.value || 'auto', skillVersion: '', scopeDocumentCount: 0, memoryEnabled: conversationMemoryEnabled.value,
       modelCallsUsed: 0, maxModelCalls: 0, agentTurnsUsed: 0, maxAgentTurns: 0, toolCallsUsed: 0, maxToolCalls: 0,
       failureMessage: error.response?.data?.message || '无法创建 Agent 任务', recoveryCount: 0, createdAt: new Date().toISOString() }, documentIds: [], childRunIds: [], steps: [], checkpoints: [], evidence: [] }
   } finally { asking.value = false }
@@ -713,7 +775,71 @@ async function askAgent() {
 async function loadAgentDetail(runId: string) {
   const { data } = await api.get<AgentRunDetail>(`/agent-runs/${runId}`)
   agent.value = data; resetTraceSelection(); upsertAgent(data.run)
+  if (data.run.conversationId && activeConversation.value?.conversation.id !== data.run.conversationId) {
+    await loadConversationDetail(data.run.conversationId)
+  }
   return data
+}
+function startNewConversation() {
+  activeConversation.value = null
+  agent.value = null
+  conversationActionError.value = ''
+  selectedSkillId.value = ''
+  skillSelectionNotice.value = ''
+  conversationMemoryEnabled.value = Boolean(agentCapabilities.value?.memoryEnabled)
+  question.value = ''
+}
+async function openConversation(conversation: AgentConversation) {
+  conversationActionError.value = ''
+  try {
+    const detail = await loadConversationDetail(conversation.id)
+    if (conversation.scopeType === 'CURRENT_DOCUMENT') {
+      const task = tasks.value.find(value => value.id === detail.transcriptionTaskIds[0])
+      if (task && (task.id !== selected.value?.id || !isDocumentView.value)) await choose(task)
+    } else {
+      showLibrary()
+      libraryScope.value = conversation.scopeType === 'SELECTED_DOCUMENTS' ? 'selected' : 'all'
+      selectedTaskIds.value = conversation.scopeType === 'SELECTED_DOCUMENTS' ? [...detail.transcriptionTaskIds] : selectedTaskIds.value
+    }
+    activeConversation.value = detail
+    conversationMemoryEnabled.value = detail.conversation.memoryEnabled
+    selectedSkillId.value = detail.conversation.skillId === 'auto' ? '' : detail.conversation.skillId
+    const latestRun = [...detail.turns].reverse().find(turn => turn.runId)
+    if (latestRun?.runId) await loadAgentDetail(latestRun.runId)
+    else agent.value = null
+  } catch (error: any) {
+    conversationActionError.value = error.response?.data?.message || '无法读取该会话。'
+  }
+}
+async function openConversationTurn(runId?: string) {
+  if (!runId) return
+  try { await loadAgentDetail(runId) }
+  catch (error: any) { conversationActionError.value = error.response?.data?.message || '无法读取这轮结果。' }
+}
+async function toggleConversationMemory() {
+  if (!activeConversation.value) return
+  const previous = activeConversation.value.conversation.memoryEnabled
+  try {
+    const { data } = await api.patch<AgentConversation>(`/agent-conversations/${activeConversation.value.conversation.id}`, {
+      memoryEnabled: conversationMemoryEnabled.value
+    })
+    activeConversation.value = { ...activeConversation.value, conversation: data }
+    conversations.value = conversations.value.map(value => value.id === data.id ? data : value)
+  } catch (error: any) {
+    conversationMemoryEnabled.value = previous
+    conversationActionError.value = error.response?.data?.message || '长期记忆开关更新失败。'
+  }
+}
+async function deleteActiveConversation() {
+  const current = activeConversation.value?.conversation
+  if (!current || !window.confirm('删除会话会移除其中的消息、运行轨迹和引用；已确认的长期记忆会保留。确定删除吗？')) return
+  try {
+    await api.delete(`/agent-conversations/${current.id}`)
+    startNewConversation()
+    await Promise.all([loadAgentConversations(), loadAgentRuns()])
+  } catch (error: any) {
+    conversationActionError.value = error.response?.data?.message || '会话删除失败。'
+  }
 }
 async function openLineageRun(runId: string) {
   try { await loadAgentDetail(runId) }
@@ -766,11 +892,18 @@ async function createSummary() {
   }
 }
 async function openHistory(run: AgentRun) {
-  if (run.scopeType !== 'CURRENT_DOCUMENT') { showLibrary(); await loadAgentDetail(run.id); return }
+  if (run.scopeType !== 'CURRENT_DOCUMENT') {
+    showLibrary()
+    if (!run.conversationId) activeConversation.value = null
+    await loadAgentDetail(run.id)
+    return
+  }
   const detail = await loadAgentDetail(run.id)
+  const conversation = activeConversation.value
   const task = tasks.value.find(value => value.id === detail.documentIds[0])
   if (task) await choose(task)
   agent.value = detail
+  activeConversation.value = conversation
 }
 async function seekToTime(startMs: number, play = false) {
   await ensureAudio(startMs, play)
@@ -781,10 +914,13 @@ async function seekToSegment(segment: Segment) {
 async function openEvidence(citation: { sourceRef?: string; chunkId?: string; segmentId?: string }) {
   const evidence = activeEvidence.value.find(item => citation.sourceRef ? item.sourceRef === citation.sourceRef : item.chunkId === citation.chunkId && item.segmentId === citation.segmentId)
   if (evidence?.sourceKind === 'EXTERNAL' && evidence.externalUrl) { window.open(evidence.externalUrl, '_blank', 'noopener,noreferrer'); return }
+  if (evidence?.sourceKind === 'USER_MEMORY') { window.alert(`来自你确认的记忆：${evidence.text || '该记忆已不可用'}`); return }
   if (!evidence?.segmentId) return
   const detail = agent.value
+  const conversation = activeConversation.value
   await openEvidenceForTask({ segmentId: evidence.segmentId }, evidence.transcriptionTaskId)
   agent.value = detail
+  activeConversation.value = conversation
 }
 async function openSummaryEvidence(citation?: { segmentId?: string }) {
   if (!citation?.segmentId) return
@@ -911,8 +1047,13 @@ function handleProgressEvent(name: string, payload: any) {
   if (name === 'task-stage-settled' && payload.task) { upsertTask(payload.task as Task); return }
   if (name === 'knowledge-index-progress') { void loadDocuments(); return }
   if (name === 'knowledge-run-settled' && payload.run) {
-    if (agent.value?.run.id === payload.run.id) void loadAgentDetail(payload.run.id).catch(() => loadKnowledgeDetail(payload.run.id))
-    else void loadAgentRuns()
+    if (agent.value?.run.id === payload.run.id) {
+      void loadAgentDetail(payload.run.id).then(() => Promise.all([loadAgentConversations(), activeConversation.value ? loadConversationDetail(activeConversation.value.conversation.id) : Promise.resolve()])).catch(() => loadKnowledgeDetail(payload.run.id))
+    } else void Promise.all([loadAgentRuns(), loadAgentConversations()])
+    return
+  }
+  if (name === 'user-memory-changed') {
+    void loadPendingMemoryCount()
     return
   }
   if (name === 'analysis-run-settled' && payload.run) {
@@ -1021,6 +1162,10 @@ function logout() {
   runs.value = []
   agentRuns.value = []
   agent.value = null
+  conversations.value = []
+  activeConversation.value = null
+  pendingMemoryCandidateCount.value = 0
+  conversationActionError.value = ''
   agentCapabilities.value = null
   analysisRuns.value = []
   knowledge.value = null
@@ -1087,7 +1232,7 @@ onBeforeUnmount(() => {
       <div class="topbar-meta">
         <button class="skill-nav" :class="{ active: isSkillsView }" type="button" @click="showSkills"><i>✦</i><span>Skill 设置</span></button>
         <button class="skill-nav" :class="{ active: isToolsView }" type="button" @click="showTools"><i>⌘</i><span>Tools 中心</span></button>
-        <button class="account-nav" :class="{ active: isProfileView }" type="button" @click="showProfile"><span class="account-avatar">{{ signedInInitial }}</span><span class="account-name">{{ shortSignedInAccount }}</span></button>
+        <button class="account-nav" :class="{ active: isProfileView }" type="button" @click="showProfile"><span class="account-avatar">{{ signedInInitial }}</span><span class="account-name">{{ shortSignedInAccount }}</span><em v-if="pendingMemoryCandidateCount" class="memory-count">{{ pendingMemoryCandidateCount > 99 ? '99+' : pendingMemoryCandidateCount }}</em></button>
       </div>
       <button v-if="!isUtilityView" class="mobile-agent-toggle" type="button" :aria-expanded="mobileAgentOpen" @click="toggleAgent">{{ mobileAgentOpen ? '关闭问答' : 'AI 问答' }}</button>
     </header>
@@ -1269,18 +1414,25 @@ onBeforeUnmount(() => {
     </section>
 
     <aside v-if="!isUtilityView" class="agent-rail" :class="{ 'is-open': mobileAgentOpen }">
-      <header class="agent-head"><div><p class="eyebrow">AI KNOWLEDGE</p><h3>{{ agentTitle }}</h3></div><button class="agent-close" type="button" @click="mobileAgentOpen = false" aria-label="关闭 AI 问答">×</button></header>
+      <header class="agent-head"><div><p class="eyebrow">AI KNOWLEDGE</p><h3>{{ activeConversation?.conversation.title || agentTitle }}</h3></div><div class="agent-head-actions"><button class="new-conversation" type="button" @click="startNewConversation">新会话</button><button class="agent-close" type="button" @click="mobileAgentOpen = false" aria-label="关闭 AI 问答">×</button></div></header>
       <div class="agent-mode-row"><span aria-hidden="true"></span><b>{{ agentModeLabel }}</b></div>
       <p class="agent-description">{{ agentDescription }}</p>
       <div class="agent-suggestions"><button v-for="suggestion in agentSuggestions" :key="suggestion" type="button" @click="useSuggestion(suggestion)">{{ suggestion }} <span>↗</span></button></div>
-      <div v-if="!isDocumentView" class="scope-switch" aria-label="问答范围"><button :class="{ active: libraryScope === 'all' }" @click="libraryScope = 'all'">全部已入库</button><button :class="{ active: libraryScope === 'selected' }" @click="libraryScope = 'selected'">已勾选 · {{ selectedTaskIds.length }}</button></div>
-      <label class="skill-select">任务方式<select v-model="selectedSkillId" @change="skillSelectionNotice = ''"><option value="">自动匹配 Skill（推荐）</option><optgroup label="内置 Skill"><option v-for="skill in builtInAgentSkills" :key="skill.id" :value="skill.id" :disabled="Boolean(skillCompatibilityIssue(skill))">{{ skill.displayName }} · 内置{{ skillCompatibilityIssue(skill) ? `（${skillCompatibilityIssue(skill)}）` : '' }}</option></optgroup><optgroup v-if="customAgentSkills.length" label="我的 Skill"><option v-for="skill in customAgentSkills" :key="skill.id" :value="skill.id" :disabled="Boolean(skillCompatibilityIssue(skill))">{{ skill.displayName }} · 我的{{ skillCompatibilityIssue(skill) ? `（${skillCompatibilityIssue(skill)}）` : '' }}</option></optgroup></select></label>
+      <div v-if="!isDocumentView" class="scope-switch" aria-label="问答范围"><button :class="{ active: libraryScope === 'all' }" :disabled="conversationLocked" @click="libraryScope = 'all'">全部已入库</button><button :class="{ active: libraryScope === 'selected' }" :disabled="conversationLocked" @click="libraryScope = 'selected'">已勾选 · {{ selectedTaskIds.length }}</button></div>
+      <label class="skill-select">任务方式<select v-model="selectedSkillId" :disabled="conversationLocked" @change="skillSelectionNotice = ''"><option value="">自动匹配 Skill（推荐）</option><optgroup label="内置 Skill"><option v-for="skill in builtInAgentSkills" :key="skill.id" :value="skill.id" :disabled="Boolean(skillCompatibilityIssue(skill))">{{ skill.displayName }} · 内置{{ skillCompatibilityIssue(skill) ? `（${skillCompatibilityIssue(skill)}）` : '' }}</option></optgroup><optgroup v-if="customAgentSkills.length" label="我的 Skill"><option v-for="skill in customAgentSkills" :key="skill.id" :value="skill.id" :disabled="Boolean(skillCompatibilityIssue(skill))">{{ skill.displayName }} · 我的{{ skillCompatibilityIssue(skill) ? `（${skillCompatibilityIssue(skill)}）` : '' }}</option></optgroup></select></label>
       <p v-if="skillSelectionNotice" class="skill-selection-notice">{{ skillSelectionNotice }}</p>
+      <label class="memory-toggle"><input v-model="conversationMemoryEnabled" type="checkbox" :disabled="!agentCapabilities?.memoryEnabled" @change="toggleConversationMemory"><span><b>使用并学习长期记忆</b><small>{{ agentCapabilities?.memoryEnabled ? '仅使用你确认过的记忆' : '当前部署未启用' }}</small></span></label>
+      <p v-if="conversationLocked" class="conversation-lock-note">本会话的资料范围、时区和 Skill 已锁定；切换资料请新建会话。</p>
+      <p v-if="conversationActionError" class="agent-note">{{ conversationActionError }}</p>
       <div class="ask-box"><textarea v-model="question" rows="4" :disabled="agentCapabilities?.enabled === false" :placeholder="agentPlaceholder"></textarea><div><span>{{ agentScopeType === 'CURRENT_DOCUMENT' ? '当前音频' : agentScopeType === 'SELECTED_DOCUMENTS' ? `${selectedTaskIds.length} 份已勾选` : `${indexedTaskCount} 份已入库` }}</span><button class="send-button" :disabled="agentCapabilities?.enabled !== true || asking || !question.trim() || (agentScopeType === 'CURRENT_DOCUMENT' && !canAnalyzeCurrent) || (agentScopeType === 'SELECTED_DOCUMENTS' && !selectedTaskIds.length) || (agentScopeType === 'ALL_DOCUMENTS' && !indexedTaskCount)" @click="askAgent">{{ asking ? '处理中' : '发送' }} <b>↑</b></button></div></div>
       <p v-if="agentCapabilities?.enabled === false" class="agent-note">自主 Agent 正在灰度中，请在部署环境启用 VOICENOTE_AGENT_ENABLED。</p>
       <p v-else-if="agentScopeType === 'CURRENT_DOCUMENT' && !canAnalyzeCurrent" class="agent-note">当前音频仍在转写，完成后即可提问。</p>
       <p v-else-if="agentScopeType === 'SELECTED_DOCUMENTS' && !selectedTaskIds.length" class="agent-note">请先在资料库勾选 1–50 份已收录文档。</p>
       <p v-else-if="agentScopeType === 'ALL_DOCUMENTS' && !indexedTaskCount" class="agent-note">当前没有已入库资料。请先打开一份正式文档并建立知识库。</p>
+
+      <section v-if="activeConversation?.turns.length" class="conversation-turns" aria-label="会话消息">
+        <button v-for="turn in activeConversation.turns" :key="turn.id" type="button" :class="{ active: turn.runId === activeRun?.id }" @click="openConversationTurn(turn.runId)"><span><b>你 · 第 {{ turn.turnIndex + 1 }} 轮</b><small>{{ turn.userMessage }}</small></span><p>{{ turn.failureMessage || conversationTurnAnswer(turn.resultDocument) }}</p></button>
+      </section>
 
       <section v-if="activeRun" class="result-card">
         <div class="result-head"><span>{{ activeSkillName }}</span><small>{{ statusText(activeRun.status) }} · {{ activeRunUsage }}</small></div>
@@ -1324,7 +1476,8 @@ onBeforeUnmount(() => {
         </details>
       </section>
 
-      <section v-if="visibleHistory.length" class="run-history"><p class="eyebrow">RECENT QUESTIONS</p><button v-for="run in visibleHistory.slice(0, 4)" :key="run.id" @click="openHistory(run)"><span>{{ run.question }}</span><small>{{ statusText(run.status) }}</small></button></section>
+      <section v-if="conversations.length" class="run-history conversation-history"><p class="eyebrow">RECENT CONVERSATIONS</p><button v-for="conversation in conversations.slice(0, 8)" :key="conversation.id" :class="{ active: conversation.id === activeConversation?.conversation.id }" @click="openConversation(conversation)"><span>{{ conversation.title }}</span><small>{{ conversation.status === 'ARCHIVED' ? '已归档' : formatCreatedAt(conversation.updatedAt) }}</small></button><button v-if="activeConversation" class="delete-conversation" type="button" @click="deleteActiveConversation">删除当前会话</button></section>
+      <section v-if="visibleHistory.some(run => !run.conversationId)" class="run-history"><p class="eyebrow">LEGACY RUNS</p><button v-for="run in visibleHistory.filter(run => !run.conversationId).slice(0, 4)" :key="run.id" @click="openHistory(run)"><span>{{ run.question }}</span><small>{{ statusText(run.status) }}</small></button></section>
     </aside>
   </main>
 </template>

@@ -29,4 +29,7 @@ public class OutboxService {
         }
         return events.save(new OutboxEvent(aggregateType, aggregateId, eventType, payload, null));
     }
+    @Transactional public void deleteAggregate(String aggregateType, String aggregateId) {
+        events.deleteByAggregateTypeAndAggregateId(aggregateType, aggregateId);
+    }
 }

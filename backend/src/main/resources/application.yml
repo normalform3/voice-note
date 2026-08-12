@@ -86,6 +86,19 @@ app:
     max-tool-calls: ${VOICENOTE_AGENT_MAX_TOOL_CALLS:10}
     timeout-seconds: ${VOICENOTE_AGENT_TIMEOUT_SECONDS:120}
     max-tool-output-bytes: ${VOICENOTE_AGENT_MAX_TOOL_OUTPUT_BYTES:32768}
+  memory:
+    enabled: ${VOICENOTE_MEMORY_ENABLED:false}
+    collection: ${VOICENOTE_MEMORY_COLLECTION:voicenote_user_memories}
+    recent-turns: ${VOICENOTE_MEMORY_RECENT_TURNS:6}
+    context-max-characters: ${VOICENOTE_MEMORY_CONTEXT_MAX_CHARACTERS:16000}
+    summary-trigger-characters: ${VOICENOTE_MEMORY_SUMMARY_TRIGGER_CHARACTERS:12000}
+    summary-max-characters: ${VOICENOTE_MEMORY_SUMMARY_MAX_CHARACTERS:4000}
+    max-candidates-per-turn: ${VOICENOTE_MEMORY_MAX_CANDIDATES_PER_TURN:5}
+    candidate-confidence-threshold: ${VOICENOTE_MEMORY_CANDIDATE_CONFIDENCE_THRESHOLD:0.75}
+    max-pending-candidates: ${VOICENOTE_MEMORY_MAX_PENDING_CANDIDATES:200}
+    max-active-memories: ${VOICENOTE_MEMORY_MAX_ACTIVE_MEMORIES:500}
+    search-limit: ${VOICENOTE_MEMORY_SEARCH_LIMIT:8}
+    max-attempts: ${VOICENOTE_MEMORY_MAX_ATTEMPTS:3}
   mcp:
     enabled: ${VOICENOTE_MCP_ENABLED:false}
     servers: '${VOICENOTE_MCP_SERVERS:[]}'

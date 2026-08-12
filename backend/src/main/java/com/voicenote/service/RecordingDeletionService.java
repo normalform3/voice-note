@@ -50,6 +50,7 @@ public class RecordingDeletionService {
     private final KnowledgeVectorStore vectors;
     private final ObjectStorage storage;
     private final TransactionTemplate transactions;
+    private final AgentConversationService conversations;
 
     public RecordingDeletionService(TranscriptionTaskRepository tasks, AudioBlobRepository blobs, TaskAttemptRepository attempts,
                                     ProviderInvocationRepository providerInvocations, TaskStageAttemptRepository stages,
@@ -66,7 +67,7 @@ public class RecordingDeletionService {
                                     SpeakerCorrectionInvocationRepository speakerCorrectionInvocations,
                                     OutboxEventRepository outbox, IdempotencyRecordRepository idempotencyRecords,
                                     IdempotencyService idempotency, KnowledgeVectorStore vectors, ObjectStorage storage,
-                                    PlatformTransactionManager transactionManager) {
+                                    PlatformTransactionManager transactionManager, AgentConversationService conversations) {
         this.tasks = tasks; this.blobs = blobs; this.attempts = attempts; this.providerInvocations = providerInvocations; this.stages = stages;
         this.segments = segments; this.transcriptSpeakers = transcriptSpeakers; this.rawTranscriptDocuments = rawTranscriptDocuments; this.organizedDocuments = organizedDocuments; this.organizedBlocks = organizedBlocks;
         this.knowledgeDocuments = knowledgeDocuments; this.knowledgeChunks = knowledgeChunks; this.knowledgeIndexVersions = knowledgeIndexVersions; this.knowledgeIndexStages = knowledgeIndexStages;
@@ -77,6 +78,7 @@ public class RecordingDeletionService {
         this.analysisInvocations = analysisInvocations; this.organizationInvocations = organizationInvocations; this.outbox = outbox; this.idempotencyRecords = idempotencyRecords;
         this.speakerCorrectionRuns = speakerCorrectionRuns; this.speakerCorrectionSuggestions = speakerCorrectionSuggestions; this.speakerCorrectionInvocations = speakerCorrectionInvocations;
         this.idempotency = idempotency; this.vectors = vectors; this.storage = storage;
+        this.conversations = conversations;
         this.transactions = new TransactionTemplate(transactionManager);
         this.transactions.setPropagationBehavior(TransactionDefinition.PROPAGATION_REQUIRES_NEW);
     }
@@ -116,7 +118,9 @@ public class RecordingDeletionService {
         for (KnowledgeDocument document : documents) {
             knowledgeEvidence.findByKnowledgeDocumentId(document.getId()).forEach(evidence -> relatedKnowledgeRuns.add(evidence.getKnowledgeRunId()));
         }
+        conversations.deleteConversationsUsingTask(ownerId, taskId);
         for (String runId : relatedKnowledgeRuns) {
+            if (!knowledgeRuns.existsById(runId)) continue;
             knowledgeEvidence.deleteByKnowledgeRunId(runId);
             knowledgeRunSources.deleteByKnowledgeRunId(runId);
             agentCheckpoints.deleteByKnowledgeRunId(runId);

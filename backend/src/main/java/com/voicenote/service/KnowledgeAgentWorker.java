@@ -20,22 +20,29 @@ public class KnowledgeAgentWorker {
     private final AnalysisModelClient legacyModel;
     private final AgentRuntime runtime;
     private final ObjectMapper mapper;
+    private final AgentConversationLifecycle conversations;
 
     public KnowledgeAgentWorker(AppProperties properties, KnowledgeAgentService runs, KnowledgeSearchService knowledge,
-                                AnalysisModelClient legacyModel, AgentRuntime runtime, ObjectMapper mapper) {
+                                AnalysisModelClient legacyModel, AgentRuntime runtime, ObjectMapper mapper,
+                                AgentConversationLifecycle conversations) {
         this.properties = properties; this.runs = runs; this.knowledge = knowledge;
-        this.legacyModel = legacyModel; this.runtime = runtime; this.mapper = mapper;
+        this.legacyModel = legacyModel; this.runtime = runtime; this.mapper = mapper; this.conversations = conversations;
     }
 
     @Scheduled(fixedDelayString = "${app.workers.poll-interval-ms:5000}")
     public void work() {
-        if (properties.getWorkers().isEnabled()) runs.queuedRunIds().forEach(this::run);
+        if (!properties.getWorkers().isEnabled()) return;
+        runs.queuedRunIds().forEach(this::run);
+        conversations.recoverSettledTurns();
     }
 
     private void run(String runId) {
         KnowledgeAgentService.RunWork work = runs.claim(runId);
         if (work == null) return;
-        if (work.legacy()) runLegacy(work); else runtime.execute(work);
+        if (work.legacy()) runLegacy(work); else {
+            try { runtime.execute(work); }
+            finally { conversations.settle(runId); }
+        }
     }
 
     private void runLegacy(KnowledgeAgentService.RunWork run) {

@@ -38,6 +38,7 @@ export type KnowledgeRunDetail = { run: KnowledgeRun; evidence: KnowledgeEvidenc
 export type AgentScopeType = 'CURRENT_DOCUMENT' | 'SELECTED_DOCUMENTS' | 'ALL_DOCUMENTS'
 export type AgentRun = {
   id: string; question: string; status: string; scopeType: AgentScopeType; skillId: string; skillVersion: string; skillDisplayName?: string; scopeDocumentCount: number
+  conversationId?: string; conversationTurnIndex?: number; memoryEnabled: boolean
   modelCallsUsed: number; maxModelCalls: number; agentTurnsUsed: number; maxAgentTurns: number; toolCallsUsed: number; maxToolCalls: number
   resultDocument?: string; failureMessage?: string; failureCode?: string; failureStage?: string; recoveryCount: number
   parentRunId?: string; rootRunId?: string; replayFromCheckpointId?: string; createdAt: string; completedAt?: string
@@ -50,9 +51,9 @@ export type AgentStep = {
 }
 export type AgentStepDetail = Omit<AgentStep, 'checkpointId' | 'replayable'> & { inputCheckpointId?: string; outputCheckpointId?: string; input?: unknown; output?: unknown }
 export type AgentEvidence = {
-  resultPath: string; sourceKind: 'TRANSCRIPT_SEGMENT' | 'DOCUMENT_METADATA' | 'EXTERNAL'; sourceRef: string; documentId?: string; chunkId?: string
+  resultPath: string; sourceKind: 'TRANSCRIPT_SEGMENT' | 'DOCUMENT_METADATA' | 'EXTERNAL' | 'USER_MEMORY'; sourceRef: string; documentId?: string; chunkId?: string
   transcriptionTaskId?: string; segmentId?: string; topic?: string; speakerId?: string; role?: string; speaker?: string; startMs?: number; endMs?: number
-  text?: string; externalLabel?: string; externalUrl?: string
+  text?: string; memoryId?: string; memoryVersionId?: string; externalLabel?: string; externalUrl?: string
 }
 export type AgentRunDetail = { run: AgentRun; documentIds: string[]; childRunIds: string[]; steps: AgentStep[]; checkpoints: AgentCheckpoint[]; evidence: AgentEvidence[] }
 export type SkillSource = 'BUILTIN' | 'USER'
@@ -84,7 +85,14 @@ export type ResultCitation = { sourceRef?: string; chunkId?: string; segmentId?:
 export type ResultItem = { title?: string; content?: string; status?: string; owner?: string | null; dueAt?: string | null; question?: string; answer?: string; dimension?: string; assessment?: string; followUp?: string; label?: string; values?: string[]; evidence?: ResultCitation[] }
 export type ResultBlock = { type: SkillBlockType; title?: string; content?: string; status?: string; evidence?: ResultCitation[]; items?: ResultItem[]; columns?: string[]; rows?: ResultItem[] }
 export type AgentResult = { resultSchemaVersion?: number; blocks?: ResultBlock[]; answer?: string; findings?: { title?: string; content?: string; evidence?: ResultCitation[] }[]; coverage?: { scopeDocumentCount: number; overviewedDocumentIds: string[]; searchedDocumentIds: string[]; citedDocumentIds: string[]; omittedDocumentIds: string[]; limitations: string[] } }
-export type AgentCapabilities = { enabled: boolean; rerankEnabled: boolean; mcpEnabled: boolean; maxScopeDocuments: number; maxModelCalls: number; maxTurns: number; maxToolCalls: number }
+export type AgentCapabilities = { enabled: boolean; rerankEnabled: boolean; mcpEnabled: boolean; memoryEnabled: boolean; maxPendingMemoryCandidates: number; maxActiveMemories: number; recentConversationTurns: number; conversationContextMaxCharacters: number; conversationSummaryMaxCharacters: number; memorySearchLimit: number; maxScopeDocuments: number; maxModelCalls: number; maxTurns: number; maxToolCalls: number }
+export type AgentConversation = { id: string; title: string; status: 'ACTIVE' | 'ARCHIVED'; scopeType: AgentScopeType; timeZone: string; skillId: string; skillVersion: string; memoryEnabled: boolean; summaryStatus: string; summaryFailureMessage?: string; createdAt: string; updatedAt: string }
+export type AgentConversationTurn = { id: string; turnIndex: number; userMessage: string; runId?: string; runStatus?: string; resultDocument?: string; failureMessage?: string; extractionStatus: string; extractionFailureMessage?: string; createdAt: string }
+export type AgentConversationDetail = { conversation: AgentConversation; transcriptionTaskIds: string[]; turns: AgentConversationTurn[] }
+export type PageResult<T> = { content: T[]; totalElements: number; totalPages: number; number: number; size: number }
+export type UserMemoryCategory = 'PROFILE' | 'PREFERENCE' | 'WORK_STYLE' | 'PROJECT_CONTEXT' | 'LONG_TERM_GOAL'
+export type UserMemoryCandidate = { id: string; category: UserMemoryCategory; semanticKey: string; content: string; sourceExcerpt: string; confidence: number; changeType: 'CREATE' | 'UPDATE'; targetMemoryId?: string; currentContent?: string; status: string; createdAt: string }
+export type UserMemory = { id: string; category: UserMemoryCategory; semanticKey: string; versionId: string; versionNumber: number; content: string; indexStatus: string; confirmedAt: string; updatedAt: string; sourceConversationDeleted: boolean }
 export type AgentToolView = {
   name: string; displayName: string; description: string; source: 'LOCAL' | 'MCP'; userGrantable: boolean
   enabledForSkill: boolean | null; disabledReason?: string; parameters: unknown; dynamicParameters: boolean

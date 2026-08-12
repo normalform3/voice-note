@@ -11,6 +11,7 @@ public class AppProperties {
     private final Workers workers = new Workers();
     private final Knowledge knowledge = new Knowledge();
     private final Agent agent = new Agent();
+    private final Memory memory = new Memory();
     private final Mcp mcp = new Mcp();
 
     public Security getSecurity() { return security; }
@@ -20,6 +21,7 @@ public class AppProperties {
     public Workers getWorkers() { return workers; }
     public Knowledge getKnowledge() { return knowledge; }
     public Agent getAgent() { return agent; }
+    public Memory getMemory() { return memory; }
     public Mcp getMcp() { return mcp; }
 
     public static class Security {
@@ -179,6 +181,45 @@ public class AppProperties {
         public void setTimeoutSeconds(int timeoutSeconds) { this.timeoutSeconds = timeoutSeconds; }
         public int getMaxToolOutputBytes() { return maxToolOutputBytes; }
         public void setMaxToolOutputBytes(int maxToolOutputBytes) { this.maxToolOutputBytes = maxToolOutputBytes; }
+    }
+
+    public static class Memory {
+        private boolean enabled;
+        private String collection = "voicenote_user_memories";
+        private int recentTurns = 6;
+        private int contextMaxCharacters = 16_000;
+        private int summaryTriggerCharacters = 12_000;
+        private int summaryMaxCharacters = 4_000;
+        private int maxCandidatesPerTurn = 5;
+        private double candidateConfidenceThreshold = 0.75;
+        private int maxPendingCandidates = 200;
+        private int maxActiveMemories = 500;
+        private int searchLimit = 8;
+        private int maxAttempts = 3;
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public String getCollection() { return collection; }
+        public void setCollection(String collection) { this.collection = collection; }
+        public int getRecentTurns() { return recentTurns; }
+        public void setRecentTurns(int recentTurns) { this.recentTurns = recentTurns; }
+        public int getContextMaxCharacters() { return contextMaxCharacters; }
+        public void setContextMaxCharacters(int contextMaxCharacters) { this.contextMaxCharacters = contextMaxCharacters; }
+        public int getSummaryTriggerCharacters() { return summaryTriggerCharacters; }
+        public void setSummaryTriggerCharacters(int summaryTriggerCharacters) { this.summaryTriggerCharacters = summaryTriggerCharacters; }
+        public int getSummaryMaxCharacters() { return summaryMaxCharacters; }
+        public void setSummaryMaxCharacters(int summaryMaxCharacters) { this.summaryMaxCharacters = summaryMaxCharacters; }
+        public int getMaxCandidatesPerTurn() { return maxCandidatesPerTurn; }
+        public void setMaxCandidatesPerTurn(int maxCandidatesPerTurn) { this.maxCandidatesPerTurn = maxCandidatesPerTurn; }
+        public double getCandidateConfidenceThreshold() { return candidateConfidenceThreshold; }
+        public void setCandidateConfidenceThreshold(double candidateConfidenceThreshold) { this.candidateConfidenceThreshold = candidateConfidenceThreshold; }
+        public int getMaxPendingCandidates() { return maxPendingCandidates; }
+        public void setMaxPendingCandidates(int maxPendingCandidates) { this.maxPendingCandidates = maxPendingCandidates; }
+        public int getMaxActiveMemories() { return maxActiveMemories; }
+        public void setMaxActiveMemories(int maxActiveMemories) { this.maxActiveMemories = maxActiveMemories; }
+        public int getSearchLimit() { return searchLimit; }
+        public void setSearchLimit(int searchLimit) { this.searchLimit = searchLimit; }
+        public int getMaxAttempts() { return maxAttempts; }
+        public void setMaxAttempts(int maxAttempts) { this.maxAttempts = maxAttempts; }
     }
 
     public static class Mcp {

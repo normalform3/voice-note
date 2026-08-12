@@ -34,6 +34,8 @@ class AgentCheckpointStoreTest {
         assertThat(restored).isEqualTo(state.withRuntimeStats(0, 0, 0, 0));
         assertThat(restored.documentSnapshots()).hasSize(1);
         assertThat(restored.promptSnapshot()).isEqualTo("system prompt v1");
+        assertThat(restored.memoryEnabled()).isTrue();
+        assertThat(restored.conversationContextSnapshot()).isEqualTo("earlier conversation");
         assertThat(run.getCurrentCheckpointId()).isEqualTo(checkpoint.getId());
     }
 
@@ -74,7 +76,7 @@ class AgentCheckpointStoreTest {
 
     private AgentState state() {
         return AgentState.initial(AgentPhase.MODEL_DECISION, "knowledge-qa", "v1", Hashing.sha256("{}"), List.of())
-                .withFrozenContext("model", "system prompt v1", "{}",
+                .withFrozenContext("model", "system prompt v1", true, "earlier conversation", "{}",
                         List.of(new AgentState.DocumentSnapshot("task", "document", "index-v1", "{\"title\":\"note\"}")),
                         7, 6, 8, 120_000);
     }

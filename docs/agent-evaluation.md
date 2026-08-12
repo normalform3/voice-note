@@ -1,6 +1,6 @@
 # Agent 评测
 
-仓库内的 `backend/src/test/resources/agent-evaluation-set.jsonl` 定义了首批单文档、多文档、相对日期、拒答、越权和未索引当前文档场景。它只保存问题与期望，不包含真实转写或用户数据。
+仓库内的 `backend/src/test/resources/agent-evaluation-set.jsonl` 定义了首批单文档、多文档、相对日期、拒答、越权、未索引当前文档、跨会话记忆召回和跨用户记忆零泄漏场景。它只保存问题、脱敏 setup 与期望，不包含真实转写或用户数据。
 
 在目标环境执行这些场景后，将脱敏结果导出为 JSONL。每行提供：
 

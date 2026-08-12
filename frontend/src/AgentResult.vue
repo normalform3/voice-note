@@ -12,6 +12,7 @@ function citationLabel(citation: ResultCitation) {
   const evidence = props.evidence.find(item => citation.sourceRef ? item.sourceRef === citation.sourceRef : item.chunkId === citation.chunkId && item.segmentId === citation.segmentId)
   if (!evidence) return '原文证据 ↗'
   if (evidence.sourceKind === 'EXTERNAL') return `${evidence.externalLabel || '外部来源'} ↗`
+  if (evidence.sourceKind === 'USER_MEMORY') return '来自你确认的记忆 ↗'
   if (evidence.sourceKind === 'DOCUMENT_METADATA') return `${evidence.topic || '文档元数据'} · ${evidence.text || '范围信息'}`
   return `${evidence.topic || '原文'} · ${evidence.speaker || evidence.speakerId || '说话人'} · ${timecode(evidence.startMs || 0)} ↗`
 }

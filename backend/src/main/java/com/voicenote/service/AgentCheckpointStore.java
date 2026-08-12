@@ -56,6 +56,7 @@ public class AgentCheckpointStore {
     }
 
     public List<AgentCheckpoint> list(String runId) { return checkpoints.findByKnowledgeRunIdOrderByCheckpointSequenceAsc(runId); }
+    public void delete(String runId) { checkpoints.deleteByKnowledgeRunId(runId); }
 
     public static class CheckpointException extends RuntimeException {
         private final String code;

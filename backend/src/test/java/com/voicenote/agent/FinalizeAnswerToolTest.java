@@ -50,7 +50,23 @@ class FinalizeAnswerToolTest {
                 {"answer":"x","findings":[{"title":"x","content":"x","evidenceRefs":["%s"]}]}
                 """.formatted(sourceRef));
 
-        assertThatThrownBy(() -> tool.execute(context, arguments)).hasMessageContaining("transcript sourceRef");
+        assertThatThrownBy(() -> tool.execute(context, arguments)).hasMessageContaining("transcript or confirmed-memory sourceRef");
+    }
+
+    @Test
+    void confirmedMemoryCanSupportAnExplicitUserFact() throws Exception {
+        AgentSkill skill = new AgentSkill("knowledge-qa", "v1", "问答", "", List.of(), "", List.of("finalize_answer"), false);
+        AgentExecutionContext context = new AgentExecutionContext("run", "owner", AgentScopeType.CURRENT_DOCUMENT,
+                ZoneId.of("Asia/Shanghai"), skill, List.of(document("task-a")), Instant.now().plusSeconds(10), null, true);
+        String sourceRef = context.evidence().registerMemory("memory-a", "version-a", "WORK_STYLE", "用户偏好先给结论");
+        var arguments = mapper.readTree("""
+                {"answer":"会先给结论。","findings":[{"title":"回答方式","content":"你偏好先给结论","evidenceRefs":["%s"]}]}
+                """.formatted(sourceRef));
+
+        var result = tool.execute(context, arguments);
+
+        assertThat(result.payload().path("findings").path(0).path("evidence").path(0).path("kind").asText())
+                .isEqualTo("USER_MEMORY");
     }
 
     @Test

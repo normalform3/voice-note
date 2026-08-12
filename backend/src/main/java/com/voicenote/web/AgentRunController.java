@@ -27,12 +27,13 @@ public class AgentRunController {
     private final TranscriptSegmentRepository segments;
     private final TranscriptSpeakerRepository speakers;
     private final KnowledgeChunkRepository chunks;
+    private final KnowledgeRunSourceRepository sources;
 
     public AgentRunController(KnowledgeAgentService runs, AppProperties properties, AgentSkillRegistry skills, KnowledgeRunEvidenceRepository evidence,
                               KnowledgeDocumentRepository documents, TranscriptSegmentRepository segments,
-                              TranscriptSpeakerRepository speakers, KnowledgeChunkRepository chunks) {
+                              TranscriptSpeakerRepository speakers, KnowledgeChunkRepository chunks, KnowledgeRunSourceRepository sources) {
         this.runs = runs; this.properties = properties; this.skills = skills; this.evidence = evidence; this.documents = documents;
-        this.segments = segments; this.speakers = speakers; this.chunks = chunks;
+        this.segments = segments; this.speakers = speakers; this.chunks = chunks; this.sources = sources;
     }
 
     @PostMapping
@@ -59,6 +60,9 @@ public class AgentRunController {
     @GetMapping("/capabilities")
     Capabilities capabilities() {
         return new Capabilities(properties.getAgent().isEnabled(), properties.getKnowledge().isRerankEnabled(), properties.getMcp().isEnabled(),
+                properties.getMemory().isEnabled(), properties.getMemory().getMaxPendingCandidates(), properties.getMemory().getMaxActiveMemories(),
+                properties.getMemory().getRecentTurns(), properties.getMemory().getContextMaxCharacters(),
+                properties.getMemory().getSummaryMaxCharacters(), properties.getMemory().getSearchLimit(),
                 properties.getAgent().getMaxScopeDocuments(), properties.getAgent().getMaxModelCalls(), properties.getAgent().getMaxTurns(), properties.getAgent().getMaxToolCalls());
     }
 
@@ -97,11 +101,17 @@ public class AgentRunController {
         TranscriptSpeaker speaker = segment == null ? null : speakers.findByTranscriptionTaskIdAndTranscriptVersionAndAsrSpeakerId(
                 segment.getTranscriptionTaskId(), segment.getTranscriptVersion(), segment.getEffectiveSpeakerId()).orElse(null);
         String topic = value.getKnowledgeChunkId() == null ? null : chunks.findById(value.getKnowledgeChunkId()).map(KnowledgeChunk::getTopicTitle).orElse(null);
+        String memoryText = value.getUserMemoryContentSnapshot();
+        if (memoryText == null && value.getSourceKind() == EvidenceSourceKind.USER_MEMORY && value.getSourceRef() != null) {
+            memoryText = sources.findByKnowledgeRunIdAndSourceRef(value.getKnowledgeRunId(), value.getSourceRef())
+                    .map(source -> source.toEvidenceSource().text()).orElse(null);
+        }
         return new EvidenceView(value.getResultPath(), value.getSourceKind(), value.getSourceRef(), value.getKnowledgeDocumentId(), value.getKnowledgeChunkId(),
                 taskId, value.getTranscriptSegmentId(), topic, segment == null ? null : segment.getEffectiveSpeakerId(),
                 speaker == null ? null : speaker.getResolvedRole().name(), speaker == null ? null : speaker.getDisplayName(),
                 segment == null ? null : segment.getStartMs(), segment == null ? null : segment.getEndMs(),
-                segment == null ? null : segment.getTextContent(), value.getExternalLabel(), value.getExternalUrl());
+                segment == null ? memoryText : segment.getTextContent(), value.getUserMemoryId(), value.getUserMemoryVersionId(),
+                value.getExternalLabel(), value.getExternalUrl());
     }
 
     public record AgentScopeRequest(@NotNull AgentScopeType type, @Size(max = 50) List<String> transcriptionTaskIds) { }
@@ -112,13 +122,17 @@ public class AgentRunController {
                                  List<KnowledgeAgentService.AgentCheckpointView> checkpoints, List<EvidenceView> evidence) { }
     public record EvidenceView(String resultPath, EvidenceSourceKind sourceKind, String sourceRef, String documentId, String chunkId,
                                String transcriptionTaskId, String segmentId, String topic, String speakerId, String role, String speaker,
-                               Long startMs, Long endMs, String text, String externalLabel, String externalUrl) { }
+                               Long startMs, Long endMs, String text, String memoryId, String memoryVersionId,
+                               String externalLabel, String externalUrl) { }
     public record SkillView(String id, String version, String displayName, String description, SkillSource source,
                             SkillInvocationPolicy invocationPolicy, List<SceneType> sceneTypes, List<AgentScopeType> scopeTypes,
                             List<SkillBlockType> outputBlocks, String defaultPrompt, List<String> suggestedPrompts) {
         static SkillView from(AgentSkill value) { return new SkillView(value.id(), value.version(), value.displayName(), value.description(),
                 value.source(), value.invocationPolicy(), value.sceneTypes(), value.scopeTypes(), value.outputBlocks(), value.defaultPrompt(), value.routingExamples()); }
     }
-    public record Capabilities(boolean enabled, boolean rerankEnabled, boolean mcpEnabled, int maxScopeDocuments,
-                               int maxModelCalls, int maxTurns, int maxToolCalls) { }
+    public record Capabilities(boolean enabled, boolean rerankEnabled, boolean mcpEnabled, boolean memoryEnabled,
+                               int maxPendingMemoryCandidates, int maxActiveMemories,
+                               int recentConversationTurns, int conversationContextMaxCharacters,
+                               int conversationSummaryMaxCharacters, int memorySearchLimit,
+                               int maxScopeDocuments, int maxModelCalls, int maxTurns, int maxToolCalls) { }
 }

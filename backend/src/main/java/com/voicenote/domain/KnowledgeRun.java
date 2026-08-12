@@ -12,6 +12,9 @@ public class KnowledgeRun {
     @Id @Column(columnDefinition = "CHAR(36)") private String id;
     @Version private long version;
     @Column(name = "owner_id", nullable = false, columnDefinition = "CHAR(36)") private String ownerId;
+    @Column(name = "conversation_id", columnDefinition = "CHAR(36)") private String conversationId;
+    @Column(name = "conversation_turn_index") private Integer conversationTurnIndex;
+    @Column(name = "memory_enabled", nullable = false) private boolean memoryEnabled;
     @Column(nullable = false, columnDefinition = "TEXT") private String question;
     @Enumerated(EnumType.STRING) @Column(name = "scope_type", nullable = false) private AgentScopeType scopeType;
     @Column(name = "time_zone", nullable = false) private String timeZone;
@@ -81,6 +84,9 @@ public class KnowledgeRun {
     }
     public String getId() { return id; }
     public String getOwnerId() { return ownerId; }
+    public String getConversationId() { return conversationId; }
+    public Integer getConversationTurnIndex() { return conversationTurnIndex; }
+    public boolean isMemoryEnabled() { return memoryEnabled; }
     public String getQuestion() { return question; }
     public AgentScopeType getScopeType() { return scopeType; }
     public String getTimeZone() { return timeZone; }
@@ -119,6 +125,10 @@ public class KnowledgeRun {
             || status == KnowledgeRunStatus.BUDGET_EXHAUSTED || status == KnowledgeRunStatus.TIMED_OUT; }
     public void selectSkill(String id, String skillVersion, String skillVersionId, String snapshot, String hash) {
         this.skillId = id; this.skillVersion = skillVersion; this.skillVersionId = skillVersionId; this.skillSnapshot = snapshot; this.skillHash = hash; this.updatedAt = Instant.now();
+    }
+    public void useConversation(String conversationId, int turnIndex, boolean memoryEnabled) {
+        this.conversationId = conversationId; this.conversationTurnIndex = turnIndex;
+        this.memoryEnabled = memoryEnabled; this.updatedAt = Instant.now();
     }
     public void queue() { if (status == KnowledgeRunStatus.PENDING) { status = KnowledgeRunStatus.QUEUED; updatedAt = Instant.now(); } }
     public boolean start() {
@@ -174,6 +184,7 @@ public class KnowledgeRun {
         replay.parentRunId = parent.id;
         replay.rootRunId = parent.rootRunId == null ? parent.id : parent.rootRunId;
         replay.replayFromCheckpointId = checkpointId;
+        replay.memoryEnabled = parent.memoryEnabled;
         replay.modelCallsUsed = state.modelCallsUsed();
         replay.agentTurnsUsed = state.agentTurnsUsed();
         replay.toolCallsUsed = state.toolCallsUsed();

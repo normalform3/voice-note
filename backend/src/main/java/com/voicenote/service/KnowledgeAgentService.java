@@ -44,6 +44,8 @@ public class KnowledgeAgentService {
     private final AgentMetrics metrics;
     private final AgentCheckpointStore checkpoints;
     private final DocumentQaPolicy qaPolicy;
+    private final UserMemoryRepository userMemories;
+    private final UserMemoryVersionRepository userMemoryVersions;
 
     @org.springframework.beans.factory.annotation.Autowired
     public KnowledgeAgentService(KnowledgeRunRepository runs, KnowledgeRunEvidenceRepository evidence,
@@ -54,20 +56,34 @@ public class KnowledgeAgentService {
                                  KnowledgeChunkRepository chunks, TranscriptSegmentRepository segments,
                                  IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, AppProperties properties,
                                  ProgressEventPublisher progressEvents, AgentSkillRegistry skills, AgentMetrics metrics,
-                                 AgentCheckpointStore checkpoints, DocumentQaPolicy qaPolicy) {
+                                 AgentCheckpointStore checkpoints, DocumentQaPolicy qaPolicy,
+                                 UserMemoryRepository userMemories, UserMemoryVersionRepository userMemoryVersions) {
         this.runs = runs; this.evidence = evidence; this.runDocuments = runDocuments; this.steps = steps; this.sources = sources;
         this.tasks = tasks; this.documents = documents; this.organizedDocuments = organizedDocuments; this.organizedBlocks = organizedBlocks;
         this.indexVersions = indexVersions; this.chunks = chunks; this.segments = segments;
         this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper; this.properties = properties;
         this.progressEvents = progressEvents; this.skills = skills; this.metrics = metrics;
-        this.checkpoints = checkpoints; this.qaPolicy = qaPolicy;
+        this.checkpoints = checkpoints; this.qaPolicy = qaPolicy; this.userMemories = userMemories; this.userMemoryVersions = userMemoryVersions;
+    }
+
+    KnowledgeAgentService(KnowledgeRunRepository runs, KnowledgeRunEvidenceRepository evidence,
+                          KnowledgeRunDocumentRepository runDocuments, KnowledgeRunStepRepository steps,
+                          KnowledgeRunSourceRepository sources, TranscriptionTaskRepository tasks, KnowledgeDocumentRepository documents,
+                          OrganizedDocumentRepository organizedDocuments, OrganizedDocumentBlockRepository organizedBlocks,
+                          KnowledgeIndexVersionRepository indexVersions, KnowledgeChunkRepository chunks, TranscriptSegmentRepository segments,
+                          IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, AppProperties properties,
+                          ProgressEventPublisher progressEvents, AgentSkillRegistry skills, AgentMetrics metrics,
+                          AgentCheckpointStore checkpoints, DocumentQaPolicy qaPolicy) {
+        this(runs, evidence, runDocuments, steps, sources, tasks, documents, organizedDocuments, organizedBlocks,
+                indexVersions, chunks, segments, idempotency, outbox, mapper, properties, progressEvents, skills, metrics,
+                checkpoints, qaPolicy, null, null);
     }
 
     /** Compatibility constructor used by focused legacy evidence tests. */
     KnowledgeAgentService(KnowledgeRunRepository runs, KnowledgeRunEvidenceRepository evidence, IdempotencyService idempotency,
                           OutboxService outbox, ObjectMapper mapper, AppProperties properties) {
         this(runs, evidence, null, null, null, null, null, null, null, null, null, null,
-                idempotency, outbox, mapper, properties, new ProgressEventPublisher(event -> { }), null, null, null, new DocumentQaPolicy());
+                idempotency, outbox, mapper, properties, new ProgressEventPublisher(event -> { }), null, null, null, new DocumentQaPolicy(), null, null);
     }
 
     /** Legacy /knowledge-runs creation remains owner-wide and uses the previous fixed worker while the agent feature flag is off. */
@@ -98,16 +114,25 @@ public class KnowledgeAgentService {
         List<ResolvedDocument> resolved = resolveScope(ownerId, scope);
         IdempotencyRecord record = idempotency.reserve(ownerId, CREATE_AGENT_OPERATION, key, Hashing.canonicalJsonHash(command));
         if (record.getResourceId() != null) return ownedRun(ownerId, record.getResourceId());
-        AgentSkill selected = command.skillId() == null || command.skillId().isBlank() ? skills.fallback() : requireSkill(ownerId, command.skillId());
-        boolean auto = command.skillId() == null || command.skillId().isBlank();
+        AgentSkill selected;
+        boolean frozenSkill = command.frozenSkillSnapshot() != null && !command.frozenSkillSnapshot().isBlank();
+        if (frozenSkill) {
+            try { selected = mapper.readValue(command.frozenSkillSnapshot(), AgentSkill.class); }
+            catch (Exception exception) { throw new ApiException(HttpStatus.CONFLICT, "CONVERSATION_SKILL_INVALID", "The conversation Skill snapshot is invalid"); }
+        } else selected = command.skillId() == null || command.skillId().isBlank() ? skills.fallback() : requireSkill(ownerId, command.skillId());
+        boolean auto = !frozenSkill && (command.skillId() == null || command.skillId().isBlank());
         if (!auto && !skills.compatible(selected, scope.type(), resolved.stream().map(value -> value.task().getSceneType()).toList())) {
             throw new ApiException(HttpStatus.BAD_REQUEST, "AGENT_SKILL_INCOMPATIBLE", "The selected Skill is not compatible with this document scene or scope");
         }
-        String snapshot = json(selected); String hash = Hashing.sha256(snapshot);
+        String snapshot = frozenSkill ? command.frozenSkillSnapshot() : json(selected); String hash = Hashing.sha256(snapshot);
         KnowledgeRun run = runs.save(new KnowledgeRun(ownerId, question, properties.getDashscope().getChatModel(), scope.type(), zone.getId(),
                 auto ? "auto" : selected.id(), auto ? "pending" : selected.version(), auto ? null : selected.versionId(), snapshot, hash,
                 properties.getAgent().getMaxModelCalls(), properties.getAgent().getMaxTurns(), properties.getAgent().getMaxToolCalls(),
                 properties.getAgent().getTimeoutSeconds() * 1000L));
+        if (command.conversationId() != null && command.conversationTurnIndex() != null) {
+            run.useConversation(command.conversationId(), command.conversationTurnIndex(), Boolean.TRUE.equals(command.memoryEnabled()));
+            run = runs.save(run);
+        }
         for (ResolvedDocument document : resolved) runDocuments.save(new KnowledgeRunDocument(run.getId(), document.task().getId(),
                 document.document() == null ? null : document.document().getId(), document.indexVersion() == null ? null : document.indexVersion().getId(), metadata(document)));
         outbox.enqueue("knowledge_run", run.getId(), EventType.KNOWLEDGE_RUN_REQUESTED);
@@ -122,7 +147,7 @@ public class KnowledgeAgentService {
             TranscriptionTask task = ownedTask(ownerId, requested.iterator().next());
             if (!task.isTranscriptReady()) throw new ApiException(HttpStatus.CONFLICT, "TRANSCRIPT_NOT_READY", "Current document questions require a persisted transcript");
             resolved.add(currentDocument(task));
-        } else if (scope.type() == AgentScopeType.SELECTED_DOCUMENTS) {
+        } else if (scope.type() == AgentScopeType.SELECTED_DOCUMENTS || scope.frozen()) {
             if (requested.isEmpty()) throw new ApiException(HttpStatus.BAD_REQUEST, "SELECTED_DOCUMENTS_REQUIRED", "SELECTED_DOCUMENTS requires at least one transcriptionTaskId");
             for (String taskId : requested) resolved.add(indexed(ownerId, taskId));
         } else {
@@ -139,6 +164,11 @@ public class KnowledgeAgentService {
         if (resolved.isEmpty()) throw new ApiException(HttpStatus.CONFLICT, "AGENT_SCOPE_EMPTY", "No ready documents are available in this scope");
         if (resolved.size() > properties.getAgent().getMaxScopeDocuments()) throw new ApiException(HttpStatus.BAD_REQUEST, "AGENT_SCOPE_TOO_LARGE", "Agent scope exceeds the configured document limit");
         return List.copyOf(resolved);
+    }
+
+    @Transactional(readOnly = true)
+    public List<String> resolveScopeTaskIds(String ownerId, AgentScopeCommand scope) {
+        return resolveScope(ownerId, scope).stream().map(value -> value.task().getId()).toList();
     }
 
     private ResolvedDocument indexed(String ownerId, String taskId) {
@@ -228,6 +258,24 @@ public class KnowledgeAgentService {
     @Transactional(readOnly = true) public List<KnowledgeRun> ownedRuns(String ownerId) { return runs.findByOwnerIdOrderByCreatedAtDesc(ownerId); }
     @Transactional(readOnly = true) public KnowledgeRun ownedRun(String ownerId, String runId) {
         return runs.findById(runId).filter(value -> value.getOwnerId().equals(ownerId)).orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "KNOWLEDGE_RUN_NOT_FOUND", "Knowledge task was not found"));
+    }
+
+    @Transactional
+    public void deleteRunGraph(String ownerId, String runId) {
+        ownedRun(ownerId, runId);
+        for (KnowledgeRun child : runs.findByParentRunIdOrderByCreatedAtAsc(runId)) deleteRunGraph(ownerId, child.getId());
+        evidence.deleteByKnowledgeRunId(runId);
+        sources.deleteByKnowledgeRunId(runId);
+        if (checkpoints != null) checkpoints.delete(runId);
+        steps.deleteByKnowledgeRunId(runId);
+        runDocuments.deleteByKnowledgeRunId(runId);
+        idempotency.deleteResource(ownerId, runId);
+        outboxEventsForRun(runId);
+        runs.deleteById(runId);
+    }
+
+    private void outboxEventsForRun(String runId) {
+        outbox.deleteAggregate("knowledge_run", runId);
     }
     public String skillDisplayName(KnowledgeRun run) {
         if (run == null || "pending".equals(run.getSkillVersion()) || run.getSkillSnapshot() == null) return null;
@@ -522,6 +570,11 @@ public class KnowledgeAgentService {
     }
 
     @Transactional(readOnly = true)
+    public AgentRunView agentRunView(KnowledgeRun run) {
+        return AgentRunView.from(run, runDocuments(run.getId()).size(), skillDisplayName(run));
+    }
+
+    @Transactional(readOnly = true)
     public AgentStepDetailView stepDetail(String ownerId, String runId, String stepId) {
         KnowledgeRunStep step = ownedStep(ownerId, runId, stepId);
         return AgentStepDetailView.from(step, parseDocument(step.getInputDocument()), parseDocument(step.getOutputDocument()));
@@ -574,7 +627,8 @@ public class KnowledgeAgentService {
                 validateSource(run, source);
                 String resultPath = path.isBlank() ? "/" : path;
                 if (persisted.add(resultPath + ":" + ref)) evidence.save(new KnowledgeRunEvidence(run.getId(), source.kind(), ref, source.documentId(), source.taskId(), source.chunkId(),
-                        resultPath, source.segmentId(), source.label(), source.url()));
+                        resultPath, source.segmentId(), source.memoryId(), source.memoryVersionId(),
+                        source.kind() == EvidenceSourceKind.USER_MEMORY ? source.text() : null, source.label(), source.url()));
             }
             node.fields().forEachRemaining(field -> { if (!"evidence".equals(field.getKey())) persistResultEvidence(run, field.getValue(), path + "/" + field.getKey(), ledger, persisted); });
         } else if (node.isArray()) {
@@ -592,6 +646,17 @@ public class KnowledgeAgentService {
 
     private void validateSource(KnowledgeRun run, AgentEvidenceLedger.EvidenceSource source) {
         if (source.kind() == EvidenceSourceKind.EXTERNAL) return;
+        if (source.kind() == EvidenceSourceKind.USER_MEMORY) {
+            if (!run.isMemoryEnabled() || userMemories == null || userMemoryVersions == null) throw evidenceRejected("MEMORY_EVIDENCE_DISABLED", "User memory evidence is not enabled for this Run");
+            UserMemory memory = userMemories.findById(source.memoryId())
+                    .filter(value -> value.getOwnerId().equals(run.getOwnerId()) && value.getStatus() == UserMemoryStatus.ACTIVE
+                            && Objects.equals(value.getCurrentVersionId(), source.memoryVersionId()))
+                    .orElseThrow(() -> evidenceRejected("MEMORY_EVIDENCE_STALE", "Referenced user memory is missing, deleted, or no longer current"));
+            UserMemoryVersion version = userMemoryVersions.findById(source.memoryVersionId())
+                    .filter(value -> value.getMemoryId().equals(memory.getId()) && Objects.equals(value.getContent(), source.text()))
+                    .orElseThrow(() -> evidenceRejected("MEMORY_EVIDENCE_INVALID", "Referenced user memory version is invalid"));
+            return;
+        }
         KnowledgeRunDocument scoped = runDocuments.findByKnowledgeRunIdOrderByCreatedAtAsc(run.getId()).stream()
                 .filter(value -> value.getTranscriptionTaskId().equals(source.taskId())).findFirst()
                 .orElseThrow(() -> evidenceRejected("EVIDENCE_OUTSIDE_SCOPE", "Evidence is outside the immutable Agent scope"));
@@ -660,19 +725,29 @@ public class KnowledgeAgentService {
 
     private record ResolvedDocument(TranscriptionTask task, KnowledgeDocument document, OrganizedDocument organized,
                                     KnowledgeIndexVersion indexVersion, QaRetrievalMode mode) { }
-    public record AgentScopeCommand(AgentScopeType type, List<String> transcriptionTaskIds) { }
-    public record CreateAgentCommand(String question, AgentScopeCommand scope, String skillId, String timeZone) { }
+    public record AgentScopeCommand(AgentScopeType type, List<String> transcriptionTaskIds, boolean frozen) {
+        public AgentScopeCommand(AgentScopeType type, List<String> transcriptionTaskIds) { this(type, transcriptionTaskIds, false); }
+    }
+    public record CreateAgentCommand(String question, AgentScopeCommand scope, String skillId, String timeZone,
+                                     String conversationId, Integer conversationTurnIndex, Boolean memoryEnabled,
+                                     String frozenSkillSnapshot) {
+        public CreateAgentCommand(String question, AgentScopeCommand scope, String skillId, String timeZone) {
+            this(question, scope, skillId, timeZone, null, null, false, null);
+        }
+    }
     public record RunWork(String runId, String ownerId, String question, boolean legacy, long executionEpoch, boolean recovered) { }
     public record StepWork(String stepId, int stepIndex, long executionEpoch, String inputCheckpointId) { }
     public record KnowledgeRunView(String id, KnowledgeRunStatus status, int toolCallsUsed, int maxToolCalls, String resultDocument, String failureMessage) {
         public static KnowledgeRunView from(KnowledgeRun run) { return new KnowledgeRunView(run.getId(), run.getStatus(), run.getToolCallsUsed(), run.getMaxToolCalls(), run.getResultDocument(), run.getFailureMessage()); }
     }
     public record AgentRunView(String id, String question, KnowledgeRunStatus status, AgentScopeType scopeType, String skillId, String skillVersion, String skillDisplayName,
+                               String conversationId, Integer conversationTurnIndex, boolean memoryEnabled,
                                int scopeDocumentCount, int modelCallsUsed, int maxModelCalls, int agentTurnsUsed, int maxAgentTurns,
                                int toolCallsUsed, int maxToolCalls, String resultDocument, String failureMessage,
                                String failureCode, String failureStage, String parentRunId, String rootRunId,
                                String replayFromCheckpointId, int recoveryCount, Instant createdAt, Instant completedAt) {
         public static AgentRunView from(KnowledgeRun run, int scopeCount, String skillDisplayName) { return new AgentRunView(run.getId(), run.getQuestion(), run.getStatus(), run.getScopeType(), run.getSkillId(), run.getSkillVersion(), skillDisplayName,
+                run.getConversationId(), run.getConversationTurnIndex(), run.isMemoryEnabled(),
                 scopeCount, run.getModelCallsUsed(), run.getMaxModelCalls(), run.getAgentTurnsUsed(), run.getMaxAgentTurns(),
                 run.getToolCallsUsed(), run.getMaxToolCalls(), run.getResultDocument(), run.getFailureMessage(), run.getFailureCode(),
                 run.getFailureStage(), run.getParentRunId(), run.getRootRunId(), run.getReplayFromCheckpointId(), run.getRecoveryCount(),

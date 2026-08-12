@@ -154,15 +154,15 @@ public class FinalizeAnswerTool implements AgentTool {
     }
 
     private void attachEvidence(AgentExecutionContext context, JsonNode refs, ObjectNode target,
-                                Map<String, AgentEvidenceLedger.EvidenceSource> cited, boolean transcriptRequired) {
-        if (!refs.isArray() || (transcriptRequired && refs.isEmpty())) throw new IllegalArgumentException("Every factual result item requires evidenceRefs");
-        ArrayNode evidence = target.putArray("evidence"); boolean hasTranscript = false;
+                                Map<String, AgentEvidenceLedger.EvidenceSource> cited, boolean factualSourceRequired) {
+        if (!refs.isArray() || (factualSourceRequired && refs.isEmpty())) throw new IllegalArgumentException("Every factual result item requires evidenceRefs");
+        ArrayNode evidence = target.putArray("evidence"); boolean hasFactualSource = false;
         for (JsonNode refNode : refs) {
             AgentEvidenceLedger.EvidenceSource source = context.evidence().require(refNode.asText()); cited.put(source.ref(), source);
-            if (source.kind() == EvidenceSourceKind.TRANSCRIPT_SEGMENT) hasTranscript = true;
+            if (source.kind() == EvidenceSourceKind.TRANSCRIPT_SEGMENT || source.kind() == EvidenceSourceKind.USER_MEMORY) hasFactualSource = true;
             evidence.addObject().put("sourceRef", source.ref()).put("kind", source.kind().name());
         }
-        if (transcriptRequired && !hasTranscript) throw new IllegalArgumentException("Every factual result item must cite at least one transcript sourceRef");
+        if (factualSourceRequired && !hasFactualSource) throw new IllegalArgumentException("Every factual result item must cite at least one transcript or confirmed-memory sourceRef");
     }
     private void copyText(JsonNode source, ObjectNode target, String... names) { for (String name : names) if (source.path(name).isTextual()) target.put(name, source.path(name).asText()); }
     private void requireOverview(AgentExecutionContext context) { if (context.documents().size() > 1 && context.skill().requireOverviewForMultipleDocuments() && !context.hasOverviewedAllDocuments()) throw new IllegalArgumentException("This multi-document Skill must read every available document overview before finalizing"); }

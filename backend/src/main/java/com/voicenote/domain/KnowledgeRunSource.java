@@ -16,6 +16,8 @@ public class KnowledgeRunSource {
     @Column(name = "transcription_task_id", columnDefinition = "CHAR(36)") private String transcriptionTaskId;
     @Column(name = "knowledge_chunk_id", columnDefinition = "CHAR(36)") private String knowledgeChunkId;
     @Column(name = "transcript_segment_id", columnDefinition = "CHAR(36)") private String transcriptSegmentId;
+    @Column(name = "user_memory_id", columnDefinition = "CHAR(36)") private String userMemoryId;
+    @Column(name = "user_memory_version_id", columnDefinition = "CHAR(36)") private String userMemoryVersionId;
     @Column(length = 512) private String topic;
     @Column(name = "speaker_id") private String speakerId;
     @Column(name = "start_ms") private Long startMs;
@@ -30,11 +32,12 @@ public class KnowledgeRunSource {
         this.id = UUID.randomUUID().toString(); this.knowledgeRunId = runId; this.sourceRef = source.ref(); this.sourceKind = source.kind();
         this.knowledgeDocumentId = source.documentId(); this.transcriptionTaskId = source.taskId(); this.knowledgeChunkId = source.chunkId();
         this.transcriptSegmentId = source.segmentId(); this.topic = source.topic(); this.speakerId = source.speakerId(); this.startMs = source.startMs();
+        this.userMemoryId = source.memoryId(); this.userMemoryVersionId = source.memoryVersionId();
         this.endMs = source.endMs(); this.textContent = source.text(); this.externalLabel = source.label(); this.externalUrl = source.url(); this.createdAt = Instant.now();
     }
     public String getSourceRef() { return sourceRef; }
     public AgentEvidenceLedger.EvidenceSource toEvidenceSource() {
         return new AgentEvidenceLedger.EvidenceSource(sourceRef, sourceKind, knowledgeDocumentId, transcriptionTaskId, knowledgeChunkId,
-                transcriptSegmentId, topic, speakerId, startMs, endMs, textContent, externalLabel, externalUrl);
+                transcriptSegmentId, userMemoryId, userMemoryVersionId, topic, speakerId, startMs, endMs, textContent, externalLabel, externalUrl);
     }
 }

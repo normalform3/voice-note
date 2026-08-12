@@ -34,4 +34,7 @@ public class IdempotencyService {
             repository.save(record);
         }
     }
+    @Transactional public void deleteResource(String ownerId, String resourceId) {
+        repository.deleteByOwnerIdAndResourceId(ownerId, resourceId);
+    }
 }

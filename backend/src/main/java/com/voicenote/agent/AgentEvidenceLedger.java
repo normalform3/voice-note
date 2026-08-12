@@ -11,19 +11,25 @@ public class AgentEvidenceLedger {
                                      String speakerId, Long startMs, Long endMs, String text) {
         String identity = "segment:" + taskId + ":" + segmentId;
         return refsByIdentity.computeIfAbsent(identity, ignored -> register(new EvidenceSource(nextRef(), EvidenceSourceKind.TRANSCRIPT_SEGMENT,
-                documentId, taskId, chunkId, segmentId, topic, speakerId, startMs, endMs, text, null, null)));
+                documentId, taskId, chunkId, segmentId, null, null, topic, speakerId, startMs, endMs, text, null, null)));
     }
 
     public String registerMetadata(String documentId, String taskId, String label, String text) {
         String identity = "metadata:" + taskId + ":" + label;
         return refsByIdentity.computeIfAbsent(identity, ignored -> register(new EvidenceSource(nextRef(), EvidenceSourceKind.DOCUMENT_METADATA,
-                documentId, taskId, null, null, null, null, null, null, text, label, null)));
+                documentId, taskId, null, null, null, null, null, null, null, null, text, label, null)));
     }
 
     public String registerExternal(String label, String url, String text) {
         String identity = "external:" + label + ":" + Objects.toString(url, "");
         return refsByIdentity.computeIfAbsent(identity, ignored -> register(new EvidenceSource(nextRef(), EvidenceSourceKind.EXTERNAL,
-                null, null, null, null, null, null, null, null, text, label, url)));
+                null, null, null, null, null, null, null, null, null, null, text, label, url)));
+    }
+
+    public String registerMemory(String memoryId, String versionId, String category, String text) {
+        String identity = "memory:" + memoryId + ":" + versionId;
+        return refsByIdentity.computeIfAbsent(identity, ignored -> register(new EvidenceSource(nextRef(), EvidenceSourceKind.USER_MEMORY,
+                null, null, null, null, memoryId, versionId, category, null, null, null, text, "已确认的用户记忆", null)));
     }
 
     public EvidenceSource require(String ref) {
@@ -53,9 +59,11 @@ public class AgentEvidenceLedger {
             case TRANSCRIPT_SEGMENT -> "segment:" + source.taskId() + ":" + source.segmentId();
             case DOCUMENT_METADATA -> "metadata:" + source.taskId() + ":" + source.label();
             case EXTERNAL -> "external:" + source.label() + ":" + Objects.toString(source.url(), "");
+            case USER_MEMORY -> "memory:" + source.memoryId() + ":" + source.memoryVersionId();
         };
     }
 
     public record EvidenceSource(String ref, EvidenceSourceKind kind, String documentId, String taskId, String chunkId, String segmentId,
+                                 String memoryId, String memoryVersionId,
                                  String topic, String speakerId, Long startMs, Long endMs, String text, String label, String url) { }
 }
