@@ -5,6 +5,7 @@ import com.voicenote.agent.AgentSkill;
 import com.voicenote.agent.AgentSkillRegistry;
 import com.voicenote.agent.AgentTool;
 import com.voicenote.agent.AgentToolRegistry;
+import com.voicenote.agent.McpReadOnlyToolProvider;
 import com.voicenote.domain.SkillSource;
 import org.springframework.http.HttpStatus;
 import org.springframework.security.core.Authentication;
@@ -31,10 +32,12 @@ public class AgentToolController {
 
     private final AgentToolRegistry tools;
     private final AgentSkillRegistry skills;
+    private final McpReadOnlyToolProvider mcp;
 
-    public AgentToolController(AgentToolRegistry tools, AgentSkillRegistry skills) {
+    public AgentToolController(AgentToolRegistry tools, AgentSkillRegistry skills, McpReadOnlyToolProvider mcp) {
         this.tools = tools;
         this.skills = skills;
+        this.mcp = mcp;
     }
 
     @GetMapping
@@ -45,6 +48,12 @@ public class AgentToolController {
                 .map(value -> value.definition().name()).collect(java.util.stream.Collectors.toSet());
         return new ToolCatalogView(selected == null ? null : selected.id(), tools.all().stream()
                 .map(tool -> view(tool, selected, enabled)).toList());
+    }
+
+    @GetMapping("/mcp-status")
+    List<McpReadOnlyToolProvider.ServerStatus> mcpStatus(Authentication authentication) {
+        CurrentUser.require(authentication);
+        return mcp.statuses();
     }
 
     private ToolView view(AgentTool tool, AgentSkill skill, Set<String> enabled) {

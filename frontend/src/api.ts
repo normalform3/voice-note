@@ -98,6 +98,7 @@ export type AgentToolView = {
   enabledForSkill: boolean | null; disabledReason?: string; parameters: unknown; dynamicParameters: boolean
 }
 export type AgentToolCatalog = { skillId?: string; tools: AgentToolView[] }
+export type McpServerStatus = { name: string; transport: string; connected: boolean; tools: string[]; failure?: string }
 export type AnalysisRun = { id: string; transcriptionTaskId: string; organizedDocumentId?: string; analysisMode?: string; modelId?: string; status: string; callsUsed: number; maxCalls: number; resultDocument?: string; failureMessage?: string }
 export type AnalysisEvidence = { resultPath: string; segmentId: string; startOffset?: number; endOffset?: number }
 export type AnalysisRunDetail = { run: AnalysisRun; evidence: AnalysisEvidence[] }

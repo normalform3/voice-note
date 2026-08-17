@@ -246,17 +246,25 @@ npm run dev
 | 自主 Agent | `VOICENOTE_AGENT_ENABLED=true`。默认 7 次模型调用、6 个回合、10 次工具调用和 120 秒。 |
 | Agent 记忆 | `VOICENOTE_MEMORY_ENABLED=true`。默认关闭；启用后使用独立 Qdrant collection，候选仍需用户确认。 |
 | 文本 Rerank | `VOICENOTE_RERANK_ENABLED=true`。失败时降级为 RRF 并在结果中披露。 |
-| 只读 MCP | `VOICENOTE_MCP_ENABLED=true`，通过 `VOICENOTE_MCP_SERVERS` 配置服务、认证变量名、只读工具和允许的内置 Skill。 |
+| 只读 MCP | `VOICENOTE_MCP_ENABLED=true`，通过 `VOICENOTE_MCP_SERVERS` 配置服务、认证变量名、只读工具和允许的内置 Skill。未连接的 MCP 不影响主链路。 |
 
 当前知识索引默认按 200 Token 判断短 Topic，目标 Chunk 为 800 Token、最大 1200 Token；问答上下文最多 12 个 Chunk 和 10,000 Token。修改这些参数后，需要重新建立知识库。
 
-MCP 配置仅允许部署环境提供地址与认证变量名。示例使用不可解析的占位域名：
+MCP 是可选的 Agent Tool 扩展。未配置、连接失败或工具发现失败时，系统不会注册外部工具，上传、转写、索引与既有 Agent 仍按原逻辑运行。配置仅允许部署环境提供地址、命令与认证变量名；不得将凭据写入仓库。
+
+HTTP 示例使用不可解析的占位域名：
 
 ~~~json
 [{"name":"calendar","baseUrl":"https://mcp.example.invalid","endpoint":"/mcp","authorizationEnv":"CALENDAR_MCP_AUTHORIZATION","readOnlyTools":["list_events"],"allowedSkills":["meeting-summary"]}]
 ~~~
 
-服务端不信任远端的只读声明，也会阻止将已读取的转写原文直接作为 MCP 参数发送。
+钉钉官方 MCP 使用 stdio，可按固定版本的 `dingtalk-mcp` 作为可选部署运行时依赖。以下配置示例只传递环境变量名；`readOnlyTools` 必须填写官方服务实际发现的查询工具名，并且不接受 create、update、delete、send 等写工具。所有内置 Skill 可使用已连接的钉钉工具；私人 Skill 始终只能使用本地工具。
+
+~~~json
+[{"name":"dingtalk","transport":"STDIO","command":"npx","arguments":["-y","dingtalk-mcp@<PINNED_VERSION>"],"environment":{"DINGTALK_Client_ID":"DINGTALK_CLIENT_ID","DINGTALK_Client_Secret":"DINGTALK_CLIENT_SECRET","ACTIVE_PROFILES":"DINGTALK_ACTIVE_PROFILES"},"readOnlyTools":["getCalendarView","queryTasks","searchUser"],"allowedSkills":["knowledge-qa","meeting-summary","interview-retro"]}]
+~~~
+
+`<PINNED_VERSION>` 必须替换为已安全评审和验证的实际版本，不能使用 `latest`。服务端不信任远端的只读声明，也会阻止将已读取的转写原文直接作为 MCP 参数发送。
 
 </details>
 

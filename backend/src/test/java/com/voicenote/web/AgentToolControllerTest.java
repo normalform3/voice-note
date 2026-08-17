@@ -28,6 +28,7 @@ class AgentToolControllerTest {
         };
         AgentToolRegistry tools = mock(AgentToolRegistry.class);
         AgentSkillRegistry skills = mock(AgentSkillRegistry.class);
+        McpReadOnlyToolProvider mcp = mock(McpReadOnlyToolProvider.class);
         Authentication authentication = mock(Authentication.class);
         when(authentication.getPrincipal()).thenReturn(new UserPrincipal("owner", "user@example.com"));
         AgentSkill skill = new AgentSkill("private", "v1", "私人 Skill", "", List.of(), "", List.of("knowledge_search"), false,
@@ -38,7 +39,7 @@ class AgentToolControllerTest {
         when(tools.userGrantable("knowledge_search")).thenReturn(true);
         when(skills.require("owner", "private")).thenReturn(skill);
 
-        var result = new AgentToolController(tools, skills).list("private", authentication);
+        var result = new AgentToolController(tools, skills, mcp).list("private", authentication);
 
         assertThat(result.skillId()).isEqualTo("private");
         assertThat(result.tools()).singleElement().satisfies(value -> {
