@@ -20,9 +20,9 @@ public class ProgressEventListener {
         this.hub = hub; this.pipeline = pipeline; this.analyses = analyses; this.knowledgeRuns = knowledgeRuns; this.speakerCorrections = speakerCorrections;
     }
 
-    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT)
+    @TransactionalEventListener(phase = TransactionPhase.AFTER_COMMIT, fallbackExecution = true)
     public void send(ProgressEventPublisher.ProgressNotification notification) {
-        Object payload = switch (notification.type()) {
+        Object payload = notification.payload() != null ? notification.payload() : switch (notification.type()) {
             case "task-stage-settled" -> Map.of("task", pipeline.viewForNotification(notification.resourceId()));
             case "analysis-run-settled" -> Map.of("run", AnalysisService.AnalysisView.from(analyses.ownedRun(notification.ownerId(), notification.resourceId())));
             case "knowledge-run-settled" -> {

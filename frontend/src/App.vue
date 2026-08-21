@@ -4,7 +4,9 @@ import AgentResultBlocks from './AgentResult.vue'
 import ProfilePage from './ProfilePage.vue'
 import SkillManager from './SkillManager.vue'
 import ToolsCenter from './ToolsCenter.vue'
-import { api, hashFile, isSessionExpiredError, key, SESSION_EXPIRED_EVENT, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentCapabilities, type AgentConversation, type AgentConversationDetail, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AgentStep, type AgentStepDetail, type AiSpeakerCorrectionApplyResult, type AiSpeakerCorrectionDetail, type AiSpeakerCorrectionSuggestion, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PageResult, type PipelineStage, type Segment, type Speaker, type SpeakerCorrectionProposalPart, type SpeakerCorrectionResult, type Task, type WorkspaceSnapshot } from './api'
+import VoiceConversationOverlay from './VoiceConversationOverlay.vue'
+import { isSpeechRecognitionSupported } from './useSpeechRecognition'
+import { api, hashFile, isSessionExpiredError, key, SESSION_EXPIRED_EVENT, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentAnswerBlockEvent, type AgentCapabilities, type AgentConversation, type AgentConversationDetail, type AgentProgressEvent, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AgentStep, type AgentStepDetail, type AiSpeakerCorrectionApplyResult, type AiSpeakerCorrectionDetail, type AiSpeakerCorrectionSuggestion, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PageResult, type PipelineStage, type ResultCitation, type Segment, type Speaker, type SpeakerCorrectionProposalPart, type SpeakerCorrectionResult, type Task, type WorkspaceSnapshot } from './api'
 
 type WorkspaceView = 'library' | 'document' | 'skills' | 'tools' | 'profile'
 type DetailTab = 'transcript' | 'summary' | 'organized'
@@ -90,8 +92,14 @@ const startingKnowledgeBuild = ref(false)
 const workspaceView = ref<WorkspaceView>('library')
 const detailTab = ref<DetailTab>('transcript')
 const mobileAgentOpen = ref(false)
+const voiceConversationOpen = ref(false)
+const voiceLiveRunId = ref('')
+const voiceLiveProgress = ref<AgentProgressEvent[]>([])
+const voiceLiveBlocks = ref<AgentAnswerBlockEvent[]>([])
+const voiceAwaitingRun = ref(false)
 const summaryByTaskId = ref<Record<string, AnalysisRunDetail>>({})
 const summaryLoadingTaskId = ref<string | null>(null)
+const voiceRecognitionSupported = isSpeechRecognitionSupported()
 let streamController: AbortController | null = null
 let reconnectTimer: number | null = null
 let streamClosed = false
@@ -121,6 +129,7 @@ const canCreateKnowledgeBuild = computed(() => selected.value?.status === 'WAITI
 const activeRun = computed(() => agent.value?.run)
 const conversationLocked = computed(() => Boolean(activeConversation.value))
 const activeEvidence = computed(() => agent.value?.evidence || [])
+const voiceAgentBusy = computed(() => Boolean(asking.value || (activeRun.value?.id && ['PENDING', 'QUEUED', 'RUNNING'].includes(activeRun.value.status))))
 const activeRunTerminal = computed(() => Boolean(activeRun.value && !['PENDING', 'QUEUED', 'RUNNING'].includes(activeRun.value.status)))
 const initialReplayCheckpoint = computed(() => agent.value?.checkpoints?.find(checkpoint => !checkpoint.stepId && checkpoint.replayable))
 const activeRunUsage = computed(() => activeRun.value
@@ -189,6 +198,27 @@ const activeSkillName = computed(() => {
   if (activeRun.value.skillId === 'auto' || activeRun.value.skillVersion === 'pending') return '正在匹配 Skill'
   return activeRun.value.skillDisplayName || agentSkills.value.find(item => item.id === activeRun.value?.skillId)?.displayName || activeRun.value.skillId
 })
+const voiceModeAvailable = computed(() => {
+  if (!voiceRecognitionSupported || agentCapabilities.value?.enabled !== true) return false
+  if (agentScopeType.value === 'CURRENT_DOCUMENT') return canAnalyzeCurrent.value
+  if (agentScopeType.value === 'SELECTED_DOCUMENTS') return selectedTaskIds.value.length > 0
+  return indexedTaskCount.value > 0
+})
+const voiceModeUnavailableReason = computed(() => {
+  if (!voiceRecognitionSupported) return '当前浏览器不支持语音识别，请使用桌面版 Chrome 或 Edge。'
+  if (agentCapabilities.value?.enabled !== true) return '当前部署未启用 Agent。'
+  if (agentScopeType.value === 'CURRENT_DOCUMENT' && !canAnalyzeCurrent.value) return '当前音频完成转写后才能开始语音问答。'
+  if (agentScopeType.value === 'SELECTED_DOCUMENTS' && !selectedTaskIds.value.length) return '请先勾选至少一份已收录资料。'
+  if (agentScopeType.value === 'ALL_DOCUMENTS' && !indexedTaskCount.value) return '请先建立至少一份知识库文档。'
+  return ''
+})
+const voiceSkillLabel = computed(() => {
+  const skillId = activeConversation.value?.conversation.skillId || selectedSkillId.value
+  if (!skillId || skillId === 'auto' || skillId === 'pending') return '自动匹配 Skill'
+  return agentSkills.value.find(value => value.id === skillId)?.displayName || skillId
+})
+const voiceMemoryEnabled = computed(() => activeConversation.value?.conversation.memoryEnabled
+  ?? (Boolean(agentCapabilities.value?.memoryEnabled) && conversationMemoryEnabled.value))
 const shortSignedInAccount = computed(() => signedInAccount.value.length > 18 ? `${signedInAccount.value.slice(0, 15)}…` : signedInAccount.value || '账号')
 const signedInInitial = computed(() => signedInAccount.value.trim().charAt(0).toUpperCase() || 'U')
 const importElapsedMs = computed(() => importStartedAt.value == null ? 0 : Math.max(0, clockNow.value - importStartedAt.value))
@@ -725,14 +755,16 @@ async function createKnowledgeBuild() {
   } catch (error: any) { taskActionError.value = error.response?.data?.message || '无法开始建立知识库。' }
   finally { startingKnowledgeBuild.value = false }
 }
-async function askAgent() {
-  if (!question.value.trim() || !agentCapabilities.value?.enabled) return
-  const message = question.value.trim()
+async function submitAgentMessage(rawMessage: string) {
+  const message = rawMessage.trim()
+  if (!message) throw new Error('问题不能为空。')
+  if (!agentCapabilities.value?.enabled) throw new Error('当前部署未启用 Agent。')
+  if (agentScopeType.value === 'CURRENT_DOCUMENT' && !selected.value?.transcriptReady) throw new Error('当前音频仍在转写，完成后才能提问。')
+  if (agentScopeType.value === 'SELECTED_DOCUMENTS' && !selectedTaskIds.value.length) throw new Error('请先勾选至少一份已收录资料。')
+  if (agentScopeType.value === 'ALL_DOCUMENTS' && !indexedTaskCount.value) throw new Error('当前没有已入库资料。')
   asking.value = true
   conversationActionError.value = ''
   try {
-    if (agentScopeType.value === 'CURRENT_DOCUMENT' && !selected.value?.transcriptReady) return
-    if (agentScopeType.value === 'SELECTED_DOCUMENTS' && !selectedTaskIds.value.length) return
     const transcriptionTaskIds = agentScopeType.value === 'CURRENT_DOCUMENT' ? [selected.value!.id]
       : agentScopeType.value === 'SELECTED_DOCUMENTS' ? selectedTaskIds.value : []
     let data: AgentRun
@@ -763,14 +795,58 @@ async function askAgent() {
     agent.value = { run: data, documentIds: transcriptionTaskIds, childRunIds: [], steps: [], checkpoints: [], evidence: [] }
     resetTraceSelection()
     upsertAgent(data)
-    question.value = ''
     if (conversationId) await Promise.all([loadConversationDetail(conversationId), loadAgentConversations()])
+    return data
   } catch (error: any) {
-    conversationActionError.value = error.response?.data?.message || '无法创建或继续 Agent 会话。'
+    const failureMessage = error.response?.data?.message || '无法创建或继续 Agent 会话。'
+    conversationActionError.value = failureMessage
     agent.value = { run: { id: '', question: message, status: 'FAILED', scopeType: agentScopeType.value, skillId: selectedSkillId.value || 'auto', skillVersion: '', scopeDocumentCount: 0, memoryEnabled: conversationMemoryEnabled.value,
       modelCallsUsed: 0, maxModelCalls: 0, agentTurnsUsed: 0, maxAgentTurns: 0, toolCallsUsed: 0, maxToolCalls: 0,
-      failureMessage: error.response?.data?.message || '无法创建 Agent 任务', recoveryCount: 0, createdAt: new Date().toISOString() }, documentIds: [], childRunIds: [], steps: [], checkpoints: [], evidence: [] }
+      failureMessage, recoveryCount: 0, createdAt: new Date().toISOString() }, documentIds: [], childRunIds: [], steps: [], checkpoints: [], evidence: [] }
+    throw new Error(failureMessage)
   } finally { asking.value = false }
+}
+async function askAgent() {
+  const message = question.value.trim()
+  if (!message) return
+  try {
+    await submitAgentMessage(message)
+    question.value = ''
+  } catch { /* The shared submit path already exposes a user-facing error. */ }
+}
+async function submitVoiceAgentMessage(message: string) {
+  voiceLiveRunId.value = ''
+  voiceLiveProgress.value = []
+  voiceLiveBlocks.value = []
+  voiceAwaitingRun.value = true
+  try {
+    const run = await submitAgentMessage(message)
+    voiceLiveRunId.value = run.id
+  } finally { voiceAwaitingRun.value = false }
+}
+function openVoiceConversation() {
+  if (!voiceModeAvailable.value) {
+    conversationActionError.value = voiceModeUnavailableReason.value
+    return
+  }
+  mobileAgentOpen.value = false
+  voiceLiveRunId.value = activeRun.value?.id || ''
+  voiceLiveProgress.value = []
+  voiceLiveBlocks.value = []
+  voiceAwaitingRun.value = false
+  voiceConversationOpen.value = true
+}
+function closeVoiceConversation() {
+  voiceConversationOpen.value = false
+  voiceLiveRunId.value = ''
+  voiceLiveProgress.value = []
+  voiceLiveBlocks.value = []
+  voiceAwaitingRun.value = false
+}
+async function openVoiceEvidence(citation: ResultCitation) {
+  closeVoiceConversation()
+  await nextTick()
+  await openEvidence(citation)
 }
 async function loadAgentDetail(runId: string) {
   const { data } = await api.get<AgentRunDetail>(`/agent-runs/${runId}`)
@@ -1046,6 +1122,28 @@ function handleProgressEvent(name: string, payload: any) {
   if (name === 'snapshot') { applySnapshot(payload as WorkspaceSnapshot); return }
   if (name === 'task-stage-settled' && payload.task) { upsertTask(payload.task as Task); return }
   if (name === 'knowledge-index-progress') { void loadDocuments(); return }
+  if (name === 'agent-run-progress') {
+    const event = payload as AgentProgressEvent
+    if (!voiceConversationOpen.value || !event.runId) return
+    const expectedRunId = voiceLiveRunId.value || (voiceAwaitingRun.value ? undefined : activeRun.value?.id)
+    if (expectedRunId && event.runId !== expectedRunId) return
+    if (!expectedRunId && !asking.value) return
+    voiceLiveRunId.value = event.runId
+    if (!voiceLiveProgress.value.some(value => value.sequence === event.sequence)) voiceLiveProgress.value = [...voiceLiveProgress.value, event]
+    return
+  }
+  if (name === 'agent-answer-block') {
+    const event = payload as AgentAnswerBlockEvent
+    if (!voiceConversationOpen.value || !event.runId) return
+    const expectedRunId = voiceLiveRunId.value || (voiceAwaitingRun.value ? undefined : activeRun.value?.id)
+    if (expectedRunId && event.runId !== expectedRunId) return
+    if (!expectedRunId && !asking.value) return
+    voiceLiveRunId.value = event.runId
+    if (!voiceLiveBlocks.value.some(value => value.sequence === event.sequence)) {
+      voiceLiveBlocks.value = [...voiceLiveBlocks.value, event].sort((left, right) => left.blockIndex - right.blockIndex)
+    }
+    return
+  }
   if (name === 'knowledge-run-settled' && payload.run) {
     if (agent.value?.run.id === payload.run.id) {
       void loadAgentDetail(payload.run.id).then(() => Promise.all([loadAgentConversations(), activeConversation.value ? loadConversationDetail(activeConversation.value.conversation.id) : Promise.resolve()])).catch(() => loadKnowledgeDetail(payload.run.id))
@@ -1087,7 +1185,7 @@ async function connectProgressEvents() {
     }
     if (!response.ok || !response.body) throw new Error('Progress stream is unavailable')
     reconnectDelay = 1000
-    if (workspaceLoadError.value || documentLoadError.value) void recoverAfterReconnect()
+    if (workspaceLoadError.value || documentLoadError.value || (voiceConversationOpen.value && activeRun.value?.id)) void recoverAfterReconnect()
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''
     while (true) {
       const { done, value } = await reader.read(); if (done) break
@@ -1095,11 +1193,18 @@ async function connectProgressEvents() {
       const frames = buffer.split(/\r?\n\r?\n/); buffer = frames.pop() || ''
       frames.forEach(parseSseFrame)
     }
-  } catch (error) { if ((error as DOMException).name !== 'AbortError') scheduleReconnect() }
+  } catch (error) {
+    if ((error as DOMException).name !== 'AbortError') {
+      voiceLiveBlocks.value = []
+      if (voiceConversationOpen.value && activeRun.value?.id) void loadAgentDetail(activeRun.value.id).catch(() => undefined)
+      scheduleReconnect()
+    }
+  }
   finally { streamController = null; if (!streamClosed && token.value && !reconnectTimer) scheduleReconnect() }
 }
 async function recoverAfterReconnect() {
   try {
+    if (voiceConversationOpen.value && activeRun.value?.id) await loadAgentDetail(activeRun.value.id)
     if (workspaceLoadError.value) await loadWorkspace()
     if (documentLoadError.value && selected.value) {
       const current = tasks.value.find(task => task.id === selected.value?.id) || selected.value
@@ -1152,6 +1257,7 @@ function retryStageLabel(stage: PipelineStage) {
 }
 function logout() {
   stopProgressEvents()
+  voiceConversationOpen.value = false
   if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
   token.value = ''
   localStorage.removeItem('voicenote_token')
@@ -1414,7 +1520,7 @@ onBeforeUnmount(() => {
     </section>
 
     <aside v-if="!isUtilityView" class="agent-rail" :class="{ 'is-open': mobileAgentOpen }">
-      <header class="agent-head"><div><p class="eyebrow">AI KNOWLEDGE</p><h3>{{ activeConversation?.conversation.title || agentTitle }}</h3></div><div class="agent-head-actions"><button class="new-conversation" type="button" @click="startNewConversation">新会话</button><button class="agent-close" type="button" @click="mobileAgentOpen = false" aria-label="关闭 AI 问答">×</button></div></header>
+      <header class="agent-head"><div><p class="eyebrow">AI KNOWLEDGE</p><h3>{{ activeConversation?.conversation.title || agentTitle }}</h3></div><div class="agent-head-actions"><button class="voice-conversation-launch" type="button" :disabled="!voiceModeAvailable" :title="voiceModeUnavailableReason || '进入连续语音 Agent 会话'" @click="openVoiceConversation"><i aria-hidden="true"></i>{{ voiceRecognitionSupported ? '语音对话' : '不支持语音' }}</button><button class="new-conversation" type="button" @click="startNewConversation">新会话</button><button class="agent-close" type="button" @click="mobileAgentOpen = false" aria-label="关闭 AI 问答">×</button></div></header>
       <div class="agent-mode-row"><span aria-hidden="true"></span><b>{{ agentModeLabel }}</b></div>
       <p class="agent-description">{{ agentDescription }}</p>
       <div class="agent-suggestions"><button v-for="suggestion in agentSuggestions" :key="suggestion" type="button" @click="useSuggestion(suggestion)">{{ suggestion }} <span>↗</span></button></div>
@@ -1479,5 +1585,12 @@ onBeforeUnmount(() => {
       <section v-if="conversations.length" class="run-history conversation-history"><p class="eyebrow">RECENT CONVERSATIONS</p><button v-for="conversation in conversations.slice(0, 8)" :key="conversation.id" :class="{ active: conversation.id === activeConversation?.conversation.id }" @click="openConversation(conversation)"><span>{{ conversation.title }}</span><small>{{ conversation.status === 'ARCHIVED' ? '已归档' : formatCreatedAt(conversation.updatedAt) }}</small></button><button v-if="activeConversation" class="delete-conversation" type="button" @click="deleteActiveConversation">删除当前会话</button></section>
       <section v-if="visibleHistory.some(run => !run.conversationId)" class="run-history"><p class="eyebrow">LEGACY RUNS</p><button v-for="run in visibleHistory.filter(run => !run.conversationId).slice(0, 4)" :key="run.id" @click="openHistory(run)"><span>{{ run.question }}</span><small>{{ statusText(run.status) }}</small></button></section>
     </aside>
+
+    <VoiceConversationOverlay v-if="voiceConversationOpen"
+      :busy="voiceAgentBusy" :run-status="activeRun?.status" :run-question="activeRun?.question" :run-failure="activeRun?.failureMessage"
+      :result="parsedAnswer" :evidence="activeEvidence" :scope-label="agentModeLabel" :skill-label="voiceSkillLabel"
+      :memory-enabled="voiceMemoryEnabled" :submit-message="submitVoiceAgentMessage"
+      :live-progress="voiceLiveProgress" :live-blocks="voiceLiveBlocks" :tts-enabled="agentCapabilities?.ttsEnabled === true"
+      @close="closeVoiceConversation" @evidence="openVoiceEvidence" />
   </main>
 </template>

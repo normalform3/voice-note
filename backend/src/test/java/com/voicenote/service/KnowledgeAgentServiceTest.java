@@ -1,6 +1,7 @@
 package com.voicenote.service;
 
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.voicenote.agent.AgentEvidenceLedger;
 import com.voicenote.agent.AgentSkill;
 import com.voicenote.agent.AgentSkillRegistry;
 import com.voicenote.config.AppProperties;
@@ -76,5 +77,40 @@ class KnowledgeAgentServiceTest {
         assertThat(metadata.path("organizedDocumentId").asText()).isEqualTo(organized.getId());
         assertThat(metadata.path("formalOverview").path("topics").path(0).path("title").asText()).isEqualTo("主题");
         assertThat(captor.getValue().getKnowledgeIndexVersionId()).isNull();
+    }
+
+    @Test
+    void persistsSentenceLevelEvidenceAtItsNestedResultPath() throws Exception {
+        ObjectMapper mapper = new ObjectMapper(); AppProperties properties = new AppProperties();
+        KnowledgeRunRepository runs = mock(KnowledgeRunRepository.class);
+        KnowledgeRunEvidenceRepository evidence = mock(KnowledgeRunEvidenceRepository.class);
+        KnowledgeRunDocumentRepository runDocuments = mock(KnowledgeRunDocumentRepository.class);
+        TranscriptSegmentRepository segments = mock(TranscriptSegmentRepository.class);
+        KnowledgeRun run = new KnowledgeRun("owner", "question", "model", AgentScopeType.CURRENT_DOCUMENT, "Asia/Shanghai",
+                "knowledge-qa", "v3", null, "{}", "hash", 4, 4, 4, 60_000);
+        TranscriptSegment segment = new TranscriptSegment("task-a", 1, 0, "SPEAKER_0", 0, 1_000, "句级原文");
+        KnowledgeRunDocument scoped = new KnowledgeRunDocument(run.getId(), "task-a", "doc-a", null, "{\"transcriptVersion\":1}");
+        AgentEvidenceLedger ledger = new AgentEvidenceLedger();
+        String sourceRef = ledger.registerTranscript("doc-a", "task-a", null, segment.getId(), "主题", "SPEAKER_0", 0L, 1_000L, "句级原文");
+        when(runs.findById(run.getId())).thenReturn(Optional.of(run));
+        when(runDocuments.findByKnowledgeRunIdOrderByCreatedAtAsc(run.getId())).thenReturn(List.of(scoped));
+        when(segments.findById(segment.getId())).thenReturn(Optional.of(segment));
+        KnowledgeAgentService service = new KnowledgeAgentService(runs, evidence, runDocuments,
+                mock(KnowledgeRunStepRepository.class), mock(KnowledgeRunSourceRepository.class), mock(TranscriptionTaskRepository.class),
+                mock(KnowledgeDocumentRepository.class), mock(OrganizedDocumentRepository.class), mock(OrganizedDocumentBlockRepository.class),
+                mock(KnowledgeIndexVersionRepository.class), mock(KnowledgeChunkRepository.class), segments,
+                mock(IdempotencyService.class), mock(OutboxService.class), mapper, properties, new ProgressEventPublisher(event -> { }),
+                mock(AgentSkillRegistry.class), null, mock(AgentCheckpointStore.class), new DocumentQaPolicy());
+        var result = mapper.readTree("""
+                {"resultSchemaVersion":3,"blocks":[{"type":"SUMMARY","statements":[
+                  {"text":"句级结论。","evidence":[{"sourceRef":"%s","kind":"TRANSCRIPT_SEGMENT"}]}
+                ]}]}
+                """.formatted(sourceRef));
+
+        service.completeAgent(run.getId(), result, ledger);
+
+        var captor = org.mockito.ArgumentCaptor.forClass(KnowledgeRunEvidence.class); verify(evidence).save(captor.capture());
+        assertThat(captor.getValue().getResultPath()).isEqualTo("/blocks/0/statements/0");
+        assertThat(captor.getValue().getSourceRef()).isEqualTo(sourceRef);
     }
 }

@@ -30,7 +30,7 @@ class AgentSkillRegistryTest {
         ArgumentCaptor<SkillVersion> captured = ArgumentCaptor.forClass(SkillVersion.class);
         verify(versions, times(6)).save(captured.capture());
         assertThat(captured.getAllValues()).extracting(SkillVersion::getSkillDefinitionId).contains("knowledge-qa", "meeting-summary", "interview-retro");
-        assertThat(captured.getAllValues()).extracting(SkillVersion::getVersionName).containsOnly("v2");
+        assertThat(captured.getAllValues()).extracting(SkillVersion::getVersionName).containsOnly("v3");
         verify(resources, times(9)).save(any());
     }
 
@@ -40,9 +40,9 @@ class AgentSkillRegistryTest {
         SkillVersionRepository versions = mock(SkillVersionRepository.class);
         SkillResourceRepository resources = mock(SkillResourceRepository.class);
         SkillDefinition definition = SkillDefinition.builtIn("knowledge-qa", "知识问答", "", "[]", "[]");
-        SkillVersion mismatched = new SkillVersion("knowledge-qa", 2, "v2", "changed", "[]", "[]", "[]", "[]", null, "different-hash");
+        SkillVersion mismatched = new SkillVersion("knowledge-qa", 3, "v3", "changed", "[]", "[]", "[]", "[]", null, "different-hash");
         when(definitions.findById("knowledge-qa")).thenReturn(Optional.of(definition));
-        when(versions.findBySkillDefinitionIdAndVersionName("knowledge-qa", "v2")).thenReturn(Optional.of(mismatched));
+        when(versions.findBySkillDefinitionIdAndVersionName("knowledge-qa", "v3")).thenReturn(Optional.of(mismatched));
 
         assertThatThrownBy(() -> new AgentSkillRegistry(new ObjectMapper(), definitions, versions, resources).synchronizeBuiltIns())
                 .hasMessageContaining("Cannot synchronize built-in Agent Skills").hasRootCauseMessage("Built-in Skill knowledge-qa changed without a version bump");

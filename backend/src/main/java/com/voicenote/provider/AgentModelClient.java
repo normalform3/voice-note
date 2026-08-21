@@ -5,6 +5,15 @@ import java.util.List;
 
 public interface AgentModelClient {
     AgentModelTurn next(List<AgentMessage> messages, List<AgentToolDefinition> tools, boolean requireTool);
+    default AgentModelTurn nextStreaming(List<AgentMessage> messages, List<AgentToolDefinition> tools,
+                                         boolean requireTool, StreamObserver observer) {
+        return next(messages, tools, requireTool);
+    }
+
+    interface StreamObserver {
+        default void onContentDelta(String delta) { }
+        default void onToolCallDelta(int index, String idDelta, String nameDelta, String argumentsDelta) { }
+    }
 
     record AgentMessage(String role, String content, String toolCallId, List<AgentToolCall> toolCalls) {
         public static AgentMessage system(String content) { return new AgentMessage("system", content, null, List.of()); }

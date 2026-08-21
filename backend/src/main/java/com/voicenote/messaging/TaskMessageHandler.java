@@ -13,6 +13,7 @@ import com.voicenote.service.TranscriptionTaskService;
 import com.voicenote.service.SpeakerCorrectionService;
 import com.voicenote.service.SpeakerCorrectionWorker;
 import com.voicenote.service.MemoryWorker;
+import com.voicenote.service.AgentRunExecutor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -33,18 +34,20 @@ public class TaskMessageHandler {
     private final SpeakerCorrectionService speakerCorrections;
     private final SpeakerCorrectionWorker speakerCorrectionWorker;
     private final MemoryWorker memoryWorker;
+    private final AgentRunExecutor agentRunExecutor;
     @Autowired
     public TaskMessageHandler(JdbcTemplate jdbc, OutboxEventRepository outbox, TranscriptionTaskService transcriptionTasks, AnalysisService analyses,
                               KnowledgeDocumentService knowledgeDocuments, DocumentOrganizationService organizedDocuments,
                               OrganizedDocumentWorker organizedDocumentWorker, KnowledgeIndexWorker knowledgeIndexWorker,
                               KnowledgeAgentService knowledgeRuns, ProgressMessageHandler progress,
                               SpeakerCorrectionService speakerCorrections, SpeakerCorrectionWorker speakerCorrectionWorker,
-                              MemoryWorker memoryWorker) {
+                              MemoryWorker memoryWorker, AgentRunExecutor agentRunExecutor) {
         this.jdbc = jdbc; this.outbox = outbox; this.transcriptionTasks = transcriptionTasks; this.analyses = analyses;
         this.knowledgeDocuments = knowledgeDocuments; this.organizedDocuments = organizedDocuments; this.organizedDocumentWorker = organizedDocumentWorker;
         this.knowledgeIndexWorker = knowledgeIndexWorker; this.knowledgeRuns = knowledgeRuns; this.progress = progress;
         this.speakerCorrections = speakerCorrections; this.speakerCorrectionWorker = speakerCorrectionWorker;
         this.memoryWorker = memoryWorker;
+        this.agentRunExecutor = agentRunExecutor;
     }
     public TaskMessageHandler(JdbcTemplate jdbc, OutboxEventRepository outbox, TranscriptionTaskService transcriptionTasks, AnalysisService analyses,
                               KnowledgeDocumentService knowledgeDocuments, DocumentOrganizationService organizedDocuments,
@@ -52,7 +55,7 @@ public class TaskMessageHandler {
                               KnowledgeAgentService knowledgeRuns, ProgressMessageHandler progress,
                               SpeakerCorrectionService speakerCorrections, SpeakerCorrectionWorker speakerCorrectionWorker) {
         this(jdbc, outbox, transcriptionTasks, analyses, knowledgeDocuments, organizedDocuments, organizedDocumentWorker,
-                knowledgeIndexWorker, knowledgeRuns, progress, speakerCorrections, speakerCorrectionWorker, null);
+                knowledgeIndexWorker, knowledgeRuns, progress, speakerCorrections, speakerCorrectionWorker, null, null);
     }
     @Transactional
     public void consume(String consumerName, String eventId) {
@@ -74,7 +77,10 @@ public class TaskMessageHandler {
             knowledgeDocuments.markQueuedIndex(event.getAggregateId());
             afterCommit(() -> knowledgeIndexWorker.process(event.getAggregateId()));
         }
-        if (event.getEventType() == EventType.KNOWLEDGE_RUN_REQUESTED) knowledgeRuns.markQueued(event.getAggregateId());
+        if (event.getEventType() == EventType.KNOWLEDGE_RUN_REQUESTED) {
+            knowledgeRuns.markQueued(event.getAggregateId());
+            if (agentRunExecutor != null) afterCommit(() -> agentRunExecutor.execute(event.getAggregateId()));
+        }
         if (memoryWorker != null && event.getEventType() == EventType.MEMORY_EXTRACTION_REQUESTED) afterCommit(() -> memoryWorker.processExtraction(event.getAggregateId()));
         if (memoryWorker != null && event.getEventType() == EventType.CONVERSATION_SUMMARY_REQUESTED) afterCommit(() -> memoryWorker.processSummary(event.getAggregateId()));
         if (memoryWorker != null && event.getEventType() == EventType.USER_MEMORY_INDEX_REQUESTED) afterCommit(() -> memoryWorker.processIndex(event.getAggregateId()));

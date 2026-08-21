@@ -66,6 +66,35 @@ class AgentConversationContextServiceTest {
         assertThat(context).hasSizeLessThanOrEqualTo(1_000).contains("Turn 2 用户：最近问题");
     }
 
+    @Test
+    void extractsPlainTextFromSentenceLevelResults() {
+        AgentConversationRepository conversations = mock(AgentConversationRepository.class);
+        AgentConversationTurnRepository turns = mock(AgentConversationTurnRepository.class);
+        KnowledgeRunRepository runs = mock(KnowledgeRunRepository.class);
+        AgentConversation conversation = new AgentConversation("owner", "会话", AgentScopeType.CURRENT_DOCUMENT,
+                "Asia/Shanghai", "knowledge-qa", "v3", null, "{}", "hash", true);
+        AgentConversationTurn earlier = new AgentConversationTurn(conversation.getId(), "owner", 0, "之前的结论是什么？");
+        KnowledgeRun earlierRun = run("owner", "旧问题");
+        earlierRun.succeed("""
+                {"resultSchemaVersion":3,"blocks":[
+                  {"type":"SUMMARY","statements":[
+                    {"text":"第一句。","evidence":[{"sourceRef":"src_a"}]},
+                    {"text":"第二句。","evidence":[{"sourceRef":"src_b"}]}
+                  ]}
+                ]}
+                """);
+        earlier.attachRun(earlierRun.getId());
+        KnowledgeRun current = run("owner", "请继续"); current.useConversation(conversation.getId(), 1, true);
+        when(conversations.findById(conversation.getId())).thenReturn(Optional.of(conversation));
+        when(turns.findByConversationIdOrderByTurnIndexAsc(conversation.getId())).thenReturn(List.of(earlier));
+        when(runs.findById(earlierRun.getId())).thenReturn(Optional.of(earlierRun));
+
+        String context = new AgentConversationContextService(conversations, turns, runs,
+                new AppProperties(), new ObjectMapper()).contextFor(current);
+
+        assertThat(context).contains("第一句。 第二句。").doesNotContain("sourceRef", "resultSchemaVersion");
+    }
+
     private static KnowledgeRun run(String owner, String question) {
         return new KnowledgeRun(owner, question, "model", AgentScopeType.CURRENT_DOCUMENT, "Asia/Shanghai",
                 "knowledge-qa", "v1", null, "{}", "hash", 4, 4, 4, 60_000);

@@ -86,6 +86,11 @@ app:
     max-tool-calls: ${VOICENOTE_AGENT_MAX_TOOL_CALLS:10}
     timeout-seconds: ${VOICENOTE_AGENT_TIMEOUT_SECONDS:120}
     max-tool-output-bytes: ${VOICENOTE_AGENT_MAX_TOOL_OUTPUT_BYTES:32768}
+  tts:
+    enabled: ${VOICENOTE_TTS_ENABLED:false}
+    model: ${DASHSCOPE_TTS_MODEL:qwen3-tts-flash-realtime}
+    voice: ${DASHSCOPE_TTS_VOICE:Cherry}
+    ws-url: ${DASHSCOPE_TTS_WS_URL:wss://dashscope.aliyuncs.com/api-ws/v1/realtime}
   memory:
     enabled: ${VOICENOTE_MEMORY_ENABLED:false}
     collection: ${VOICENOTE_MEMORY_COLLECTION:voicenote_user_memories}

@@ -1,6 +1,6 @@
 {
   "id": "interview-retro",
-  "version": "v2",
+  "version": "v3",
   "displayName": "面试复盘",
   "description": "区分面试官与候选人，复盘问答、观察到的能力证据和待核实项。",
   "invocationPolicy": "AUTO",
@@ -15,6 +15,6 @@
   "resources": [
     {"type": "REFERENCE", "path": "references/evaluation.md", "name": "面试评价边界", "purpose": "避免把未提问内容判定为能力不足"},
     {"type": "TEMPLATE", "path": "templates/retro.md", "name": "面试复盘模板", "purpose": "统一问答与评价矩阵结构"},
-    {"type": "EXAMPLE", "path": "examples/expected-result.json", "name": "期望结果 fixture", "purpose": "评测面试复盘 v2 区块结构"}
+    {"type": "EXAMPLE", "path": "examples/expected-result.json", "name": "期望结果 fixture", "purpose": "评测面试复盘 v3 句级证据结构"}
   ]
 }

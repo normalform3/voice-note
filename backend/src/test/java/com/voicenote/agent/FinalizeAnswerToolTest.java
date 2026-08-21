@@ -89,8 +89,64 @@ class FinalizeAnswerToolTest {
         assertThat(result.payload().path("resultSchemaVersion").asInt()).isEqualTo(2);
         assertThat(result.payload().path("blocks").get(1).path("items").get(0).path("owner").isNull()).isTrue();
         assertThat(result.payload().path("blocks").get(1).path("items").get(0).path("evidence").get(0).path("sourceRef").asText()).isEqualTo(sourceRef);
+        assertThat(tool.definition(context).parameters().path("properties").path("resultSchemaVersion").path("enum").get(0).asInt()).isEqualTo(3);
         assertThat(tool.definition(context).parameters().path("properties").path("blocks").path("items").path("properties")
                 .path("type").path("enum").toString()).contains("SUMMARY", "ACTION_ITEMS").doesNotContain("QA_REVIEW");
+    }
+
+    @Test
+    void normalizesSentenceLevelStatementsAndComparisonCells() throws Exception {
+        AgentSkill skill = new AgentSkill("knowledge-qa", "v3", "知识问答", "", List.of(), "", List.of("finalize_answer"), false,
+                "version-id", SkillSource.BUILTIN, SkillInvocationPolicy.AUTO, List.of(SceneType.MEETING), List.of(AgentScopeType.CURRENT_DOCUMENT),
+                List.of(SkillBlockType.SUMMARY, SkillBlockType.FINDINGS, SkillBlockType.COMPARISON_TABLE), List.of(), null, List.of());
+        AgentExecutionContext context = new AgentExecutionContext("run", "owner", AgentScopeType.CURRENT_DOCUMENT,
+                ZoneId.of("Asia/Shanghai"), skill, List.of(document("task-a")), Instant.now().plusSeconds(10));
+        String firstRef = context.evidence().registerTranscript("doc-a", "task-a", "chunk-a", "segment-a", "主题", "speaker", 0L, 1_000L, "第一条原文");
+        String secondRef = context.evidence().registerTranscript("doc-a", "task-a", "chunk-a", "segment-b", "主题", "speaker", 1_000L, 2_000L, "第二条原文");
+        var arguments = mapper.readTree("""
+                {"resultSchemaVersion":3,"blocks":[
+                  {"type":"SUMMARY","statements":[
+                    {"text":"第一句话。","evidenceRefs":["%s"]},
+                    {"text":"第二句话。","evidenceRefs":["%s","%s","%s"]}
+                  ]},
+                  {"type":"FINDINGS","items":[{"title":"发现","statements":[{"text":"逐句核实。","evidenceRefs":["%s"]}]}]},
+                  {"type":"COMPARISON_TABLE","columns":["对象","结论"],"rows":[{"label":"A","cells":[{"text":"支持","evidenceRefs":["%s"]}]}]}
+                ]}
+                """.formatted(firstRef, firstRef, secondRef, secondRef, secondRef, firstRef));
+
+        var result = tool.execute(context, arguments);
+
+        assertThat(result.payload().path("resultSchemaVersion").asInt()).isEqualTo(3);
+        assertThat(result.payload().path("blocks").get(0).path("statements").get(1).path("evidence")).hasSize(2);
+        assertThat(result.payload().path("blocks").get(1).path("items").get(0).path("statements").get(0).path("evidence").get(0).path("sourceRef").asText())
+                .isEqualTo(secondRef);
+        assertThat(result.payload().path("blocks").get(2).path("rows").get(0).path("cells").get(0).path("evidence").get(0).path("sourceRef").asText())
+                .isEqualTo(firstRef);
+
+        var forged = mapper.readTree("""
+                {"resultSchemaVersion":3,"blocks":[{"type":"SUMMARY","statements":[{"text":"伪造。","evidenceRefs":["src_forged"]}]}]}
+                """);
+        assertThatThrownBy(() -> tool.execute(context, forged)).hasMessageContaining("Unknown sourceRef");
+    }
+
+    @Test
+    void permitsExplicitSentenceLevelNoEvidenceStates() throws Exception {
+        AgentSkill skill = new AgentSkill("interview-retro", "v3", "面试复盘", "", List.of(), "", List.of("finalize_answer"), false,
+                "version-id", SkillSource.BUILTIN, SkillInvocationPolicy.AUTO, List.of(SceneType.INTERVIEW), List.of(AgentScopeType.CURRENT_DOCUMENT),
+                List.of(SkillBlockType.SUMMARY, SkillBlockType.ASSESSMENT_MATRIX), List.of(), null, List.of());
+        AgentExecutionContext context = new AgentExecutionContext("run", "owner", AgentScopeType.CURRENT_DOCUMENT,
+                ZoneId.of("Asia/Shanghai"), skill, List.of(document("task-a")), Instant.now().plusSeconds(10));
+        var arguments = mapper.readTree("""
+                {"resultSchemaVersion":3,"blocks":[
+                  {"type":"SUMMARY","status":"INSUFFICIENT_EVIDENCE","statements":[{"text":"当前听记无法确认。","evidenceRefs":[]}]},
+                  {"type":"ASSESSMENT_MATRIX","items":[{"dimension":"系统设计","assessment":"NOT_OBSERVED","statements":[{"text":"录音中未观察到该维度。","evidenceRefs":[]}]}]}
+                ]}
+                """);
+
+        var result = tool.execute(context, arguments);
+
+        assertThat(result.payload().path("blocks").get(0).path("statements").get(0).path("evidence")).isEmpty();
+        assertThat(result.payload().path("blocks").get(1).path("items").get(0).path("statements").get(0).path("evidence")).isEmpty();
     }
 
     @Test

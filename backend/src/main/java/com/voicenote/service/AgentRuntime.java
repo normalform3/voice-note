@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.voicenote.agent.*;
 import com.voicenote.config.AppProperties;
 import com.voicenote.domain.*;
+import com.voicenote.agent.tools.FinalizeAnswerTool;
 import com.voicenote.provider.AgentModelClient;
 import com.voicenote.provider.ProviderException;
 import com.voicenote.web.ApiException;
@@ -14,6 +15,8 @@ import java.time.Duration;
 import java.time.Instant;
 import java.time.ZoneId;
 import java.util.*;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /** Versioned ReAct state machine for non-legacy, read-only Agent Runs. */
 @Component
@@ -28,23 +31,31 @@ public class AgentRuntime {
     private final AgentMetrics metrics;
     private final ObjectMapper mapper;
     private final AgentConversationContextService conversationContexts;
+    private final FinalizeAnswerTool finalizeAnswer;
+    private final AgentLiveEventService liveEvents;
 
     @org.springframework.beans.factory.annotation.Autowired
     public AgentRuntime(AppProperties properties, KnowledgeAgentService runs, AgentModelClient model,
                         AgentSkillRegistry skills, AgentToolRegistry tools, AgentMetrics metrics, ObjectMapper mapper,
-                        AgentConversationContextService conversationContexts) {
+                        AgentConversationContextService conversationContexts, FinalizeAnswerTool finalizeAnswer,
+                        AgentLiveEventService liveEvents) {
         this.properties = properties; this.runs = runs; this.model = model; this.skills = skills;
         this.tools = tools; this.metrics = metrics; this.mapper = mapper; this.conversationContexts = conversationContexts;
+        this.finalizeAnswer = finalizeAnswer; this.liveEvents = liveEvents;
     }
     AgentRuntime(AppProperties properties, KnowledgeAgentService runs, AgentModelClient model,
                  AgentSkillRegistry skills, AgentToolRegistry tools, AgentMetrics metrics, ObjectMapper mapper) {
-        this(properties, runs, model, skills, tools, metrics, mapper, null);
+        this(properties, runs, model, skills, tools, metrics, mapper, null, null, null);
     }
 
     public void execute(KnowledgeAgentService.RunWork work) {
         AgentState state = null;
+        LiveRun live = null;
         try {
             KnowledgeRun run = runs.ownedRun(work.ownerId(), work.runId());
+            live = new LiveRun(run, work.executionEpoch());
+            if (run.getStartedAt() != null) metrics.liveLatency("queue_wait", nonNegative(run.getCreatedAt(), run.getStartedAt()));
+            live.progress("ACCEPTED", "请求已接收，正在开始处理", true);
             try { state = runs.loadCurrentState(run.getId(), work.executionEpoch()); }
             catch (AgentCheckpointStore.CheckpointException exception) {
                 AgentState terminal = minimalTerminal(run);
@@ -59,7 +70,7 @@ public class AgentRuntime {
             if (state.phase() == AgentPhase.TERMINAL) return;
 
             if (state.phase() == AgentPhase.ROUTING) {
-                state = route(run, work, state);
+                state = route(run, work, state, live);
                 if (state == null || state.phase() == AgentPhase.TERMINAL) return;
                 run = runs.ownedRun(work.ownerId(), work.runId());
             }
@@ -73,11 +84,11 @@ public class AgentRuntime {
                     runs.timedOut(run.getId(), work.executionEpoch(), terminal(state, context)); return;
                 }
                 if (state.phase() == AgentPhase.TOOL_EXECUTION && !state.pendingToolCalls().isEmpty()) {
-                    state = executeTools(work, skill, context, state);
+                    state = executeTools(work, skill, context, state, live);
                     if (state == null || state.phase() == AgentPhase.TERMINAL) return;
                     continue;
                 }
-                state = decide(work, skill, context, state);
+                state = decide(work, skill, context, state, live);
                 if (state == null || state.phase() == AgentPhase.TERMINAL) return;
             }
         } catch (KnowledgeAgentService.StaleAgentExecutionException ignored) {
@@ -116,7 +127,8 @@ public class AgentRuntime {
         return state;
     }
 
-    private AgentState route(KnowledgeRun run, KnowledgeAgentService.RunWork work, AgentState state) {
+    private AgentState route(KnowledgeRun run, KnowledgeAgentService.RunWork work, AgentState state, LiveRun live) {
+        live.progress("SKILL_MATCHING", "正在匹配适合的 Skill", false);
         AgentSkill fallback = skills.fallback();
         AgentExecutionContext routingContext = context(run, fallback);
         List<AgentSkill> candidates = skills.automaticCandidates(run.getOwnerId(), run.getScopeType(), routingContext.documents().stream()
@@ -172,10 +184,12 @@ public class AgentRuntime {
                 handledCode == null ? "已选择 Skill：" + selected.displayName() : "Skill 路由失败，已回退到通用问答",
                 elapsed(started), turn == null ? null : turn.usage(), turn == null ? null : turn.finishReason(),
                 handledCode, handledMessage, next);
+        live.progress("SKILL_MATCHED", "已选择 Skill：" + selected.displayName(), true);
         return next;
     }
 
-    private AgentState decide(KnowledgeAgentService.RunWork work, AgentSkill skill, AgentExecutionContext context, AgentState state) {
+    private AgentState decide(KnowledgeAgentService.RunWork work, AgentSkill skill, AgentExecutionContext context, AgentState state,
+                              LiveRun live) {
         KnowledgeRun current = runs.ownedRun(work.ownerId(), work.runId());
         List<String> finalizationReasons = finalizationReasons(current);
         boolean finalOnly = !finalizationReasons.isEmpty();
@@ -189,7 +203,15 @@ public class AgentRuntime {
 
         long started = System.nanoTime();
         try {
-            AgentModelClient.AgentModelTurn turn = model.next(state.messages(), definitions, true);
+            live.progress(finalOnly ? "GENERATING_ANSWER" : "PLANNING",
+                    finalOnly ? "证据已就绪，正在生成答复" : "正在规划检索与核实步骤", finalOnly);
+            AgentModelClient.AgentModelTurn turn;
+            if (finalizeAnswer != null && liveEvents != null) {
+                try (FinalizeAnswerStreamObserver observer = new FinalizeAnswerStreamObserver(mapper, finalizeAnswer, context,
+                        properties.getAgent().getMaxToolOutputBytes(), live::answerBlock)) {
+                    turn = model.nextStreaming(state.messages(), definitions, true, observer);
+                }
+            } else turn = model.next(state.messages(), definitions, true);
             metrics.modelCall(Duration.ofNanos(System.nanoTime() - started), true);
             List<AgentModelClient.AgentMessage> messages = new ArrayList<>(state.messages());
             messages.add(AgentModelClient.AgentMessage.assistant(turn.content(), turn.toolCalls()));
@@ -220,7 +242,7 @@ public class AgentRuntime {
     }
 
     private AgentState executeTools(KnowledgeAgentService.RunWork work, AgentSkill skill,
-                                    AgentExecutionContext context, AgentState startingState) {
+                                    AgentExecutionContext context, AgentState startingState, LiveRun live) {
         AgentState state = startingState;
         while (!state.pendingToolCalls().isEmpty()) {
             if (Instant.now().isAfter(context.deadline())) {
@@ -265,6 +287,7 @@ public class AgentRuntime {
             }
             long started = System.nanoTime();
             try {
+                live.tool(call.name());
                 AgentTool.ToolResult result = tool.execute(context, arguments);
                 String output = json(result.payload());
                 List<AgentModelClient.AgentMessage> messages = new ArrayList<>(state.messages());
@@ -479,6 +502,9 @@ public class AgentRuntime {
     }
     private String json(Object value) { try { return mapper.writeValueAsString(value); } catch (Exception exception) { throw new IllegalStateException("Cannot serialize Agent state", exception); } }
     private static long elapsed(long started) { return Duration.ofNanos(System.nanoTime() - started).toMillis(); }
+    private static Duration nonNegative(Instant start, Instant end) {
+        Duration value = Duration.between(start, end); return value.isNegative() ? Duration.ZERO : value;
+    }
     private static String errorCode(Exception exception) {
         if (exception instanceof ProviderException value) return value.getCode();
         if (exception instanceof ApiException value) return value.getCode();
@@ -495,5 +521,35 @@ public class AgentRuntime {
         if (!trimmed.startsWith("```")) return trimmed;
         int firstLine = trimmed.indexOf('\n'); int lastFence = trimmed.lastIndexOf("```");
         return firstLine >= 0 && lastFence > firstLine ? trimmed.substring(firstLine + 1, lastFence).trim() : trimmed;
+    }
+
+    private final class LiveRun {
+        private final KnowledgeRun run;
+        private final AtomicLong sequence;
+        private final AtomicInteger blockIndex = new AtomicInteger();
+
+        private LiveRun(KnowledgeRun run, long epoch) {
+            this.run = run; this.sequence = new AtomicLong(Math.max(0, epoch) * 1_000_000L);
+        }
+        private void progress(String phase, String message, boolean speakable) {
+            if (liveEvents != null) liveEvents.progress(run.getOwnerId(), run.getId(), sequence.incrementAndGet(), phase,
+                    message, speakable, run.getCreatedAt());
+        }
+        private void tool(String name) {
+            switch (name) {
+                case "document_list" -> progress("SCOPE", "正在确认资料范围", false);
+                case "document_overview" -> progress("READING", "正在阅读资料概览", true);
+                case "knowledge_search" -> progress("SEARCHING", "正在检索相关内容", true);
+                case "transcript_context" -> progress("READING_SOURCE", "正在核对录音原文", true);
+                case "skill_resource_read" -> progress("SKILL_RESOURCE", "正在读取 Skill 参考资料", false);
+                case "user_memory_search" -> progress("MEMORY", "正在核对已启用的记忆", false);
+                case "finalize_answer" -> progress("VALIDATING", "正在校验答案与证据引用", false);
+                default -> progress("WORKING", "正在执行只读分析步骤", false);
+            }
+        }
+        private void answerBlock(FinalizeAnswerStreamObserver.ValidatedBlock value) {
+            liveEvents.answerBlock(run.getOwnerId(), run.getId(), sequence.incrementAndGet(), blockIndex.getAndIncrement(),
+                    value.block(), value.spokenText(), run.getCreatedAt());
+        }
     }
 }

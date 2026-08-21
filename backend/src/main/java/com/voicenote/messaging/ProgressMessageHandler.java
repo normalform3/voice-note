@@ -1,5 +1,7 @@
 package com.voicenote.messaging;
 
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.voicenote.domain.EventType;
 import com.voicenote.repository.OutboxEventRepository;
 import com.voicenote.repository.AnalysisRunRepository;
@@ -18,10 +20,12 @@ public class ProgressMessageHandler {
     private final KnowledgeRunRepository knowledgeRuns;
     private final ProgressEventPublisher events;
     private final SpeakerCorrectionRunRepository speakerCorrections;
+    private final ObjectMapper mapper;
 
     public ProgressMessageHandler(OutboxEventRepository outbox, TranscriptionTaskRepository tasks, AnalysisRunRepository analyses, KnowledgeRunRepository knowledgeRuns,
-                                  SpeakerCorrectionRunRepository speakerCorrections, ProgressEventPublisher events) {
+                                  SpeakerCorrectionRunRepository speakerCorrections, ProgressEventPublisher events, ObjectMapper mapper) {
         this.outbox = outbox; this.tasks = tasks; this.analyses = analyses; this.knowledgeRuns = knowledgeRuns; this.speakerCorrections = speakerCorrections; this.events = events;
+        this.mapper = mapper;
     }
 
     @Transactional
@@ -36,6 +40,20 @@ public class ProgressMessageHandler {
             knowledgeRuns.findById(event.getAggregateId()).ifPresent(run -> events.publish(new ProgressEventPublisher.ProgressNotification(run.getOwnerId(), "knowledge-run-settled", run.getId())));
         } else if ("speaker_correction_run".equals(event.getAggregateType())) {
             speakerCorrections.findById(event.getAggregateId()).ifPresent(run -> events.publish(new ProgressEventPublisher.ProgressNotification(run.getOwnerId(), "speaker-correction-run-settled", run.getId())));
+        } else if ("agent_live_event".equals(event.getAggregateType())) {
+            knowledgeRuns.findById(event.getAggregateId()).ifPresent(run -> publishAgentLiveEvent(run.getOwnerId(), run.getId(), event.getPayload()));
+        }
+    }
+
+    private void publishAgentLiveEvent(String ownerId, String runId, String payload) {
+        try {
+            JsonNode envelope = mapper.readTree(payload);
+            String eventName = envelope.path("eventName").asText();
+            if (!"agent-run-progress".equals(eventName) && !"agent-answer-block".equals(eventName)) return;
+            events.publish(new ProgressEventPublisher.ProgressNotification(ownerId, eventName, runId,
+                    mapper.convertValue(envelope.path("data"), Object.class)));
+        } catch (Exception ignored) {
+            // A malformed transient event must not affect the durable Agent Run.
         }
     }
 }

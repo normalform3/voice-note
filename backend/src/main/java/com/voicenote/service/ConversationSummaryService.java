@@ -1,6 +1,5 @@
 package com.voicenote.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.voicenote.config.AppProperties;
 import com.voicenote.domain.*;
@@ -68,9 +67,7 @@ public class ConversationSummaryService {
                 conversation.getSummaryAttempts() < properties.getMemory().getMaxAttempts()); conversations.save(conversation);
     }
     private String answer(KnowledgeRun run) {
-        if (run.getResultDocument() == null) return "";
-        try { JsonNode node = mapper.readTree(run.getResultDocument()); return node.path("answer").isTextual() ? node.path("answer").asText() : node.toString(); }
-        catch (Exception exception) { return run.getResultDocument(); }
+        return AgentResultText.extract(mapper, run.getResultDocument());
     }
     private static String shorten(String value) { String output = Objects.toString(value, "Summary failed").replaceAll("[\\r\\n]+", " "); return output.substring(0, Math.min(1000, output.length())); }
     public record SummaryWork(String conversationId, int throughTurn, String prompt, int attempt) { }

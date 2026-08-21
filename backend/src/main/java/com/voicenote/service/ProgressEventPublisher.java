@@ -8,5 +8,9 @@ public class ProgressEventPublisher {
     private final ApplicationEventPublisher events;
     public ProgressEventPublisher(ApplicationEventPublisher events) { this.events = events; }
     public void publish(ProgressNotification notification) { events.publishEvent(notification); }
-    public record ProgressNotification(String ownerId, String type, String resourceId) { }
+    public record ProgressNotification(String ownerId, String type, String resourceId, Object payload) {
+        public ProgressNotification(String ownerId, String type, String resourceId) {
+            this(ownerId, type, resourceId, null);
+        }
+    }
 }

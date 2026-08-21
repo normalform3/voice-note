@@ -11,6 +11,7 @@ public class AppProperties {
     private final Workers workers = new Workers();
     private final Knowledge knowledge = new Knowledge();
     private final Agent agent = new Agent();
+    private final Tts tts = new Tts();
     private final Memory memory = new Memory();
     private final Mcp mcp = new Mcp();
 
@@ -21,6 +22,7 @@ public class AppProperties {
     public Workers getWorkers() { return workers; }
     public Knowledge getKnowledge() { return knowledge; }
     public Agent getAgent() { return agent; }
+    public Tts getTts() { return tts; }
     public Memory getMemory() { return memory; }
     public Mcp getMcp() { return mcp; }
 
@@ -181,6 +183,21 @@ public class AppProperties {
         public void setTimeoutSeconds(int timeoutSeconds) { this.timeoutSeconds = timeoutSeconds; }
         public int getMaxToolOutputBytes() { return maxToolOutputBytes; }
         public void setMaxToolOutputBytes(int maxToolOutputBytes) { this.maxToolOutputBytes = maxToolOutputBytes; }
+    }
+
+    public static class Tts {
+        private boolean enabled;
+        private String model = "qwen3-tts-flash-realtime";
+        private String voice = "Cherry";
+        private String wsUrl = "wss://dashscope.aliyuncs.com/api-ws/v1/realtime";
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public String getModel() { return model; }
+        public void setModel(String model) { this.model = model; }
+        public String getVoice() { return voice; }
+        public void setVoice(String voice) { this.voice = voice; }
+        public String getWsUrl() { return wsUrl; }
+        public void setWsUrl(String wsUrl) { this.wsUrl = wsUrl; }
     }
 
     public static class Memory {

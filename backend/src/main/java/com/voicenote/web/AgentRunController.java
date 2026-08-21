@@ -6,6 +6,7 @@ import com.voicenote.config.AppProperties;
 import com.voicenote.domain.*;
 import com.voicenote.repository.*;
 import com.voicenote.service.KnowledgeAgentService;
+import com.voicenote.service.VoiceTtsService;
 import jakarta.validation.Valid;
 import jakarta.validation.constraints.NotBlank;
 import jakarta.validation.constraints.NotNull;
@@ -28,12 +29,23 @@ public class AgentRunController {
     private final TranscriptSpeakerRepository speakers;
     private final KnowledgeChunkRepository chunks;
     private final KnowledgeRunSourceRepository sources;
+    private final VoiceTtsService tts;
 
     public AgentRunController(KnowledgeAgentService runs, AppProperties properties, AgentSkillRegistry skills, KnowledgeRunEvidenceRepository evidence,
                               KnowledgeDocumentRepository documents, TranscriptSegmentRepository segments,
                               TranscriptSpeakerRepository speakers, KnowledgeChunkRepository chunks, KnowledgeRunSourceRepository sources) {
         this.runs = runs; this.properties = properties; this.skills = skills; this.evidence = evidence; this.documents = documents;
         this.segments = segments; this.speakers = speakers; this.chunks = chunks; this.sources = sources;
+        this.tts = null;
+    }
+
+    @org.springframework.beans.factory.annotation.Autowired
+    public AgentRunController(KnowledgeAgentService runs, AppProperties properties, AgentSkillRegistry skills, KnowledgeRunEvidenceRepository evidence,
+                              KnowledgeDocumentRepository documents, TranscriptSegmentRepository segments,
+                              TranscriptSpeakerRepository speakers, KnowledgeChunkRepository chunks, KnowledgeRunSourceRepository sources,
+                              VoiceTtsService tts) {
+        this.runs = runs; this.properties = properties; this.skills = skills; this.evidence = evidence; this.documents = documents;
+        this.segments = segments; this.speakers = speakers; this.chunks = chunks; this.sources = sources; this.tts = tts;
     }
 
     @PostMapping
@@ -59,7 +71,7 @@ public class AgentRunController {
 
     @GetMapping("/capabilities")
     Capabilities capabilities() {
-        return new Capabilities(properties.getAgent().isEnabled(), properties.getKnowledge().isRerankEnabled(), properties.getMcp().isEnabled(),
+        return new Capabilities(properties.getAgent().isEnabled(), tts != null && tts.isEnabled(), properties.getKnowledge().isRerankEnabled(), properties.getMcp().isEnabled(),
                 properties.getMemory().isEnabled(), properties.getMemory().getMaxPendingCandidates(), properties.getMemory().getMaxActiveMemories(),
                 properties.getMemory().getRecentTurns(), properties.getMemory().getContextMaxCharacters(),
                 properties.getMemory().getSummaryMaxCharacters(), properties.getMemory().getSearchLimit(),
@@ -130,7 +142,7 @@ public class AgentRunController {
         static SkillView from(AgentSkill value) { return new SkillView(value.id(), value.version(), value.displayName(), value.description(),
                 value.source(), value.invocationPolicy(), value.sceneTypes(), value.scopeTypes(), value.outputBlocks(), value.defaultPrompt(), value.routingExamples()); }
     }
-    public record Capabilities(boolean enabled, boolean rerankEnabled, boolean mcpEnabled, boolean memoryEnabled,
+    public record Capabilities(boolean enabled, boolean ttsEnabled, boolean rerankEnabled, boolean mcpEnabled, boolean memoryEnabled,
                                int maxPendingMemoryCandidates, int maxActiveMemories,
                                int recentConversationTurns, int conversationContextMaxCharacters,
                                int conversationSummaryMaxCharacters, int memorySearchLimit,

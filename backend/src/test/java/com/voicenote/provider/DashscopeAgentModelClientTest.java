@@ -9,6 +9,9 @@ import org.junit.jupiter.api.Test;
 
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.io.ByteArrayInputStream;
+import java.io.FilterInputStream;
+import java.io.InputStream;
 import java.util.List;
 import java.util.concurrent.atomic.AtomicReference;
 
@@ -65,6 +68,45 @@ class DashscopeAgentModelClientTest {
                 .hasMessageContaining("invalid_parameter_error")
                 .hasMessageContaining("tool_choice must be auto or none");
     }
+
+    @Test
+    void rebuildsStreamedContentToolCallsAndUsageAcrossArbitraryInputBoundaries() throws Exception {
+        AppProperties properties = new AppProperties();
+        properties.getDashscope().setApiKey("test-key"); properties.getDashscope().setChatModel("qwen-plus");
+        properties.getDashscope().setBaseUrl("https://dashscope.aliyuncs.com/api/v1"); properties.getAgent().setTimeoutSeconds(5);
+        DashscopeAgentModelClient client = new DashscopeAgentModelClient(properties, mapper);
+        var firstCall = mapper.createObjectNode().put("index", 0).put("id", "call-1");
+        firstCall.set("function", mapper.createObjectNode().put("name", "finalize_").put("arguments", "{\"blocks\":["));
+        var firstDelta = mapper.createObjectNode().put("content", "正在");
+        firstDelta.set("tool_calls", mapper.createArrayNode().add(firstCall));
+        var firstChoice = mapper.createObjectNode(); firstChoice.set("delta", firstDelta);
+        var firstRoot = mapper.createObjectNode(); firstRoot.set("choices", mapper.createArrayNode().add(firstChoice));
+        String first = event(firstRoot);
+
+        var secondCall = mapper.createObjectNode().put("index", 0);
+        secondCall.set("function", mapper.createObjectNode().put("name", "answer").put("arguments", "]}"));
+        var secondDelta = mapper.createObjectNode(); secondDelta.set("tool_calls", mapper.createArrayNode().add(secondCall));
+        var secondChoice = mapper.createObjectNode().put("finish_reason", "tool_calls"); secondChoice.set("delta", secondDelta);
+        var secondRoot = mapper.createObjectNode(); secondRoot.set("choices", mapper.createArrayNode().add(secondChoice));
+        String second = event(secondRoot);
+        String usage = event(mapper.createObjectNode().set("usage", mapper.createObjectNode().put("prompt_tokens", 9).put("completion_tokens", 4).put("total_tokens", 13)));
+        byte[] payload = (first + second + usage + "data: [DONE]\n\n").getBytes(StandardCharsets.UTF_8);
+        InputStream oneByteAtATime = new FilterInputStream(new ByteArrayInputStream(payload)) {
+            @Override public int read(byte[] bytes, int offset, int length) throws java.io.IOException { return super.read(bytes, offset, Math.min(1, length)); }
+        };
+        List<String> argumentDeltas = new java.util.ArrayList<>();
+
+        AgentModelClient.AgentModelTurn turn = client.readSse(oneByteAtATime, new AgentModelClient.StreamObserver() {
+            @Override public void onToolCallDelta(int index, String id, String name, String arguments) { argumentDeltas.add(arguments); }
+        });
+
+        assertThat(turn.content()).isEqualTo("正在");
+        assertThat(turn.toolCalls()).containsExactly(new AgentModelClient.AgentToolCall("call-1", "finalize_answer", "{\"blocks\":[]}"));
+        assertThat(turn.usage()).isEqualTo(new AgentModelClient.AgentUsage(9, 4, 13));
+        assertThat(argumentDeltas).containsExactly("{\"blocks\":[", "]}");
+    }
+
+    private String event(JsonNode value) throws Exception { return "data: " + mapper.writeValueAsString(value) + "\n\n"; }
 
     private DashscopeAgentModelClient client() {
         AppProperties properties = new AppProperties();

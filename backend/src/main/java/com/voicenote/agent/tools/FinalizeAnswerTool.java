@@ -16,6 +16,8 @@ import java.util.*;
 public class FinalizeAnswerTool implements AgentTool {
     private static final List<String> ITEM_FIELDS = List.of("title", "content", "status", "owner", "dueAt", "question", "answer",
             "dimension", "assessment", "followUp", "label", "values");
+    private static final List<String> V3_ITEM_FIELDS = List.of("title", "status", "owner", "dueAt", "question",
+            "dimension", "assessment", "followUp", "label");
     private final ObjectMapper mapper;
     public FinalizeAnswerTool(ObjectMapper mapper) { this.mapper = mapper; }
 
@@ -36,40 +38,49 @@ public class FinalizeAnswerTool implements AgentTool {
 
     @Override public AgentModelClient.AgentToolDefinition definition(AgentExecutionContext context) {
         if (context.skill().outputBlocks().isEmpty()) return definition();
+        ObjectNode statement = statementSchema();
         ObjectNode item = mapper.createObjectNode().put("type", "object").put("additionalProperties", false);
         ObjectNode itemProperties = item.putObject("properties");
-        for (String name : ITEM_FIELDS) {
-            if ("values".equals(name)) itemProperties.putObject(name).put("type", "array").putObject("items").put("type", "string");
-            else if ("owner".equals(name) || "dueAt".equals(name)) itemProperties.putObject(name);
+        for (String name : V3_ITEM_FIELDS) {
+            if ("owner".equals(name) || "dueAt".equals(name)) itemProperties.putObject(name);
             else itemProperties.putObject(name).put("type", "string");
         }
-        itemProperties.set("evidenceRefs", evidenceSchema());
+        itemProperties.putObject("statements").put("type", "array").put("minItems", 1).put("maxItems", 50).set("items", statement);
+        item.putArray("required").add("statements");
+
+        ObjectNode row = mapper.createObjectNode().put("type", "object").put("additionalProperties", false);
+        ObjectNode rowProperties = row.putObject("properties");
+        rowProperties.putObject("label").put("type", "string");
+        rowProperties.putObject("cells").put("type", "array").put("maxItems", 12).set("items", statement.deepCopy());
+        row.putArray("required").add("label").add("cells");
 
         ObjectNode block = mapper.createObjectNode().put("type", "object").put("additionalProperties", false);
         ObjectNode blockProperties = block.putObject("properties");
         ArrayNode allowed = blockProperties.putObject("type").put("type", "string").putArray("enum");
         context.skill().outputBlocks().forEach(value -> allowed.add(value.name()));
-        blockProperties.putObject("title").put("type", "string"); blockProperties.putObject("content").put("type", "string");
-        blockProperties.putObject("status").put("type", "string"); blockProperties.set("evidenceRefs", evidenceSchema());
+        blockProperties.putObject("title").put("type", "string");
+        blockProperties.putObject("status").put("type", "string");
+        blockProperties.putObject("statements").put("type", "array").put("minItems", 1).put("maxItems", 50).set("items", statement.deepCopy());
         blockProperties.putObject("items").put("type", "array").put("maxItems", 50).set("items", item);
         blockProperties.putObject("columns").put("type", "array").put("maxItems", 12).putObject("items").put("type", "string");
-        blockProperties.putObject("rows").put("type", "array").put("maxItems", 50).set("items", item.deepCopy());
+        blockProperties.putObject("rows").put("type", "array").put("maxItems", 50).set("items", row);
         block.putArray("required").add("type");
 
         ObjectNode schema = mapper.createObjectNode().put("type", "object").put("additionalProperties", false);
         ObjectNode properties = schema.putObject("properties");
-        properties.putObject("resultSchemaVersion").put("type", "integer").putArray("enum").add(2);
+        properties.putObject("resultSchemaVersion").put("type", "integer").putArray("enum").add(3);
         properties.putObject("blocks").put("type", "array").put("minItems", 1).put("maxItems", 16).set("items", block);
         properties.putObject("limitations").put("type", "array").putObject("items").put("type", "string");
         schema.putArray("required").add("resultSchemaVersion").add("blocks");
         return new AgentModelClient.AgentToolDefinition("finalize_answer",
-                "Submit resultSchemaVersion 2 using only these block types: " + context.skill().outputBlocks() + ". SUMMARY uses content/evidenceRefs; COMPARISON_TABLE uses columns/rows; other blocks use items. Every factual item must cite sourceRefs from this run. Use null, UNKNOWN or NOT_OBSERVED instead of inventing missing values.", schema);
+                "Submit resultSchemaVersion 3 using only these block types: " + context.skill().outputBlocks() + ". SUMMARY uses statements; COMPARISON_TABLE uses columns and rows with one cited cell per column after the label; other blocks use items with sentence-level statements. Every factual statement or cell must cite sourceRefs from this run. Use null, UNKNOWN or NOT_OBSERVED instead of inventing missing values.", schema);
     }
 
     @Override public boolean dynamicParameters() { return true; }
 
     @Override public ToolResult execute(AgentExecutionContext context, JsonNode arguments) {
-        return context.skill().outputBlocks().isEmpty() ? executeLegacy(context, arguments) : executeV2(context, arguments);
+        if (context.skill().outputBlocks().isEmpty()) return executeLegacy(context, arguments);
+        return arguments.path("resultSchemaVersion").asInt() == 3 ? executeV3(context, arguments) : executeV2(context, arguments);
     }
 
     private ToolResult executeLegacy(AgentExecutionContext context, JsonNode arguments) {
@@ -132,17 +143,60 @@ public class FinalizeAnswerTool implements AgentTool {
         return ToolResult.terminal(normalized, "提交包含 " + blocks.size() + " 个类型化区块和 " + cited.size() + " 个引用的最终答案");
     }
 
+    private ToolResult executeV3(AgentExecutionContext context, JsonNode arguments) {
+        if (!arguments.isObject() || arguments.path("resultSchemaVersion").asInt() != 3 || !arguments.path("blocks").isArray() || arguments.path("blocks").isEmpty()) {
+            throw new IllegalArgumentException("Sentence-level final answer requires resultSchemaVersion 3 and non-empty blocks");
+        }
+        requireOverview(context);
+        LinkedHashMap<String, AgentEvidenceLedger.EvidenceSource> cited = new LinkedHashMap<>();
+        ObjectNode normalized = mapper.createObjectNode().put("resultSchemaVersion", 3); ArrayNode blocks = normalized.putArray("blocks");
+        for (JsonNode raw : arguments.path("blocks")) blocks.add(normalizeBlockV3(context, raw, cited));
+        if (blocks.findValuesAsText("type").stream().noneMatch(SkillBlockType.SUMMARY.name()::equals)) {
+            throw new IllegalArgumentException("Typed result must include a SUMMARY block");
+        }
+        addLimitations(context, arguments); finishCoverage(context, normalized, cited);
+        return ToolResult.terminal(normalized, "提交包含 " + blocks.size() + " 个句级区块和 " + cited.size() + " 个引用的最终答案");
+    }
+
+    /** Validates one complete streamed block against the frozen Skill and current evidence ledger. */
+    public ObjectNode validateStreamingBlock(AgentExecutionContext context, JsonNode raw) {
+        requireOverview(context);
+        return normalizeBlockV3(context, raw, new LinkedHashMap<>());
+    }
+
+    private ObjectNode normalizeBlockV3(AgentExecutionContext context, JsonNode raw,
+                                        Map<String, AgentEvidenceLedger.EvidenceSource> cited) {
+        SkillBlockType type;
+        try { type = SkillBlockType.valueOf(raw.path("type").asText()); }
+        catch (IllegalArgumentException exception) { throw new IllegalArgumentException("Unknown result block type"); }
+        if (!context.skill().outputBlocks().contains(type)) throw new IllegalArgumentException("Result block is outside the selected Skill contract: " + type);
+        ObjectNode block = mapper.createObjectNode().put("type", type.name()); copyText(raw, block, "title", "status");
+        if (type == SkillBlockType.SUMMARY) {
+            boolean insufficientEvidence = "INSUFFICIENT_EVIDENCE".equals(raw.path("status").asText());
+            block.set("statements", normalizeStatements(context, raw.path("statements"), cited, !insufficientEvidence));
+        } else if (type == SkillBlockType.COMPARISON_TABLE) {
+            if (!raw.path("columns").isArray() || raw.path("columns").size() < 2 || !raw.path("rows").isArray()) {
+                throw new IllegalArgumentException("COMPARISON_TABLE requires at least two columns and rows");
+            }
+            block.set("columns", raw.path("columns").deepCopy()); ArrayNode rows = block.putArray("rows");
+            int expectedCells = raw.path("columns").size() - 1;
+            for (JsonNode rawRow : raw.path("rows")) {
+                if (!rawRow.path("label").isTextual() || !rawRow.path("cells").isArray() || rawRow.path("cells").size() != expectedCells) {
+                    throw new IllegalArgumentException("Every comparison row requires a label and one cited cell for each column after it");
+                }
+                ObjectNode row = rows.addObject().put("label", rawRow.path("label").asText()); ArrayNode cells = row.putArray("cells");
+                for (JsonNode cell : rawRow.path("cells")) cells.add(normalizeStatement(context, cell, cited, true));
+            }
+        } else {
+            if (!raw.path("items").isArray()) throw new IllegalArgumentException(type + " requires items");
+            ArrayNode items = block.putArray("items"); for (JsonNode value : raw.path("items")) items.add(normalizeItemV3(context, value, cited, type));
+        }
+        return block;
+    }
+
     private ObjectNode normalizeItem(AgentExecutionContext context, JsonNode raw, Map<String, AgentEvidenceLedger.EvidenceSource> cited, SkillBlockType blockType) {
         if (!raw.isObject()) throw new IllegalArgumentException("Result block items must be objects");
-        if (blockType == SkillBlockType.DECISIONS && !Set.of("CONFIRMED", "PROPOSED", "UNCLEAR").contains(raw.path("status").asText())) {
-            throw new IllegalArgumentException("DECISIONS status must be CONFIRMED, PROPOSED or UNCLEAR");
-        }
-        if (blockType == SkillBlockType.ASSESSMENT_MATRIX) {
-            String assessment = raw.has("assessment") ? raw.path("assessment").asText() : raw.path("status").asText();
-            if (!Set.of("STRONG", "MIXED", "WEAK", "UNKNOWN", "NOT_OBSERVED").contains(assessment)) {
-                throw new IllegalArgumentException("ASSESSMENT_MATRIX items require a supported assessment status");
-            }
-        }
+        validateItemStatus(raw, blockType);
         ObjectNode item = mapper.createObjectNode();
         for (String name : ITEM_FIELDS) {
             if (!raw.has(name)) continue;
@@ -153,14 +207,57 @@ public class FinalizeAnswerTool implements AgentTool {
         return item;
     }
 
+    private ObjectNode normalizeItemV3(AgentExecutionContext context, JsonNode raw, Map<String, AgentEvidenceLedger.EvidenceSource> cited, SkillBlockType blockType) {
+        if (!raw.isObject()) throw new IllegalArgumentException("Result block items must be objects");
+        validateItemStatus(raw, blockType);
+        ObjectNode item = mapper.createObjectNode();
+        for (String name : V3_ITEM_FIELDS) {
+            if (!raw.has(name)) continue;
+            if (raw.get(name).isNull()) item.putNull(name); else item.set(name, raw.get(name).deepCopy());
+        }
+        boolean notObserved = "NOT_OBSERVED".equals(raw.path("status").asText()) || "NOT_OBSERVED".equals(raw.path("assessment").asText());
+        item.set("statements", normalizeStatements(context, raw.path("statements"), cited, !notObserved));
+        return item;
+    }
+
+    private ArrayNode normalizeStatements(AgentExecutionContext context, JsonNode raw, Map<String, AgentEvidenceLedger.EvidenceSource> cited,
+                                          boolean factualSourceRequired) {
+        if (!raw.isArray() || raw.isEmpty()) throw new IllegalArgumentException("Sentence-level result content requires non-empty statements");
+        ArrayNode statements = mapper.createArrayNode();
+        for (JsonNode statement : raw) statements.add(normalizeStatement(context, statement, cited, factualSourceRequired));
+        return statements;
+    }
+
+    private ObjectNode normalizeStatement(AgentExecutionContext context, JsonNode raw, Map<String, AgentEvidenceLedger.EvidenceSource> cited,
+                                          boolean factualSourceRequired) {
+        if (!raw.isObject() || !raw.path("text").isTextual() || raw.path("text").asText().isBlank()) {
+            throw new IllegalArgumentException("Every statement requires non-empty text");
+        }
+        ObjectNode statement = mapper.createObjectNode().put("text", raw.path("text").asText().trim());
+        attachEvidence(context, raw.path("evidenceRefs"), statement, cited, factualSourceRequired);
+        return statement;
+    }
+
+    private void validateItemStatus(JsonNode raw, SkillBlockType blockType) {
+        if (blockType == SkillBlockType.DECISIONS && !Set.of("CONFIRMED", "PROPOSED", "UNCLEAR").contains(raw.path("status").asText())) {
+            throw new IllegalArgumentException("DECISIONS status must be CONFIRMED, PROPOSED or UNCLEAR");
+        }
+        if (blockType == SkillBlockType.ASSESSMENT_MATRIX) {
+            String assessment = raw.has("assessment") ? raw.path("assessment").asText() : raw.path("status").asText();
+            if (!Set.of("STRONG", "MIXED", "WEAK", "UNKNOWN", "NOT_OBSERVED").contains(assessment)) {
+                throw new IllegalArgumentException("ASSESSMENT_MATRIX items require a supported assessment status");
+            }
+        }
+    }
+
     private void attachEvidence(AgentExecutionContext context, JsonNode refs, ObjectNode target,
                                 Map<String, AgentEvidenceLedger.EvidenceSource> cited, boolean factualSourceRequired) {
         if (!refs.isArray() || (factualSourceRequired && refs.isEmpty())) throw new IllegalArgumentException("Every factual result item requires evidenceRefs");
-        ArrayNode evidence = target.putArray("evidence"); boolean hasFactualSource = false;
+        ArrayNode evidence = target.putArray("evidence"); boolean hasFactualSource = false; Set<String> attached = new LinkedHashSet<>();
         for (JsonNode refNode : refs) {
             AgentEvidenceLedger.EvidenceSource source = context.evidence().require(refNode.asText()); cited.put(source.ref(), source);
             if (source.kind() == EvidenceSourceKind.TRANSCRIPT_SEGMENT || source.kind() == EvidenceSourceKind.USER_MEMORY) hasFactualSource = true;
-            evidence.addObject().put("sourceRef", source.ref()).put("kind", source.kind().name());
+            if (attached.add(source.ref())) evidence.addObject().put("sourceRef", source.ref()).put("kind", source.kind().name());
         }
         if (factualSourceRequired && !hasFactualSource) throw new IllegalArgumentException("Every factual result item must cite at least one transcript or confirmed-memory sourceRef");
     }
@@ -172,4 +269,11 @@ public class FinalizeAnswerTool implements AgentTool {
         normalized.set("coverage", mapper.valueToTree(context.coverage(cited.values())));
     }
     private ObjectNode evidenceSchema() { ObjectNode evidence = mapper.createObjectNode().put("type", "array").put("maxItems", 20); evidence.putObject("items").put("type", "string"); return evidence; }
+    private ObjectNode statementSchema() {
+        ObjectNode statement = mapper.createObjectNode().put("type", "object").put("additionalProperties", false);
+        ObjectNode properties = statement.putObject("properties");
+        properties.putObject("text").put("type", "string"); properties.set("evidenceRefs", evidenceSchema());
+        statement.putArray("required").add("text").add("evidenceRefs");
+        return statement;
+    }
 }

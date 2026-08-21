@@ -32,11 +32,11 @@ public class KnowledgeAgentWorker {
     @Scheduled(fixedDelayString = "${app.workers.poll-interval-ms:5000}")
     public void work() {
         if (!properties.getWorkers().isEnabled()) return;
-        runs.queuedRunIds().forEach(this::run);
+        runs.queuedRunIds().forEach(this::process);
         conversations.recoverSettledTurns();
     }
 
-    private void run(String runId) {
+    public void process(String runId) {
         KnowledgeAgentService.RunWork work = runs.claim(runId);
         if (work == null) return;
         if (work.legacy()) runLegacy(work); else {

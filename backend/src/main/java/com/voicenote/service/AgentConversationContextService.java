@@ -1,6 +1,5 @@
 package com.voicenote.service;
 
-import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.voicenote.config.AppProperties;
 import com.voicenote.domain.AgentConversation;
@@ -58,10 +57,7 @@ public class AgentConversationContextService {
 
     private String answerText(KnowledgeRun run) {
         if (run.getResultDocument() == null) return run.getFailureMessage();
-        try {
-            JsonNode result = mapper.readTree(run.getResultDocument());
-            return result.path("answer").isTextual() ? result.path("answer").asText() : result.toString();
-        } catch (Exception exception) { return run.getResultDocument(); }
+        return AgentResultText.extract(mapper, run.getResultDocument());
     }
     private static String bounded(String value, int max) { return value.length() <= max ? value : value.substring(0, max) + "…"; }
     private static String cropBlocks(List<String> blocks, int max) {

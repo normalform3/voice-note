@@ -1,6 +1,6 @@
 {
   "id": "knowledge-qa",
-  "version": "v2",
+  "version": "v3",
   "displayName": "知识问答",
   "description": "基于授权听记直接回答问题，披露多文档覆盖，并在证据不足时拒答。",
   "invocationPolicy": "AUTO",
@@ -15,6 +15,6 @@
   "resources": [
     {"type": "TEMPLATE", "path": "templates/answer.md", "name": "证据问答模板", "purpose": "组织直接答案、发现和比较表"},
     {"type": "EXAMPLE", "path": "examples/refusal.md", "name": "证据不足示例", "purpose": "展示证据不足时的拒答边界"},
-    {"type": "EXAMPLE", "path": "examples/expected-result.json", "name": "期望结果 fixture", "purpose": "评测知识问答 v2 区块结构"}
+    {"type": "EXAMPLE", "path": "examples/expected-result.json", "name": "期望结果 fixture", "purpose": "评测知识问答 v3 句级证据结构"}
   ]
 }

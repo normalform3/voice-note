@@ -21,6 +21,9 @@ public class AgentMetrics {
         if (toolName != null && toolName.startsWith("mcp.") && !success) registry.counter("voicenote.agent.mcp.errors", "tool", safeToolName(toolName)).increment();
     }
     public void settled(KnowledgeRunStatus status) { registry.counter("voicenote.agent.runs", "status", status.name()).increment(); }
+    public void liveLatency(String milestone, Duration duration) {
+        registry.timer("voicenote.agent.live.latency", "milestone", milestone).record(duration);
+    }
     public void evidenceRejected(String code) { registry.counter("voicenote.agent.evidence.rejected", "code", code).increment(); }
     public void coverage(AgentExecutionContext.Coverage coverage) {
         registry.summary("voicenote.agent.coverage.scope_documents").record(coverage.scopeDocumentCount());

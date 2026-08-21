@@ -1,6 +1,6 @@
 {
   "id": "meeting-summary",
-  "version": "v2",
+  "version": "v3",
   "displayName": "会议总结",
   "description": "提炼会议主题、已确认决策、行动项与未决问题，不补写负责人或期限。",
   "invocationPolicy": "AUTO",
@@ -15,6 +15,6 @@
   "resources": [
     {"type": "REFERENCE", "path": "references/decision-status.md", "name": "决策状态规则", "purpose": "区分确认、提议和不明确"},
     {"type": "TEMPLATE", "path": "templates/meeting.md", "name": "会议结果模板", "purpose": "保持决策、行动项和未决问题字段一致"},
-    {"type": "EXAMPLE", "path": "examples/expected-result.json", "name": "期望结果 fixture", "purpose": "评测会议总结 v2 区块结构"}
+    {"type": "EXAMPLE", "path": "examples/expected-result.json", "name": "期望结果 fixture", "purpose": "评测会议总结 v3 句级证据结构"}
   ]
 }
