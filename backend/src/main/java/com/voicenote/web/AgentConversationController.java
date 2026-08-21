@@ -24,10 +24,13 @@ public class AgentConversationController {
                 request.title(), request.scope().type(), request.scope().transcriptionTaskIds(), request.skillId(), request.timeZone(),
                 request.memoryEnabled() == null || request.memoryEnabled()));
     }
-    @GetMapping Page<AgentConversationService.ConversationView> list(@RequestParam(defaultValue = "0") int page,
-                                                                     @RequestParam(defaultValue = "20") int size,
-                                                                     Authentication authentication) {
-        return conversations.list(CurrentUser.require(authentication).id(), page, size);
+    @GetMapping ConversationPage list(@RequestParam(defaultValue = "0") int page,
+                                      @RequestParam(defaultValue = "20") int size,
+                                      Authentication authentication) {
+        Page<AgentConversationService.ConversationView> result =
+                conversations.list(CurrentUser.require(authentication).id(), page, size);
+        return new ConversationPage(result.getContent(), result.getTotalElements(), result.getTotalPages(),
+                result.getNumber(), result.getSize());
     }
     @GetMapping("/{conversationId}") AgentConversationService.ConversationDetail get(@PathVariable String conversationId, Authentication authentication) {
         return conversations.detail(CurrentUser.require(authentication).id(), conversationId);
@@ -53,4 +56,6 @@ public class AgentConversationController {
                                             String skillId, @NotBlank String timeZone, Boolean memoryEnabled) { }
     public record CreateTurnRequest(@NotBlank @Size(max = 8000) String message) { }
     public record UpdateConversationRequest(@Size(max = 160) String title, AgentConversationStatus status, Boolean memoryEnabled) { }
+    public record ConversationPage(List<AgentConversationService.ConversationView> content, long totalElements,
+                                   int totalPages, int number, int size) { }
 }

@@ -1,309 +1,378 @@
-# voice note
+# VoiceNote
 
-> 把录音变成可核对、可检索、能回答问题的个人知识库
+> 把录音转化为可校对、可检索、可追溯回答的个人知识库。
 
-voicenote 是一个面向会议、访谈与面试的 AI 音频知识库。它把分散的录音整理成带时间轴、可回听的听记资料，让重要内容不再沉在音频里。
+VoiceNote 面向会议、访谈与面试等长音频场景：它不只把声音转成文字，还把原音、说话人、正式文档、摘要和问答证据组织在同一条可回查链路中。
 
-项目解决的不只是“把声音转成文字”，还包括说话人标注难校对、长录音难整理、多份资料难检索，以及 AI 结论难验证。用户可以生成正式文档和摘要，围绕单份或多份录音提问，并通过证据链接回到原文与对应音频位置。
+项目重点解决三个实际问题：长录音的信息难以定位，自动转写与说话人结果需要校对，AI 给出的结论必须能回到原文和对应音频，而不是停留在不可验证的摘要。
+
+> **个人项目 · 独立完成**：从产品交互、Vue 前端和 Spring Boot 后端，到异步处理流水线、版本化检索、有界 Agent、Skill 与记忆机制，均由作者独立设计和实现。
+
+[30 秒了解](#30-秒了解) · [系统架构](#系统架构) · [产品工作流](#产品工作流) · [核心技术设计](#核心技术设计) · [Quick Start](#quick-start) · [Roadmap](#roadmap)
 
 ![录音详情、原文校对与当前文档问答](docs/images/example.png)
 
-*录音详情工作台把原音、文档、说话人校对和带证据问答放在同一页面。*
+*录音详情工作台把原音、处理状态、文档校对和带证据问答放在同一页面。*
 
 ## 30 秒了解
 
-| 记录 | 整理 | 检索 |
-| --- | --- | --- |
-| 上传音频并异步转写，按时间轴回听原文。 | 校正说话人，生成完整的正式文档和 AI 摘要。 | 建立个人知识库，通过受约束的 Agent 获取可回跳原文的答案。 |
-
-## 核心能力
-
-| 能力 | 用户可以做什么 |
+| 业务问题 | VoiceNote 的处理方式 |
 | --- | --- |
-| 音频听记 | 导入常见音频格式，查看异步处理进度，并按时间戳播放完整转写。 |
-| 校对与整理 | 保存说话人名称，人工或通过 AI 建议修正归属，再生成正式文档和摘要。 |
-| 个人知识库 | 将确认后的正式文档按 Topic 建立版本化索引，保留每次构建状态。 |
-| 证据化问答 | 围绕当前录音、选定资料或全部已入库资料提问，并从结论回到原文和音频。 |
-| Skill 与工具权限 | 使用内置或私人 Skill 约束任务、结果结构和可调用的只读工具。 |
-| Agent 会话与记忆 | 在固定资料范围内继续追问；长期记忆必须由用户确认，并可随时编辑或删除。 |
-| 可观察执行 | 查看听记阶段、Agent 工具调用和 Checkpoint；可重试阶段或从稳定状态创建子 Run。 |
+| 长音频处理时间长，中途失败后难以判断和恢复 | 将上传、ASR、文档整理、索引和分析拆成持久化阶段，记录每次尝试并支持阶段重试。 |
+| 自动说话人结果可能标错或在一句内发生切换 | AI 只提交受约束的校正建议；用户审核后再应用，旧建议不能覆盖更新后的转写版本。 |
+| 摘要压缩了信息，却切断了结论与原始语境 | 正式文档与摘要保留来源片段，证据可以回跳到说话人、原文和音频时间点。 |
+| 多份录音建立索引时，失败构建可能污染当前检索 | 每次构建创建独立 generation；新索引完整可用后才切换活动版本。 |
+| Agent 容易扩大数据范围、无限调用工具或生成无来源结论 | 会话冻结资料范围，Skill 限制工具和结果结构，运行时限制预算，并在提交答案前复核证据。 |
 
-## 产品流程
+## 系统架构
 
-### 1. 导入并管理音频
+```mermaid
+flowchart LR
+    Speech["Web Speech API"] -.-> Browser["Vue 3 工作台"]
+    Browser -->|"HTTP / JWT"| Api["Spring Boot API"]
+    Api -->|"SSE 进度与结果"| Browser
 
-资料库集中展示最近录音、处理状态和入库情况。用户可以导入新音频，也可以直接对全部已入库资料或勾选的录音提问。
+    Api --> Mysql["MySQL<br/>权威状态 + Outbox / Inbox"]
+    Api --> Minio["MinIO<br/>原始音频"]
+    Mysql --> Dispatcher["Outbox Dispatcher"]
+
+    Dispatcher -->|"默认：进程内"| Workers["异步 Worker<br/>ASR / 文档 / 索引"]
+    Dispatcher -.->|"可选"| RocketMQ["RocketMQ"]
+    RocketMQ -.-> Workers
+    Dispatcher --> Agent["有界 Agent Runtime"]
+
+    Workers --> Mysql
+    Workers --> Minio
+    Workers --> Models["DashScope<br/>ASR / Chat / Embedding / TTS"]
+    Workers -.-> Qdrant["Qdrant<br/>可重建检索索引"]
+
+    Agent --> Models
+    Agent --> Tools["Skill + 只读 Tools"]
+    Tools --> Mysql
+    Tools -.-> Qdrant
+    Agent --> Mysql
+```
+
+MySQL 保存任务、版本、会话、证据与运行轨迹，是系统的权威状态来源。RocketMQ 只负责可选的至少一次投递；Qdrant 只保存可从 MySQL 文档与版本信息重建的索引。
+
+## 为什么不只是 ASR
+
+| 核心问题 | 工程难点 | 设计回答 |
+| --- | --- | --- |
+| 录音无法像文档一样快速浏览 | 音频、转写片段、说话人与时间位置需要保持关联 | 保留原始转写与时间轴，再生成不丢失来源的正式文档和摘要。 |
+| 自动结果不能直接当作最终事实 | AI 校正可能过期、越界修改文字或与人工编辑冲突 | 冻结转写快照和修订号，限制建议类型，并在应用时再次做并发校验。 |
+| RAG 命中不代表答案可信 | 模型可能引用未读取内容、越过资料范围或使用失效索引 | 固定会话范围和内容版本，用证据账本记录 Tool 实际读取的来源，并在终态提交时复核。 |
+| 外部模型和消息投递都可能失败 | 请求重放、未知提交结果、重复消息和部分成功会造成状态不一致 | 让业务状态落在 MySQL，以幂等键、Outbox/Inbox、阶段尝试和恢复协调器推进流程。 |
+
+## 产品工作流
+
+### 1. 从音频到可核对文档
+
+```mermaid
+flowchart LR
+    Upload["上传意图 + SHA-256"] --> Blob["对象存储 + 幂等建单"]
+    Blob --> Asr["异步 ASR"]
+    Asr --> Raw["带时间轴的原始转写"]
+    Raw --> Review["人工编辑 / AI 校正建议审核"]
+    Review --> Formal["正式文档"]
+    Formal --> Summary["带来源摘要"]
+    Formal --> Build["构建新索引 generation"]
+    Build --> Ready{"全部写入成功？"}
+    Ready -->|"是"| Switch["切换活动版本"]
+    Ready -->|"否"| Keep["保留旧版本"]
+```
+
+资料库集中展示录音、处理状态和知识库入库情况。进入单条录音后，可以播放原音、按时间轴核对转写，并在原始文档、正式文档和摘要之间切换。
 
 ![音频资料库、导入入口与跨文档问答](docs/images/audio-library-home.png)
 
-*资料库首页同时承担音频入口、状态总览和跨文档问答。*
+*资料库首页同时承担音频入口、处理状态总览和跨文档问答。*
 
-### 2. 查看录音与处理状态
-
-进入单条录音后，可以播放原音、查看处理进度，并在原始文档、正式文档和摘要之间切换。右侧问答区只使用当前录音时，会明确展示当前可用的检索方式。
-
-![单条录音详情、文档视图与当前文档问答](docs/images/recording-detail-workbench.png)
-
-*单条录音工作台保留从原音到文档、再到当前文档问答的上下文。*
-
-### 3. 校正、整理并生成摘要
-
-原始文档保留完整转写、时间和 ASR 说话人。AI 只提出整段改派或句内拆分建议，用户确认后才应用；人工修订始终优先。
+AI 说话人校正不会直接改写原文。它只能对已有说话人提出整段改派或句内拆分建议，用户确认后才应用。
 
 ![AI 说话人建议的置信度与修改前后对比](docs/images/ai-speaker-correction-review.png)
 
-*说话人建议先进入审核列表，不会直接改写原文或自动落库。*
+*审核界面同时展示建议类型、置信度与修改前后内容。*
 
 <details>
-<summary><strong>展开查看处理阶段、正式文档与摘要</strong></summary>
+<summary><strong>查看更多：处理阶段、正式文档与摘要</strong></summary>
 
-处理进度按阶段展示状态、排队时间、处理耗时和实际模型，便于判断任务停在了哪里。
+处理面板展示每个阶段的排队时间、处理耗时、实际模型和失败位置。
 
 ![异步听记各阶段的状态与耗时](docs/images/processing-stage-details.png)
 
-正式文档是完整转写的清洗整理稿，而不是摘要；它按 Topic、问答对或叙述单元组织，并保留来源时间位置。
+正式文档按 Topic、问答对或叙述单元整理完整内容，而不是只保留摘要。
 
 ![按主题整理的正式文档](docs/images/organized-formal-document.png)
 
-AI 摘要提取重点与结论，每项都可以回到支撑它的原文片段。
+摘要中的结论可以展开证据并回到对应原文。
 
 ![带原文回跳链接的 AI 摘要](docs/images/ai-summary-with-evidence-links.png)
 
 </details>
 
-### 4. 建立知识库并获得可追溯答案
+### 2. 在固定资料范围内获得证据化回答
 
-确认正式文档后，可以建立或重建知识索引，再围绕当前录音、选定资料或全部已入库资料提问。Agent 只能访问本次授权的文档和 Skill 允许的工具，最终结论必须引用本次读取的证据。回答默认折叠证据，按需展开后以句级编号对应原文与音频时间点。
+```mermaid
+flowchart LR
+    Ask["用户问题"] --> Scope["冻结用户、资料范围与内容版本"]
+    Scope --> Skill["自动匹配或固定 Skill"]
+    Skill --> Runtime["预算受限的 Agent Runtime"]
+    Runtime --> Tools["调用允许的只读 Tool"]
+    Tools --> Ledger["持久化证据账本"]
+    Ledger --> Runtime
+    Runtime --> Finalize["校验结果结构与 sourceRef"]
+    Finalize --> Answer["持久化终态答案"]
+    Answer --> Ui["结构化回答 + 原文回跳"]
+    Runtime -.-> Live["SSE 瞬时进度"]
+    Live -.-> Ui
+    Ui -.-> Tts["可选 TTS 朗读"]
+    Runtime --> Checkpoint["稳定 Checkpoint"]
+    Checkpoint -.->|"创建子 Run 重放"| Runtime
+```
+
+Agent 只能读取当前会话授权的录音和 Skill 允许的工具。Tool 返回的来源先进入证据账本，最终结果只能引用本轮真实读取且仍属于当前版本的 `sourceRef`。
 
 <details>
-<summary><strong>展开查看 Skill、Tools 与 Agent 运行轨迹</strong></summary>
+<summary><strong>查看更多：Skill、Tools 与运行轨迹</strong></summary>
 
-Skill 设置用于管理任务目标、工作流、结果结构、参考资料和触发样例；私人 Skill 可以手工创建或由 AI 生成 Draft 后再发布。
+Skill 管理任务目标、触发样例、参考资料、结果区块和可调用工具；私人 Skill 可以由 AI 生成 Draft，但必须发布后才参与匹配。
 
 ![内置 Skill、私人 Skill 与 AI Draft 入口](docs/images/skill-platform.png)
 
-Tools 中心展示当前进程实际注册的工具，并按 Skill 查看运行时权限和输入协议。
+Tools 中心展示当前进程实际注册的工具，以及不同 Skill 的运行时权限。
 
 ![按 Skill 查看本地与 MCP 工具权限](docs/images/tools-center.png)
 
-回答完成后可以查看脱敏的执行步骤、耗时和 Token 用量；可重放 Checkpoint 会创建新的子 Run，不修改原轨迹。
+回答完成后可以查看脱敏步骤、耗时和 Token 用量；从 Checkpoint 重放会创建新的子 Run，不修改原轨迹。
 
 ![Agent 运行步骤与 Checkpoint 重放入口](docs/images/agent-run-trace-and-replay.png)
 
 </details>
 
-## 架构概览
+### 3. 用语音连续提问
 
-~~~mermaid
-flowchart LR
-    Browser["Vue 工作台"] -->|"HTTP"| Api["Spring Boot API"]
-    Api -->|"SSE / 查询结果"| Browser
-    Api --> Auth["JWT 用户隔离"]
-    Api --> Minio["MinIO：原始音频"]
-    Api --> Mysql["MySQL：任务、会话、记忆、索引版本、Agent Run"]
+语音模式复用同一套 Agent Run、证据校验和长期记忆边界。浏览器负责语音识别；服务端通过 SSE 推送固定阶段和已校验的完整答案区块，不暴露 Prompt、工具参数或隐式推理。
 
-    Mysql --> Outbox["事务 Outbox"]
-    Outbox -->|"可选 RocketMQ 或进程内发布"| Workers["异步流水线 Worker"]
-    Workers --> Models["DashScope：ASR / Chat / Embedding"]
-    Workers --> Mysql
-    Workers --> Qdrant["Qdrant：Dense + BM25"]
-    Workers --> Agent["有界 Agent：范围、Skill、预算"]
+![语音 Agent 会话启动与能力状态](docs/images/voice-agent-session-start.png)
 
-    Agent --> Tools["只读 Tools"]
-    Tools --> Mysql
-    Tools --> Qdrant
-    Agent --> Models
-    Agent --> Mysql
-~~~
+*首次启动时请求麦克风权限；停顿会结束当前轮识别并提交问题，原始音频不会保存。*
 
-MySQL 保存任务和版本的权威状态；RocketMQ 负责至少一次投递，不作为状态来源。Qdrant 保存可重建的版本化检索索引，问答仍会在 MySQL 中复核用户、文档和活动版本。
+![语音 Agent 连续会话中的结构化答案与证据](docs/images/voice-agent-evidence-response.png)
 
-主要技术：Vue 3、TypeScript、Spring Boot 3、Java 17、MySQL、MinIO；RocketMQ、Qdrant 与 DashScope 按环境启用。
+*回答区展示结构化结论和可展开证据；左侧识别下一轮问题。启用 TTS 时，朗读失败只降级为文字，不改变 Agent Run 状态。*
 
-## 工程亮点
+SSE 进度和流式区块是瞬时反馈，断线后以前端重新读取 Run 终态为准。详细边界、打断处理与 TTS 配置见 [语音 Agent 实时反馈设计](docs/voice-agent-realtime.md)。
 
-| 设计 | 解决的问题 |
-| --- | --- |
-| 三层上传幂等 | 处理重复点击、并发建单和请求重放，避免重复提交 ASR。 |
-| 持久化异步流水线 | 让任务状态、投递、消费和阶段重试可以恢复与审计。 |
-| 人审说话人校正 | AI 只生成受约束的建议，版本冲突或人工修改会阻止旧建议覆盖新结果。 |
-| 版本化知识索引 | 新索引完整可用后才切换活动版本，失败构建不会影响当前检索。 |
-| 有界证据 Agent | 会话冻结文档身份、时区与 Skill；每轮重新冻结当前内容版本，并由服务端复核引用。 |
-| 用户可控记忆 | 短期历史留在会话内，长期候选经用户确认后才可按需检索；MySQL 始终是权威来源。 |
+## 核心技术设计
 
-<details>
-<summary><strong>三层上传幂等：避免重复转写</strong></summary>
+### 1. 幂等上传与可恢复异步流水线
 
-同一用户上传相同内容时，`audio_blobs` 的 `(owner_id, sha256)` 唯一约束会复用音频记录；上传过程还会重新计算实际字节流的 SHA-256。创建任务时，`Idempotency-Key` 与请求哈希一起保存，任务本身再以音频、ASR 配置和流水线版本形成语义唯一键。
+**问题与难点：** 浏览器重试、重复点击、并发建单和消息重复投递都可能触发重复 ASR；外部 ASR 提交结果未知时，盲目重试还可能创建第二份任务。
+
+**设计与效果：** 上传使用内容 SHA-256、请求 `Idempotency-Key` 和任务语义键三层去重。任务与 Outbox 事件在同一事务中写入，消费者通过 Inbox 唯一键去重；每个阶段记录独立尝试，恢复协调器只推进仍可安全继续的状态。消息队列因此不是任务状态来源，进程重启和重复投递不会直接绕过业务约束。
 
 相关实现：
 
-- [UploadService](backend/src/main/java/com/voicenote/service/UploadService.java)：创建或复用上传意图，并校验实际上传内容。
-- [TranscriptionTaskService](backend/src/main/java/com/voicenote/service/TranscriptionTaskService.java)：以请求幂等记录和语义键创建任务。
-- [V1 初始表结构](backend/src/main/resources/db/migration/V1__initial_schema.sql)：声明音频、幂等记录与听记任务约束。
+- [UploadService](backend/src/main/java/com/voicenote/service/UploadService.java)：创建或复用上传意图，并重新计算实际字节流哈希。
+- [TranscriptionTaskService](backend/src/main/java/com/voicenote/service/TranscriptionTaskService.java)：保存请求幂等记录并按语义键建单。
+- [OutboxService](backend/src/main/java/com/voicenote/service/OutboxService.java)：在业务事务中创建带去重键的事件。
+- [PipelineRecoveryCoordinator](backend/src/main/java/com/voicenote/service/PipelineRecoveryCoordinator.java)：恢复可继续执行的任务和阶段。
 
-</details>
+### 2. 不让过期 AI 建议覆盖人工修订
 
-<details>
-<summary><strong>持久化异步流水线：状态不依赖消息队列</strong></summary>
+**问题与难点：** 说话人校正属于对原始转写的写操作。AI 生成建议期间，用户可能已经改名、改派片段或启动了新的校正 Run。
 
-任务与 Outbox 事件在同一事务中写入；消费者通过 Inbox 的 `(consumer_name, message_id)` 唯一约束去重。每个阶段有独立尝试记录，Worker 可以恢复仍在排队或应重试的工作；外部 ASR 提交结果未知时不会贸然重复提交。
-
-相关实现：
-
-- [OutboxService](backend/src/main/java/com/voicenote/service/OutboxService.java)：创建带去重键的 Outbox 事件。
-- [TaskMessageHandler](backend/src/main/java/com/voicenote/messaging/TaskMessageHandler.java)：登记 Inbox 并分派任务事件。
-- [PipelineProgressService](backend/src/main/java/com/voicenote/service/PipelineProgressService.java)：维护阶段状态、进度和重试。
-- [PipelineRecoveryCoordinator](backend/src/main/java/com/voicenote/service/PipelineRecoveryCoordinator.java)：恢复可以继续执行的任务。
-
-</details>
-
-<details>
-<summary><strong>人审说话人校正：AI 不直接修改原文</strong></summary>
-
-AI 校正 Run 冻结转写版本、修订号和原文快照哈希。Worker 只能在已有说话人集合中提出整段改派或句内拆分，不能生成替换文字；提交所选建议时，服务端再次校验 Run 状态、建议归属和当前修订号。
+**设计与效果：** 创建 Run 时冻结转写版本、修订号和原文快照哈希；模型只能从已有说话人集合中选择，不能替换文字。应用建议前，服务端再次校验 Run、建议归属和当前修订号，发现并发修改就拒绝旧建议。句内拆分的时间由确定性对齐逻辑生成，并标记是否为估算值。
 
 相关实现：
 
-- [SpeakerCorrectionService](backend/src/main/java/com/voicenote/service/SpeakerCorrectionService.java)：冻结快照、幂等创建 Run，并在应用前校验版本。
+- [SpeakerCorrectionService](backend/src/main/java/com/voicenote/service/SpeakerCorrectionService.java)：冻结快照并执行应用前的版本检查。
 - [SpeakerCorrectionWorker](backend/src/main/java/com/voicenote/service/SpeakerCorrectionWorker.java)：分块调用模型并解析受约束建议。
-- [SpeakerCorrectionTimingAligner](backend/src/main/java/com/voicenote/service/SpeakerCorrectionTimingAligner.java)：对齐句内拆分时间并标记估算来源。
-- [版本化 Prompt](backend/src/main/resources/prompts/speaker-correction-v1.md)：保存任务边界和 JSON 输出协议。
+- [SpeakerCorrectionTimingAligner](backend/src/main/java/com/voicenote/service/SpeakerCorrectionTimingAligner.java)：对齐句内拆分时间。
+- [版本化 Prompt](backend/src/main/resources/prompts/speaker-correction-v1.md)：保存校正边界和 JSON 输出协议。
 
-</details>
+### 3. 索引构建失败不影响当前检索
 
-<details>
-<summary><strong>版本化知识索引：构建失败不影响当前检索</strong></summary>
+**问题与难点：** 向量和稀疏索引需要多次外部写入；如果查询直接读取构建中的数据，部分成功会造成结果缺失或版本混用。
 
-正式文档先生成带来源信息的 Topic 快照，再按模型 Token 用量形成知识块。每次建立或重建都会创建独立 generation；新 Qdrant 点先以 `searchable=false` 写入，全部成功后才开启检索并切换 MySQL 中的活动版本。
+**设计与效果：** 正式文档先形成带来源信息的 Topic 快照，再按模型 Token 用量切块。每次构建创建独立 generation，Qdrant 点先以 `searchable=false` 写入；全部阶段成功后才启用新 generation 并切换 MySQL 活动版本，失败时继续使用旧版本。检索命中仍会按用户、文档和活动版本回查 MySQL。
 
 相关实现：
 
 - [KnowledgeChunker](backend/src/main/java/com/voicenote/service/KnowledgeChunker.java)：按 Topic 与原子单元生成知识块。
-- [KnowledgeDocumentService](backend/src/main/java/com/voicenote/service/KnowledgeDocumentService.java)：创建 generation 并切换活动版本。
-- [KnowledgeIndexWorker](backend/src/main/java/com/voicenote/service/KnowledgeIndexWorker.java)：写入向量、启用新版本并下线旧版本。
-- [QdrantKnowledgeVectorStore](backend/src/main/java/com/voicenote/service/QdrantKnowledgeVectorStore.java)：执行版本过滤的 Dense + BM25 检索。
+- [KnowledgeDocumentService](backend/src/main/java/com/voicenote/service/KnowledgeDocumentService.java)：创建 generation 并维护活动版本。
+- [KnowledgeIndexWorker](backend/src/main/java/com/voicenote/service/KnowledgeIndexWorker.java)：写入、启用新版本并下线旧版本。
+- [QdrantKnowledgeVectorStore](backend/src/main/java/com/voicenote/service/QdrantKnowledgeVectorStore.java)：执行带版本过滤的 Dense + BM25 检索。
 
-</details>
+### 4. 有界 Agent：范围、预算和引用都由服务端复核
 
-<details>
-<summary><strong>有界证据 Agent：范围、权限、预算和引用均可验证</strong></summary>
+**问题与难点：** 仅靠 Prompt 无法保证模型不扩大资料范围、不循环调用工具，也无法证明最终引用来自本轮真实读取的内容。
 
-每个会话冻结用户、文档身份、时区和首次选定的 Skill；每轮提问仍创建独立 Run，并重新冻结这些文档当前可用的转写或索引版本。模型只能选择允许的只读 Tool，不能提交 ownerId 或扩大范围；Run 同时受模型调用、回合、工具次数、活动时间和输出大小限制。
-
-会话短期上下文由滚动摘要和最近 Turn 组成，只用于指代与任务连续性。长期记忆只从用户消息提取候选，用户确认后才进入 MySQL；Agent 仅在需要时调用 `user_memory_search`，Qdrant 命中还会按当前用户、有效状态和当前版本回查 MySQL。
-
-Tool 读取的来源先进入持久化证据账本。最终回答只接受账本内的 `sourceRef`，完成事务会再次复核文档、索引版本、Chunk、Segment 和结果结构；稳定 Checkpoint 可用于恢复或创建保留剩余预算的子 Run。
+**设计与效果：** 会话固定用户、文档身份、时区和首次选定的 Skill；每轮重新冻结文档当前内容版本。Runtime 限制模型调用、回合、工具次数、活动时间和输出大小，Tool 参数不能提交 `ownerId` 或任意文档 ID。最终答案只能引用证据账本中的 `sourceRef`，提交事务会再次复核文档、索引版本、Chunk、Segment 与结果结构。稳定 Checkpoint 可以恢复执行或创建保留剩余预算的子 Run。
 
 相关实现：
 
-- [AgentRuntime](backend/src/main/java/com/voicenote/service/AgentRuntime.java)：执行版本化状态机、Tool Call、预算和终止条件。
-- [KnowledgeAgentService](backend/src/main/java/com/voicenote/service/KnowledgeAgentService.java)：保存范围快照、Step、Checkpoint 与证据账本。
+- [AgentRuntime](backend/src/main/java/com/voicenote/service/AgentRuntime.java)：执行状态机、Tool Call、预算和终止条件。
+- [KnowledgeAgentService](backend/src/main/java/com/voicenote/service/KnowledgeAgentService.java)：保存范围快照、步骤、Checkpoint 与证据账本。
 - [AgentConversationService](backend/src/main/java/com/voicenote/service/AgentConversationService.java)：锁定会话范围并串行创建 Turn。
-- [UserMemoryService](backend/src/main/java/com/voicenote/service/UserMemoryService.java)：执行候选过滤、确认、版本、删除和 MySQL 复核。
-- [Agent 记忆设计](docs/agent-memory.md)：说明短期摘要、长期记忆生命周期、配置与安全边界。
-- [FinalizeAnswerTool](backend/src/main/java/com/voicenote/agent/tools/FinalizeAnswerTool.java)：约束结果结构和来源引用。
-- [SkillService](backend/src/main/java/com/voicenote/service/SkillService.java)：管理私人 Draft、发布版本、触发预览和所有者隔离。
-- [Agent 评测说明](docs/agent-evaluation.md)：说明脱敏评测集、结果格式和指标计算。
+- [FinalizeAnswerTool](backend/src/main/java/com/voicenote/agent/tools/FinalizeAnswerTool.java)：校验结果结构和来源引用。
+- [Agent 评测说明](docs/agent-evaluation.md)：定义检索、引用、拒答和越权场景的脱敏评测格式。
 
-</details>
+### 5. 用户可控记忆与可降级实时反馈
 
-## 本地启动
+**问题与难点：** 连续会话需要上下文，但把模型推断或录音内容自动写入长期记忆会形成隐私与错误累积；实时语音链路中的 SSE、浏览器识别和 TTS 又都可能独立失败。
 
-### 前置条件
+**设计与效果：** 短期上下文由滚动摘要和最近 Turn 组成。长期候选只从用户原话提取，经过确定性过滤和用户确认后才进入 MySQL；Qdrant 命中仍按当前用户、状态和版本回查。实时进度不写入业务表，终态答案继续经过完整证据校验；识别或朗读失败只降级当前交互，不改变已持久化 Run。
 
-- JDK 17、Maven 与 Node.js
-- 可访问的 MySQL 与 MinIO
-- 可选：RocketMQ、Qdrant 与 DashScope 凭据
+相关实现：
 
-启动后端：
+- [UserMemoryService](backend/src/main/java/com/voicenote/service/UserMemoryService.java)：管理候选确认、版本、删除和 MySQL 复核。
+- [AgentConversationContextService](backend/src/main/java/com/voicenote/service/AgentConversationContextService.java)：构建滚动摘要与最近 Turn 上下文。
+- [AgentLiveEventService](backend/src/main/java/com/voicenote/service/AgentLiveEventService.java)：发布不含敏感执行细节的实时事件。
+- [VoiceTtsService](backend/src/main/java/com/voicenote/service/VoiceTtsService.java)：提供受配置控制的短文本 PCM 朗读。
+- [Agent 长短期记忆设计](docs/agent-memory.md)：说明候选来源、确认生命周期和删除语义。
 
-~~~bash
-cd backend
-cp .env.example .env
-# 至少配置 MySQL、MinIO 与 VOICENOTE_JWT_SECRET
-mvn spring-boot:run
-~~~
+## 设计权衡
 
-默认后端端口为 `8080`。另开一个终端启动前端：
+| 选择 | 获得 | 代价与边界 |
+| --- | --- | --- |
+| MySQL 作为权威状态，MQ 和 Qdrant 只承担传输与索引 | 任务状态、证据和活动版本可恢复、可审计 | 需要维护 Outbox/Inbox、索引重建和跨存储复核。 |
+| AI 说话人校正必须经过人工确认 | 避免模型直接破坏原始转写 | 多一个审核步骤，不能追求完全无人值守。 |
+| SSE 只承载瞬时进度，终态答案单独持久化 | 断线不会改变最终结果，实时链路可以独立降级 | 刷新后不恢复逐字流式过程，只恢复 Run 终态。 |
+| RocketMQ、Qdrant、Agent、记忆与 TTS 按配置启用 | 本地可以从较小依赖集合启动，外部故障不必阻塞基础页面 | 完整功能需要额外服务和真实模型凭据。 |
+| Skill 与 MCP 只开放受约束的只读工具 | 限制 Agent 对外部系统的副作用和数据外发 | 当前不支持通过 Agent 创建、修改或发送外部数据。 |
 
-~~~bash
-cd frontend
-npm install
-npm run dev
-~~~
+## 技术栈
 
-<details>
-<summary><strong>展开查看外部能力与检索参数</strong></summary>
-
-`backend/.env.example` 列出了完整变量和本地默认值。真实凭据、私有地址和对象存储配置应只保存在本地 `backend/.env` 或部署环境中。
-
-| 目标 | 配置 |
-| --- | --- |
-| RocketMQ 消费 | `ROCKETMQ_ENABLED=true`，并配置 `VOICENOTE_ROCKETMQ_NAMESRV`。 |
-| ASR、Chat 与 Embedding | `DASHSCOPE_ENABLED=true`，设置 `DASHSCOPE_API_KEY`。 |
-| 知识索引 | `VOICENOTE_KNOWLEDGE_ENABLED=true`，并配置 `VOICENOTE_QDRANT_URL`。 |
-| 自主 Agent | `VOICENOTE_AGENT_ENABLED=true`。默认 7 次模型调用、6 个回合、10 次工具调用和 120 秒。 |
-| Agent 记忆 | `VOICENOTE_MEMORY_ENABLED=true`。默认关闭；启用后使用独立 Qdrant collection，候选仍需用户确认。 |
-| 文本 Rerank | `VOICENOTE_RERANK_ENABLED=true`。失败时降级为 RRF 并在结果中披露。 |
-| 只读 MCP | `VOICENOTE_MCP_ENABLED=true`，通过 `VOICENOTE_MCP_SERVERS` 配置服务、认证变量名、只读工具和允许的内置 Skill。未连接的 MCP 不影响主链路。 |
-
-当前知识索引默认按 200 Token 判断短 Topic，目标 Chunk 为 800 Token、最大 1200 Token；问答上下文最多 12 个 Chunk 和 10,000 Token。修改这些参数后，需要重新建立知识库。
-
-MCP 是可选的 Agent Tool 扩展。未配置、连接失败或工具发现失败时，系统不会注册外部工具，上传、转写、索引与既有 Agent 仍按原逻辑运行。配置仅允许部署环境提供地址、命令与认证变量名；不得将凭据写入仓库。
-
-HTTP 示例使用不可解析的占位域名：
-
-~~~json
-[{"name":"calendar","baseUrl":"https://mcp.example.invalid","endpoint":"/mcp","authorizationEnv":"CALENDAR_MCP_AUTHORIZATION","readOnlyTools":["list_events"],"allowedSkills":["meeting-summary"]}]
-~~~
-
-钉钉官方 MCP 使用 stdio，可按固定版本的 `dingtalk-mcp` 作为可选部署运行时依赖。以下配置示例只传递环境变量名；`readOnlyTools` 必须填写官方服务实际发现的查询工具名，并且不接受 create、update、delete、send 等写工具。所有内置 Skill 可使用已连接的钉钉工具；私人 Skill 始终只能使用本地工具。
-
-~~~json
-[{"name":"dingtalk","transport":"STDIO","command":"npx","arguments":["-y","dingtalk-mcp@<PINNED_VERSION>"],"environment":{"DINGTALK_Client_ID":"DINGTALK_CLIENT_ID","DINGTALK_Client_Secret":"DINGTALK_CLIENT_SECRET","ACTIVE_PROFILES":"DINGTALK_ACTIVE_PROFILES"},"readOnlyTools":["getCalendarView","queryTasks","searchUser"],"allowedSkills":["knowledge-qa","meeting-summary","interview-retro"]}]
-~~~
-
-`<PINNED_VERSION>` 必须替换为已安全评审和验证的实际版本，不能使用 `latest`。服务端不信任远端的只读声明，也会阻止将已读取的转写原文直接作为 MCP 参数发送。
-
-</details>
+| 层次 | 技术 | 在项目中的职责 |
+| --- | --- | --- |
+| Web | Vue 3、TypeScript、Vite | 录音工作台、进度状态、说话人审核、证据展开和语音交互。 |
+| API | Java 17、Spring Boot 3、Spring Security | HTTP API、JWT 用户隔离、输入校验、事务与运行时边界。 |
+| 权威数据 | MySQL、Flyway、Spring Data JPA | 保存任务、版本、会话、证据、Outbox/Inbox 和 Agent 轨迹。 |
+| 对象存储 | MinIO | 保存原始音频；数据库只保存所有权、哈希与对象引用。 |
+| 异步投递 | 进程内 Publisher、可选 RocketMQ | 驱动转写、文档、索引、分析、Agent 和记忆任务。 |
+| 检索 | Qdrant | 保存可重建的 Dense + BM25 版本化索引。 |
+| 模型能力 | DashScope | 按配置提供 ASR、Chat、Embedding、Rerank 和 TTS。 |
 
 ## 项目结构
 
-~~~text
+```text
 .
 ├── backend/
-│   ├── src/main/java/com/voicenote/     # API、领域模型、Worker 与 Provider
+│   ├── src/main/java/com/voicenote/     # API、领域模型、Service、Worker 与 Provider
 │   ├── src/main/resources/agent-skills/ # 内置 Skill、模板、参考资料与示例
 │   ├── src/main/resources/db/           # Flyway 迁移
 │   ├── src/main/resources/prompts/      # 版本化模型 Prompt
 │   └── .env.example                     # 本地配置模板
-├── frontend/src/                        # Vue 工作台与 API 客户端
-├── docs/images/                         # README 展示图
-└── scripts/                             # 本地开发辅助脚本
-~~~
+├── frontend/src/                        # Vue 工作台、语音交互与 API 客户端
+├── docs/                                # 设计说明与产品截图
+└── scripts/                             # Agent 评测和本地开发辅助脚本
+```
+
+## Quick Start
+
+### 前置条件
+
+必需：
+
+- JDK 17、Maven、Node.js
+- 可访问的 MySQL 与 MinIO
+
+按需启用：
+
+- RocketMQ：跨进程消息投递
+- Qdrant：知识索引和长期记忆检索
+- DashScope 凭据：ASR、Chat、Embedding、Rerank 与 TTS
+
+> 仓库当前不包含 Docker Compose 或生产部署配置，因此这里不提供无法直接执行的 Docker 命令。
+
+### 启动后端
+
+```bash
+cd backend
+cp .env.example .env
+# 至少配置 MySQL、MinIO 和 VOICENOTE_JWT_SECRET
+mvn spring-boot:run
+```
+
+后端默认监听 `http://localhost:8080`。确认应用启动：
+
+```bash
+curl http://localhost:8080/actuator/health
+```
+
+### 启动前端
+
+```bash
+cd frontend
+npm install
+npm run dev
+```
+
+Vite 默认监听 `http://localhost:5173`，并将 `/api` 代理到本地 `8080` 端口。
+
+### 可选能力配置
+
+完整变量和安全占位值见 [`backend/.env.example`](backend/.env.example)。真实凭据、私有地址和对象存储配置只能放在本地 `.env` 或部署环境中。
+
+| 能力 | 关键开关 |
+| --- | --- |
+| RocketMQ 消费 | `ROCKETMQ_ENABLED=true` |
+| ASR、Chat 与 Embedding | `DASHSCOPE_ENABLED=true` 与 `DASHSCOPE_API_KEY` |
+| 知识索引 | `VOICENOTE_KNOWLEDGE_ENABLED=true` 与 `VOICENOTE_QDRANT_URL` |
+| 有界 Agent | `VOICENOTE_AGENT_ENABLED=true` |
+| 长短期记忆 | `VOICENOTE_MEMORY_ENABLED=true` |
+| TTS 朗读 | `VOICENOTE_TTS_ENABLED=true` |
+| 只读 MCP Tool | `VOICENOTE_MCP_ENABLED=true` 与部署环境中的服务映射 |
+
+## 使用路径与关键 API
+
+推荐先通过 Web 界面完成一次端到端验证：
+
+1. 注册并登录，导入一段可公开测试的音频。
+2. 等待转写阶段完成，核对时间轴和说话人。
+3. 按需人工修订，或创建 AI 说话人建议并审核。
+4. 生成正式文档与摘要，确认来源回跳正确。
+5. 建立知识索引，在当前录音或多份资料范围内提问。
+6. 展开答案证据与 Agent 轨迹；浏览器支持时再验证连续语音会话。
+
+| 资源 | API | 用途 |
+| --- | --- | --- |
+| 认证 | `/api/auth/*` | 注册、登录并获取 JWT。 |
+| 上传 | `/api/uploads/intents/*` | 创建上传意图、写入音频并完成校验。 |
+| 听记任务 | `/api/transcription-tasks/*` | 建单、读取阶段、重试、校正和创建知识索引。 |
+| 文档与分析 | `/api/organized-documents/*`、`/api/analysis-runs/*` | 读取正式文档并生成带证据摘要。 |
+| Agent 会话 | `/api/agent-conversations/*`、`/api/agent-runs/*` | 创建固定范围会话、提交 Turn、查看轨迹和重放 Checkpoint。 |
+| 实时事件 | `/api/progress-events` | 通过 SSE 接收处理进度和语音 Agent 瞬时区块。 |
+
+需要创建资源的接口普遍使用 `Idempotency-Key`；所有业务资源都会再次按 JWT 中的用户身份校验所有权。
 
 ## 验证
 
-后端包含状态机、幂等、上传、对象存储、知识切片、工具参数边界和 Agent 证据校验等测试；前端构建同时执行 Vue 类型检查。
+后端测试覆盖状态机、幂等、对象存储错误、阶段恢复、知识切块、说话人校正、Tool 参数边界、证据校验、Checkpoint 和记忆生命周期。前端构建会同时执行 Vue 类型检查。
 
-~~~bash
+```bash
 cd backend
 mvn test
 
 cd ../frontend
 npm run build
-~~~
+```
 
-## 当前边界
+Agent 的脱敏评测数据格式和指标计算见 [Agent 评测说明](docs/agent-evaluation.md)。仓库不声明尚未在目标模型、真实 Qdrant 索引和脱敏业务数据上复现的质量指标。
 
-- 项目仍处于开发阶段；外部 ASR、模型、Qdrant 和 RocketMQ 需要按环境启用，仓库不包含 Docker Compose 或生产部署配置。
-- 账号密码登录与 JWT 用户隔离已经实现，但项目不是具备组织、角色和权限管理的多租户后台。
-- Agent 由 `VOICENOTE_AGENT_ENABLED` 灰度启用；会话短期上下文和长期记忆由独立的 `VOICENOTE_MEMORY_ENABLED` 灰度控制，长期记忆不支持团队共享。
-- 私人 Skill 仅创建者可见，不支持导入导出、组织共享或市场；私人 Skill 只能使用平台允许的本地只读工具。
-- MCP 仅支持部署环境配置、由内置 Skill 声明的只读工具。
-- 转写、检索和问答质量仍需在目标模型与脱敏业务数据上评估；README 不声明未复现的质量指标。
+## Roadmap
 
-## 安全说明
+- 提供可复现的 Docker Compose 与生产部署配置。
+- 增加组织、角色和权限管理，以及团队资料与记忆共享边界。
+- 支持私人 Skill 的导入、导出、版本迁移与团队共享。
+- 在目标模型和脱敏数据集上建立检索、引用、拒答与语音交互基线。
 
-音频、知识文档和检索结果按已认证用户隔离。数据库、对象存储、模型服务和消息服务的真实地址及凭据只能保存在忽略的 `backend/.env` 或部署环境变量中。
+## 当前边界与安全说明
+
+- 项目仍处于开发阶段；外部 ASR、模型、Qdrant 和 RocketMQ 需要按环境启用。
+- 账号密码登录与 JWT 用户隔离已经实现，但当前不是具备组织级 RBAC 的多租户管理后台。
+- 长期记忆默认关闭，只保存用户确认的内容，不支持团队共享。
+- 私人 Skill 仅创建者可见；MCP 仅接受部署环境配置、内置 Skill 允许的只读工具。
+- 音频、知识文档和检索结果按认证用户隔离。真实凭据、私有服务地址、对象存储路径和租户标识不得提交到仓库。

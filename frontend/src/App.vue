@@ -1,15 +1,21 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
-import AgentResultBlocks from './AgentResult.vue'
+import AgentConversationThread from './AgentConversationThread.vue'
 import ProfilePage from './ProfilePage.vue'
 import SkillManager from './SkillManager.vue'
 import ToolsCenter from './ToolsCenter.vue'
 import VoiceConversationOverlay from './VoiceConversationOverlay.vue'
 import { isSpeechRecognitionSupported } from './useSpeechRecognition'
-import { api, hashFile, isSessionExpiredError, key, SESSION_EXPIRED_EVENT, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentAnswerBlockEvent, type AgentCapabilities, type AgentConversation, type AgentConversationDetail, type AgentProgressEvent, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AgentStep, type AgentStepDetail, type AiSpeakerCorrectionApplyResult, type AiSpeakerCorrectionDetail, type AiSpeakerCorrectionSuggestion, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PageResult, type PipelineStage, type ResultCitation, type Segment, type Speaker, type SpeakerCorrectionProposalPart, type SpeakerCorrectionResult, type Task, type WorkspaceSnapshot } from './api'
+import { api, hashFile, isSessionExpiredError, key, SESSION_EXPIRED_EVENT, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentAnswerBlockEvent, type AgentCapabilities, type AgentConversation, type AgentConversationDetail, type AgentConversationTurn, type AgentProgressEvent, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AgentStep, type AgentStepDetail, type AiSpeakerCorrectionApplyResult, type AiSpeakerCorrectionDetail, type AiSpeakerCorrectionSuggestion, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PageResult, type PipelineStage, type ResultCitation, type Segment, type Speaker, type SpeakerCorrectionProposalPart, type SpeakerCorrectionResult, type Task, type WorkspaceSnapshot } from './api'
 
 type WorkspaceView = 'library' | 'document' | 'skills' | 'tools' | 'profile'
 type DetailTab = 'transcript' | 'summary' | 'organized'
+type AgentPanelSize = 'wide' | 'narrow'
+type AgentThreadTurn = AgentConversationTurn & { auxiliary?: boolean }
+
+const AGENT_PANEL_SIZE_KEY = 'voicenote_agent_panel_size'
+const AGENT_LIVE_PROGRESS_LIMIT = 32
+const AGENT_DETAIL_REFRESH_DELAY_MS = 250
 
 const token = ref(localStorage.getItem('voicenote_token') || '')
 const signedInAccount = ref(localStorage.getItem('voicenote_account') || '')
@@ -24,13 +30,20 @@ const agentRuns = ref<AgentRun[]>([])
 const agent = ref<AgentRunDetail | null>(null)
 const conversations = ref<AgentConversation[]>([])
 const activeConversation = ref<AgentConversationDetail | null>(null)
+const agentPanelSize = ref<AgentPanelSize>(localStorage.getItem(AGENT_PANEL_SIZE_KEY) === 'narrow' ? 'narrow' : 'wide')
+const conversationHistoryOpen = ref(false)
+const turnDetailsByRunId = ref<Record<string, AgentRunDetail>>({})
+const turnDetailLoading = ref<Record<string, boolean>>({})
+const agentLiveProgressByRunId = ref<Record<string, AgentProgressEvent[]>>({})
 const conversationMemoryEnabled = ref(true)
 const conversationActionError = ref('')
 const pendingMemoryCandidateCount = ref(0)
+const activeStepRunId = ref<string | null>(null)
 const activeStepId = ref<string | null>(null)
 const activeStepDetail = ref<AgentStepDetail | null>(null)
 const stepDetailLoading = ref(false)
 const replayingCheckpointId = ref<string | null>(null)
+const traceActionRunId = ref<string | null>(null)
 const traceActionError = ref('')
 const agentSkills = ref<AgentSkill[]>([])
 const agentCapabilities = ref<AgentCapabilities | null>(null)
@@ -71,6 +84,8 @@ const knowledge = ref<KnowledgeRunDetail | null>(null)
 const analysis = ref<AnalysisRunDetail | null>(null)
 const asking = ref(false)
 const audio = ref<HTMLAudioElement | null>(null)
+const agentQuestionInput = ref<HTMLTextAreaElement | null>(null)
+const agentThread = ref<{ scrollToLatest: (behavior?: ScrollBehavior) => void } | null>(null)
 const fileInput = ref<HTMLInputElement | null>(null)
 const speakerDiarization = ref(true)
 const speakerCount = ref<number | null>(null)
@@ -107,6 +122,10 @@ let reconnectDelay = 1000
 let clockTimer: number | null = null
 let workspaceRequest: Promise<void> | null = null
 let documentRequestVersion = 0
+const turnDetailRequests = new Map<string, Promise<AgentRunDetail | undefined>>()
+const turnDetailRefreshTimers = new Map<string, number>()
+const turnDetailRefreshDirty = new Set<string>()
+const turnDetailRefreshRunning = new Map<string, Promise<void>>()
 
 const isDocumentView = computed(() => workspaceView.value === 'document')
 const isSkillsView = computed(() => workspaceView.value === 'skills')
@@ -129,11 +148,35 @@ const canCreateKnowledgeBuild = computed(() => selected.value?.status === 'WAITI
 const activeRun = computed(() => agent.value?.run)
 const conversationLocked = computed(() => Boolean(activeConversation.value))
 const activeEvidence = computed(() => agent.value?.evidence || [])
-const voiceAgentBusy = computed(() => Boolean(asking.value || (activeRun.value?.id && ['PENDING', 'QUEUED', 'RUNNING'].includes(activeRun.value.status))))
-const activeRunTerminal = computed(() => Boolean(activeRun.value && !['PENDING', 'QUEUED', 'RUNNING'].includes(activeRun.value.status)))
-const initialReplayCheckpoint = computed(() => agent.value?.checkpoints?.find(checkpoint => !checkpoint.stepId && checkpoint.replayable))
-const activeRunUsage = computed(() => activeRun.value
-  ? `模型 ${activeRun.value.modelCallsUsed}/${activeRun.value.maxModelCalls} · 工具 ${activeRun.value.toolCallsUsed}/${activeRun.value.maxToolCalls}` : '')
+const agentThreadTurns = computed<AgentThreadTurn[]>(() => {
+  const turns: AgentThreadTurn[] = [...(activeConversation.value?.turns || [])]
+  const run = activeRun.value
+  if (run?.id && !turns.some(turn => turn.runId === run.id)) {
+    turns.push({
+      id: `run-${run.id}`,
+      turnIndex: run.conversationTurnIndex ?? turns.length,
+      userMessage: run.question,
+      runId: run.id,
+      runStatus: run.status,
+      resultDocument: run.resultDocument,
+      failureMessage: run.failureMessage,
+      extractionStatus: 'NOT_REQUESTED',
+      createdAt: run.createdAt,
+      auxiliary: Boolean(activeConversation.value)
+    })
+  }
+  return turns
+})
+const agentConversationKey = computed(() => activeConversation.value?.conversation.id || activeRun.value?.id || 'new-conversation')
+const visibleAgentRunIds = computed(() => agentThreadTurns.value.flatMap(turn => turn.runId ? [turn.runId] : []))
+const conversationBusy = computed(() => Boolean(asking.value || agentThreadTurns.value.some(turn => ['PENDING', 'QUEUED', 'RUNNING'].includes(
+  (turn.runId ? turnDetailsByRunId.value[turn.runId]?.run.status : undefined) || turn.runStatus || ''
+))))
+const voiceAgentBusy = computed(() => conversationBusy.value)
+const agentSendDisabled = computed(() => agentCapabilities.value?.enabled !== true || conversationBusy.value || !question.value.trim()
+  || (agentScopeType.value === 'CURRENT_DOCUMENT' && !canAnalyzeCurrent.value)
+  || (agentScopeType.value === 'SELECTED_DOCUMENTS' && !selectedTaskIds.value.length)
+  || (agentScopeType.value === 'ALL_DOCUMENTS' && !indexedTaskCount.value))
 const parsedAnswer = computed(() => parseResultDocument(activeRun.value?.resultDocument))
 const scopeSceneTypes = computed<Task['sceneType'][]>(() => {
   if (agentScopeType.value === 'CURRENT_DOCUMENT') return selected.value ? [selected.value.sceneType] : []
@@ -193,11 +236,6 @@ const agentSuggestions = computed(() => {
     ? ['提炼这份录音的重点内容', '有哪些明确的下一步行动？', '不同发言人的主要观点是什么？']
     : ['总结近期会议中的关键结论', '跨会议有哪些重复出现的风险？', '找出所有需要跟进的行动项']
 })
-const activeSkillName = computed(() => {
-  if (!activeRun.value) return ''
-  if (activeRun.value.skillId === 'auto' || activeRun.value.skillVersion === 'pending') return '正在匹配 Skill'
-  return activeRun.value.skillDisplayName || agentSkills.value.find(item => item.id === activeRun.value?.skillId)?.displayName || activeRun.value.skillId
-})
 const voiceModeAvailable = computed(() => {
   if (!voiceRecognitionSupported || agentCapabilities.value?.enabled !== true) return false
   if (agentScopeType.value === 'CURRENT_DOCUMENT') return canAnalyzeCurrent.value
@@ -227,13 +265,6 @@ function parseResultDocument(raw?: string) {
   if (!raw) return null
   try { return JSON.parse(raw) as AgentResultDocument }
   catch { return { answer: raw, findings: [] } }
-}
-function conversationTurnAnswer(raw?: string) {
-  const result = parseResultDocument(raw)
-  if (!result) return 'Agent 正在处理…'
-  if (result.answer) return result.answer
-  const first = result.blocks?.find(block => block.content || block.items?.length)
-  return first?.content || first?.items?.[0]?.content || '已生成结构化结果'
 }
 function taskTitle(task: Task) {
   return task.subject || documents.value.find(document => document.transcriptionTaskId === task.id)?.title
@@ -310,8 +341,33 @@ function showSkills() { workspaceView.value = 'skills'; mobileAgentOpen.value = 
 function showTools() { workspaceView.value = 'tools'; mobileAgentOpen.value = false }
 function showProfile() { workspaceView.value = 'profile'; mobileAgentOpen.value = false }
 function toggleAgent() { mobileAgentOpen.value = !mobileAgentOpen.value }
+function toggleAgentPanelSize() {
+  agentPanelSize.value = agentPanelSize.value === 'wide' ? 'narrow' : 'wide'
+  localStorage.setItem(AGENT_PANEL_SIZE_KEY, agentPanelSize.value)
+}
+function toggleConversationHistory() { conversationHistoryOpen.value = !conversationHistoryOpen.value }
+async function toggleHeaderConversationMemory() {
+  if (!agentCapabilities.value?.memoryEnabled) return
+  conversationMemoryEnabled.value = !conversationMemoryEnabled.value
+  if (activeConversation.value) await toggleConversationMemory()
+}
 function triggerFilePicker() { fileInput.value?.click() }
-function useSuggestion(suggestion: string) { question.value = suggestion }
+function resizeAgentQuestionInput() {
+  const input = agentQuestionInput.value
+  if (!input) return
+  input.style.height = 'auto'
+  input.style.height = `${Math.min(144, Math.max(54, input.scrollHeight))}px`
+}
+function useSuggestion(suggestion: string) {
+  question.value = suggestion
+  nextTick(() => { resizeAgentQuestionInput(); agentQuestionInput.value?.focus() })
+}
+function handleAgentQuestionInput() { resizeAgentQuestionInput() }
+function handleAgentQuestionKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Enter' || event.shiftKey || event.isComposing || (event as KeyboardEvent & { keyCode?: number }).keyCode === 229) return
+  event.preventDefault()
+  if (!agentSendDisabled.value) void askAgent()
+}
 function speakerColor(speakerId?: string) {
   const palette = ['#637d72', '#9a6c77', '#92733d', '#647d98', '#7b6f99', '#8b745d']
   const source = speakerId || 'speaker'
@@ -632,48 +688,53 @@ async function saveSpeakerName(speaker: Speaker) {
     segments.value = transcript
   } finally { savingSpeakerId.value = null }
 }
-function stepLabel(type: string, toolName?: string) {
-  if (type === 'ROUTE') return '选择任务 Skill'
-  if (type === 'MODEL') return 'Agent 决策'
-  if (type === 'FINALIZE') return '校验证据并提交答案'
-  if (type === 'RECOVERY') return '从 Checkpoint 恢复'
-  return ({ document_list: '筛选文档范围', document_overview: '读取文档概览', knowledge_search: '混合检索与重排', transcript_context: '读取相邻原文' } as Record<string, string>)[toolName || ''] || toolName || '调用只读工具'
-}
 function resetTraceSelection() {
+  activeStepRunId.value = null
   activeStepId.value = null
   activeStepDetail.value = null
   stepDetailLoading.value = false
+  traceActionRunId.value = null
   traceActionError.value = ''
 }
-async function toggleStepDetail(step: AgentStep) {
-  if (!activeRun.value || stepDetailLoading.value) return
-  if (activeStepId.value === step.id) { activeStepId.value = null; activeStepDetail.value = null; return }
+async function toggleStepDetail(payload: { runId: string; step: AgentStep }) {
+  const { runId, step } = payload
+  if (stepDetailLoading.value) return
+  if (activeStepRunId.value === runId && activeStepId.value === step.id) {
+    activeStepRunId.value = null
+    activeStepId.value = null
+    activeStepDetail.value = null
+    return
+  }
+  activeStepRunId.value = runId
   activeStepId.value = step.id
   activeStepDetail.value = null
   stepDetailLoading.value = true
+  traceActionRunId.value = runId
   traceActionError.value = ''
   try {
-    const { data } = await api.get<AgentStepDetail>(`/agent-runs/${activeRun.value.id}/steps/${step.id}`)
-    if (activeStepId.value === step.id) activeStepDetail.value = data
+    const { data } = await api.get<AgentStepDetail>(`/agent-runs/${runId}/steps/${step.id}`)
+    if (activeStepRunId.value === runId && activeStepId.value === step.id) activeStepDetail.value = data
   } catch (error: any) {
     traceActionError.value = error.response?.data?.message || '无法读取该步详情。'
   } finally { stepDetailLoading.value = false }
 }
-function readableTraceValue(value: unknown) {
-  if (value == null) return '无'
-  return typeof value === 'string' ? value : JSON.stringify(value, null, 2)
-}
-async function replayFromCheckpoint(checkpointId: string) {
-  const source = activeRun.value
+async function replayFromCheckpoint(payload: { runId: string; checkpointId: string }) {
+  const { runId, checkpointId } = payload
+  const sourceDetail = turnDetailsByRunId.value[runId] || await ensureTurnDetail(runId)
+  const source = sourceDetail?.run
   if (!source || replayingCheckpointId.value || !window.confirm('将从这个状态创建子 Run 并继续执行。原 Run 与 Trace 不会被修改，是否继续？')) return
   replayingCheckpointId.value = checkpointId
+  traceActionRunId.value = runId
   traceActionError.value = ''
   try {
     const { data } = await api.post<AgentRun>(`/agent-runs/${source.id}/replays`, { checkpointId }, { headers: { 'Idempotency-Key': key() } })
-    agent.value = { run: data, documentIds: [...(agent.value?.documentIds || [])], childRunIds: [], steps: [], checkpoints: [], evidence: [] }
+    agent.value = { run: data, documentIds: [...(sourceDetail?.documentIds || [])], childRunIds: [], steps: [], checkpoints: [], evidence: [] }
     resetTraceSelection()
     upsertAgent(data)
+    await nextTick()
+    agentThread.value?.scrollToLatest('smooth')
   } catch (error: any) {
+    traceActionRunId.value = runId
     traceActionError.value = error.response?.data?.message || '无法从该 Checkpoint 重新执行。'
   } finally { replayingCheckpointId.value = null }
 }
@@ -758,6 +819,7 @@ async function createKnowledgeBuild() {
 async function submitAgentMessage(rawMessage: string) {
   const message = rawMessage.trim()
   if (!message) throw new Error('问题不能为空。')
+  if (conversationBusy.value) throw new Error('请等待当前回答完成后再发送下一条消息。')
   if (!agentCapabilities.value?.enabled) throw new Error('当前部署未启用 Agent。')
   if (agentScopeType.value === 'CURRENT_DOCUMENT' && !selected.value?.transcriptReady) throw new Error('当前音频仍在转写，完成后才能提问。')
   if (agentScopeType.value === 'SELECTED_DOCUMENTS' && !selectedTaskIds.value.length) throw new Error('请先勾选至少一份已收录资料。')
@@ -808,10 +870,13 @@ async function submitAgentMessage(rawMessage: string) {
 }
 async function askAgent() {
   const message = question.value.trim()
-  if (!message) return
+  if (!message || agentSendDisabled.value) return
   try {
     await submitAgentMessage(message)
     question.value = ''
+    await nextTick()
+    resizeAgentQuestionInput()
+    agentThread.value?.scrollToLatest('smooth')
   } catch { /* The shared submit path already exposes a user-facing error. */ }
 }
 async function submitVoiceAgentMessage(message: string) {
@@ -849,24 +914,108 @@ async function openVoiceEvidence(citation: ResultCitation) {
   await openEvidence(citation)
 }
 async function loadAgentDetail(runId: string) {
-  const { data } = await api.get<AgentRunDetail>(`/agent-runs/${runId}`)
+  const data = await requestTurnDetail(runId, true)
+  if (!data) throw new Error('无法读取这轮的证据与运行记录。')
   agent.value = data; resetTraceSelection(); upsertAgent(data.run)
   if (data.run.conversationId && activeConversation.value?.conversation.id !== data.run.conversationId) {
     await loadConversationDetail(data.run.conversationId)
   }
   return data
 }
+function applyRefreshedTurnDetail(runId: string, data: AgentRunDetail) {
+  turnDetailsByRunId.value = { ...turnDetailsByRunId.value, [runId]: data }
+  if (agent.value?.run.id === runId) agent.value = data
+  upsertAgent(data.run)
+}
+function requestTurnDetail(runId: string, reportError: boolean) {
+  const activeRequest = turnDetailRequests.get(runId)
+  if (activeRequest) return activeRequest
+  turnDetailLoading.value = { ...turnDetailLoading.value, [runId]: true }
+  const request = (async () => {
+    try {
+      const { data } = await api.get<AgentRunDetail>(`/agent-runs/${runId}`)
+      applyRefreshedTurnDetail(runId, data)
+      return data
+    } catch (error: any) {
+      if (reportError) {
+        traceActionRunId.value = runId
+        traceActionError.value = error.response?.data?.message || '无法读取这轮的证据与运行记录。'
+      }
+      return undefined
+    } finally {
+      turnDetailRequests.delete(runId)
+      const next = { ...turnDetailLoading.value }
+      delete next[runId]
+      turnDetailLoading.value = next
+    }
+  })()
+  turnDetailRequests.set(runId, request)
+  return request
+}
+async function ensureTurnDetail(runId: string) {
+  if (turnDetailsByRunId.value[runId]) return turnDetailsByRunId.value[runId]
+  return requestTurnDetail(runId, true)
+}
+function isAgentRunVisible(runId: string) {
+  return visibleAgentRunIds.value.includes(runId)
+}
+async function drainTurnDetailRefresh(runId: string) {
+  const activeRefresh = turnDetailRefreshRunning.get(runId)
+  if (activeRefresh) return activeRefresh
+  const refresh = Promise.resolve().then(async () => {
+    try {
+      while (turnDetailRefreshDirty.delete(runId) && isAgentRunVisible(runId)) {
+        await requestTurnDetail(runId, false)
+      }
+    } finally {
+      turnDetailRefreshRunning.delete(runId)
+      if (turnDetailRefreshDirty.has(runId) && isAgentRunVisible(runId)) scheduleTurnDetailRefresh(runId)
+    }
+  })
+  turnDetailRefreshRunning.set(runId, refresh)
+  return refresh
+}
+function scheduleTurnDetailRefresh(runId: string, delay = AGENT_DETAIL_REFRESH_DELAY_MS) {
+  if (!isAgentRunVisible(runId)) return
+  turnDetailRefreshDirty.add(runId)
+  if (turnDetailRefreshTimers.has(runId) || turnDetailRefreshRunning.has(runId)) return
+  const timer = window.setTimeout(() => {
+    turnDetailRefreshTimers.delete(runId)
+    void drainTurnDetailRefresh(runId)
+  }, delay)
+  turnDetailRefreshTimers.set(runId, timer)
+}
+function recordAgentLiveProgress(event: AgentProgressEvent) {
+  const current = agentLiveProgressByRunId.value[event.runId] || []
+  if (current.some(value => value.sequence === event.sequence)) return
+  agentLiveProgressByRunId.value = {
+    ...agentLiveProgressByRunId.value,
+    [event.runId]: [...current, event].sort((left, right) => left.sequence - right.sequence).slice(-AGENT_LIVE_PROGRESS_LIMIT)
+  }
+  scheduleTurnDetailRefresh(event.runId)
+}
+function clearAgentLiveProgress(runId: string) {
+  if (!agentLiveProgressByRunId.value[runId]) return
+  const next = { ...agentLiveProgressByRunId.value }
+  delete next[runId]
+  agentLiveProgressByRunId.value = next
+}
 function startNewConversation() {
   activeConversation.value = null
   agent.value = null
+  conversationHistoryOpen.value = false
   conversationActionError.value = ''
   selectedSkillId.value = ''
   skillSelectionNotice.value = ''
   conversationMemoryEnabled.value = Boolean(agentCapabilities.value?.memoryEnabled)
   question.value = ''
+  resetTraceSelection()
+  nextTick(() => { resizeAgentQuestionInput(); agentQuestionInput.value?.focus() })
 }
 async function openConversation(conversation: AgentConversation) {
   conversationActionError.value = ''
+  conversationHistoryOpen.value = false
+  const keepMobileAgentOpen = mobileAgentOpen.value
   try {
     const detail = await loadConversationDetail(conversation.id)
     if (conversation.scopeType === 'CURRENT_DOCUMENT') {
@@ -885,12 +1034,9 @@ async function openConversation(conversation: AgentConversation) {
     else agent.value = null
   } catch (error: any) {
     conversationActionError.value = error.response?.data?.message || '无法读取该会话。'
+  } finally {
+    mobileAgentOpen.value = keepMobileAgentOpen
   }
-}
-async function openConversationTurn(runId?: string) {
-  if (!runId) return
-  try { await loadAgentDetail(runId) }
-  catch (error: any) { conversationActionError.value = error.response?.data?.message || '无法读取这轮结果。' }
 }
 async function toggleConversationMemory() {
   if (!activeConversation.value) return
@@ -918,6 +1064,7 @@ async function deleteActiveConversation() {
   }
 }
 async function openLineageRun(runId: string) {
+  traceActionRunId.value = runId
   try { await loadAgentDetail(runId) }
   catch (error: any) { traceActionError.value = error.response?.data?.message || '无法读取关联 Run。' }
 }
@@ -988,14 +1135,20 @@ async function seekToSegment(segment: Segment) {
   await seekToTime(segment.startMs, true)
 }
 async function openEvidence(citation: { sourceRef?: string; chunkId?: string; segmentId?: string }) {
-  const evidence = activeEvidence.value.find(item => citation.sourceRef ? item.sourceRef === citation.sourceRef : item.chunkId === citation.chunkId && item.segmentId === citation.segmentId)
+  if (!activeRun.value?.id) return
+  await openTurnEvidence({ runId: activeRun.value.id, citation })
+}
+async function openTurnEvidence(payload: { runId: string; citation: ResultCitation }) {
+  const { runId, citation } = payload
+  const detail = turnDetailsByRunId.value[runId] || (agent.value?.run.id === runId ? agent.value : undefined) || await ensureTurnDetail(runId)
+  const evidence = detail?.evidence.find(item => citation.sourceRef ? item.sourceRef === citation.sourceRef : item.chunkId === citation.chunkId && item.segmentId === citation.segmentId)
   if (evidence?.sourceKind === 'EXTERNAL' && evidence.externalUrl) { window.open(evidence.externalUrl, '_blank', 'noopener,noreferrer'); return }
   if (evidence?.sourceKind === 'USER_MEMORY') { window.alert(`来自你确认的记忆：${evidence.text || '该记忆已不可用'}`); return }
   if (!evidence?.segmentId) return
-  const detail = agent.value
+  const currentAgent = agent.value
   const conversation = activeConversation.value
   await openEvidenceForTask({ segmentId: evidence.segmentId }, evidence.transcriptionTaskId)
-  agent.value = detail
+  agent.value = currentAgent
   activeConversation.value = conversation
 }
 async function openSummaryEvidence(citation?: { segmentId?: string }) {
@@ -1118,13 +1271,29 @@ function applySnapshot(snapshot: WorkspaceSnapshot) {
     }
   }
 }
+async function handleSettledAgentRun(run: AgentRun) {
+  upsertAgent(run)
+  if (agent.value?.run.id === run.id) agent.value = { ...agent.value, run }
+  if (isAgentRunVisible(run.id)) {
+    turnDetailRefreshDirty.add(run.id)
+    await drainTurnDetailRefresh(run.id)
+  }
+  await Promise.all([
+    loadAgentRuns(),
+    loadAgentConversations(),
+    activeConversation.value ? loadConversationDetail(activeConversation.value.conversation.id) : Promise.resolve()
+  ])
+  clearAgentLiveProgress(run.id)
+}
 function handleProgressEvent(name: string, payload: any) {
   if (name === 'snapshot') { applySnapshot(payload as WorkspaceSnapshot); return }
   if (name === 'task-stage-settled' && payload.task) { upsertTask(payload.task as Task); return }
   if (name === 'knowledge-index-progress') { void loadDocuments(); return }
   if (name === 'agent-run-progress') {
     const event = payload as AgentProgressEvent
-    if (!voiceConversationOpen.value || !event.runId) return
+    if (!event.runId) return
+    recordAgentLiveProgress(event)
+    if (!voiceConversationOpen.value) return
     const expectedRunId = voiceLiveRunId.value || (voiceAwaitingRun.value ? undefined : activeRun.value?.id)
     if (expectedRunId && event.runId !== expectedRunId) return
     if (!expectedRunId && !asking.value) return
@@ -1145,9 +1314,7 @@ function handleProgressEvent(name: string, payload: any) {
     return
   }
   if (name === 'knowledge-run-settled' && payload.run) {
-    if (agent.value?.run.id === payload.run.id) {
-      void loadAgentDetail(payload.run.id).then(() => Promise.all([loadAgentConversations(), activeConversation.value ? loadConversationDetail(activeConversation.value.conversation.id) : Promise.resolve()])).catch(() => loadKnowledgeDetail(payload.run.id))
-    } else void Promise.all([loadAgentRuns(), loadAgentConversations()])
+    void handleSettledAgentRun(payload.run as AgentRun).catch(() => clearAgentLiveProgress(payload.run.id))
     return
   }
   if (name === 'user-memory-changed') {
@@ -1185,7 +1352,7 @@ async function connectProgressEvents() {
     }
     if (!response.ok || !response.body) throw new Error('Progress stream is unavailable')
     reconnectDelay = 1000
-    if (workspaceLoadError.value || documentLoadError.value || (voiceConversationOpen.value && activeRun.value?.id)) void recoverAfterReconnect()
+    if (workspaceLoadError.value || documentLoadError.value || visibleAgentRunIds.value.length) void recoverAfterReconnect()
     const reader = response.body.getReader(); const decoder = new TextDecoder(); let buffer = ''
     while (true) {
       const { done, value } = await reader.read(); if (done) break
@@ -1204,7 +1371,7 @@ async function connectProgressEvents() {
 }
 async function recoverAfterReconnect() {
   try {
-    if (voiceConversationOpen.value && activeRun.value?.id) await loadAgentDetail(activeRun.value.id)
+    await Promise.all(visibleAgentRunIds.value.map(runId => requestTurnDetail(runId, false)))
     if (workspaceLoadError.value) await loadWorkspace()
     if (documentLoadError.value && selected.value) {
       const current = tasks.value.find(task => task.id === selected.value?.id) || selected.value
@@ -1221,6 +1388,12 @@ function scheduleReconnect() {
 function stopProgressEvents() {
   streamClosed = true; streamController?.abort(); streamController = null
   if (reconnectTimer) window.clearTimeout(reconnectTimer); reconnectTimer = null
+}
+function stopTurnDetailRefreshes() {
+  turnDetailRefreshTimers.forEach(timer => window.clearTimeout(timer))
+  turnDetailRefreshTimers.clear()
+  turnDetailRefreshDirty.clear()
+  turnDetailRefreshRunning.clear()
 }
 function formatDuration(milliseconds?: number) {
   if (milliseconds == null) return '等待中'
@@ -1257,6 +1430,7 @@ function retryStageLabel(stage: PipelineStage) {
 }
 function logout() {
   stopProgressEvents()
+  stopTurnDetailRefreshes()
   voiceConversationOpen.value = false
   if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
   token.value = ''
@@ -1270,6 +1444,8 @@ function logout() {
   agent.value = null
   conversations.value = []
   activeConversation.value = null
+  turnDetailsByRunId.value = {}
+  agentLiveProgressByRunId.value = {}
   pendingMemoryCandidateCount.value = 0
   conversationActionError.value = ''
   agentCapabilities.value = null
@@ -1298,6 +1474,11 @@ watch(selectedSkillIssue, issue => {
     skillSelectionNotice.value = `所选 Skill ${issue}，已恢复自动匹配。`
   }
 })
+watch(() => visibleAgentRunIds.value.join('|'), () => {
+  visibleAgentRunIds.value.forEach(runId => {
+    if (agentLiveProgressByRunId.value[runId]?.length) scheduleTurnDetailRefresh(runId, 0)
+  })
+})
 onMounted(() => {
   window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired)
   clockTimer = window.setInterval(() => { clockNow.value = Date.now() }, 1000)
@@ -1306,6 +1487,7 @@ onMounted(() => {
 onBeforeUnmount(() => {
   window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired)
   stopProgressEvents()
+  stopTurnDetailRefreshes()
   if (clockTimer) window.clearInterval(clockTimer)
 })
 </script>
@@ -1331,7 +1513,7 @@ onBeforeUnmount(() => {
     </aside>
   </main>
 
-  <main v-else class="app-shell" :class="{ 'utility-view': isUtilityView }">
+  <main v-else class="app-shell" :class="{ 'utility-view': isUtilityView, 'agent-panel-wide': !isUtilityView && agentPanelSize === 'wide', 'agent-panel-narrow': !isUtilityView && agentPanelSize === 'narrow' }">
     <header class="topbar">
       <button class="brand" type="button" @click="showLibrary" aria-label="返回音频资料库">voice<span>note</span></button>
       <p>音频听记与私人知识库</p>
@@ -1519,71 +1701,83 @@ onBeforeUnmount(() => {
       </section>
     </section>
 
-    <aside v-if="!isUtilityView" class="agent-rail" :class="{ 'is-open': mobileAgentOpen }">
-      <header class="agent-head"><div><p class="eyebrow">AI KNOWLEDGE</p><h3>{{ activeConversation?.conversation.title || agentTitle }}</h3></div><div class="agent-head-actions"><button class="voice-conversation-launch" type="button" :disabled="!voiceModeAvailable" :title="voiceModeUnavailableReason || '进入连续语音 Agent 会话'" @click="openVoiceConversation"><i aria-hidden="true"></i>{{ voiceRecognitionSupported ? '语音对话' : '不支持语音' }}</button><button class="new-conversation" type="button" @click="startNewConversation">新会话</button><button class="agent-close" type="button" @click="mobileAgentOpen = false" aria-label="关闭 AI 问答">×</button></div></header>
-      <div class="agent-mode-row"><span aria-hidden="true"></span><b>{{ agentModeLabel }}</b></div>
-      <p class="agent-description">{{ agentDescription }}</p>
-      <div class="agent-suggestions"><button v-for="suggestion in agentSuggestions" :key="suggestion" type="button" @click="useSuggestion(suggestion)">{{ suggestion }} <span>↗</span></button></div>
-      <div v-if="!isDocumentView" class="scope-switch" aria-label="问答范围"><button :class="{ active: libraryScope === 'all' }" :disabled="conversationLocked" @click="libraryScope = 'all'">全部已入库</button><button :class="{ active: libraryScope === 'selected' }" :disabled="conversationLocked" @click="libraryScope = 'selected'">已勾选 · {{ selectedTaskIds.length }}</button></div>
-      <label class="skill-select">任务方式<select v-model="selectedSkillId" :disabled="conversationLocked" @change="skillSelectionNotice = ''"><option value="">自动匹配 Skill（推荐）</option><optgroup label="内置 Skill"><option v-for="skill in builtInAgentSkills" :key="skill.id" :value="skill.id" :disabled="Boolean(skillCompatibilityIssue(skill))">{{ skill.displayName }} · 内置{{ skillCompatibilityIssue(skill) ? `（${skillCompatibilityIssue(skill)}）` : '' }}</option></optgroup><optgroup v-if="customAgentSkills.length" label="我的 Skill"><option v-for="skill in customAgentSkills" :key="skill.id" :value="skill.id" :disabled="Boolean(skillCompatibilityIssue(skill))">{{ skill.displayName }} · 我的{{ skillCompatibilityIssue(skill) ? `（${skillCompatibilityIssue(skill)}）` : '' }}</option></optgroup></select></label>
-      <p v-if="skillSelectionNotice" class="skill-selection-notice">{{ skillSelectionNotice }}</p>
-      <label class="memory-toggle"><input v-model="conversationMemoryEnabled" type="checkbox" :disabled="!agentCapabilities?.memoryEnabled" @change="toggleConversationMemory"><span><b>使用并学习长期记忆</b><small>{{ agentCapabilities?.memoryEnabled ? '仅使用你确认过的记忆' : '当前部署未启用' }}</small></span></label>
-      <p v-if="conversationLocked" class="conversation-lock-note">本会话的资料范围、时区和 Skill 已锁定；切换资料请新建会话。</p>
-      <p v-if="conversationActionError" class="agent-note">{{ conversationActionError }}</p>
-      <div class="ask-box"><textarea v-model="question" rows="4" :disabled="agentCapabilities?.enabled === false" :placeholder="agentPlaceholder"></textarea><div><span>{{ agentScopeType === 'CURRENT_DOCUMENT' ? '当前音频' : agentScopeType === 'SELECTED_DOCUMENTS' ? `${selectedTaskIds.length} 份已勾选` : `${indexedTaskCount} 份已入库` }}</span><button class="send-button" :disabled="agentCapabilities?.enabled !== true || asking || !question.trim() || (agentScopeType === 'CURRENT_DOCUMENT' && !canAnalyzeCurrent) || (agentScopeType === 'SELECTED_DOCUMENTS' && !selectedTaskIds.length) || (agentScopeType === 'ALL_DOCUMENTS' && !indexedTaskCount)" @click="askAgent">{{ asking ? '处理中' : '发送' }} <b>↑</b></button></div></div>
-      <p v-if="agentCapabilities?.enabled === false" class="agent-note">自主 Agent 正在灰度中，请在部署环境启用 VOICENOTE_AGENT_ENABLED。</p>
-      <p v-else-if="agentScopeType === 'CURRENT_DOCUMENT' && !canAnalyzeCurrent" class="agent-note">当前音频仍在转写，完成后即可提问。</p>
-      <p v-else-if="agentScopeType === 'SELECTED_DOCUMENTS' && !selectedTaskIds.length" class="agent-note">请先在资料库勾选 1–50 份已收录文档。</p>
-      <p v-else-if="agentScopeType === 'ALL_DOCUMENTS' && !indexedTaskCount" class="agent-note">当前没有已入库资料。请先打开一份正式文档并建立知识库。</p>
+    <button v-if="!isUtilityView" class="agent-panel-edge-toggle" type="button"
+      :aria-label="agentPanelSize === 'wide' ? '收窄 Agent 工作区' : '展开 Agent 工作区'"
+      :title="agentPanelSize === 'wide' ? '收窄 Agent 工作区' : '展开 Agent 工作区'" @click="toggleAgentPanelSize">
+      <span aria-hidden="true">{{ agentPanelSize === 'wide' ? '›' : '‹' }}</span>
+    </button>
 
-      <section v-if="activeConversation?.turns.length" class="conversation-turns" aria-label="会话消息">
-        <button v-for="turn in activeConversation.turns" :key="turn.id" type="button" :class="{ active: turn.runId === activeRun?.id }" @click="openConversationTurn(turn.runId)"><span><b>你 · 第 {{ turn.turnIndex + 1 }} 轮</b><small>{{ turn.userMessage }}</small></span><p>{{ turn.failureMessage || conversationTurnAnswer(turn.resultDocument) }}</p></button>
-      </section>
-
-      <section v-if="activeRun" class="result-card">
-        <div class="result-head"><span>{{ activeSkillName }}</span><small>{{ statusText(activeRun.status) }} · {{ activeRunUsage }}</small></div>
-        <nav v-if="activeRun.parentRunId || (agent?.childRunIds || []).length" class="run-lineage" aria-label="Run 演进关系">
-          <span>LINEAGE</span>
-          <button v-if="activeRun.rootRunId && activeRun.rootRunId !== activeRun.id && activeRun.rootRunId !== activeRun.parentRunId" type="button" @click="openLineageRun(activeRun.rootRunId)">根 Run ↖</button>
-          <button v-if="activeRun.parentRunId" type="button" @click="openLineageRun(activeRun.parentRunId)">父 Run ↖</button>
-          <button v-for="(childRunId, index) in agent?.childRunIds || []" :key="childRunId" type="button" @click="openLineageRun(childRunId)">子 Run {{ index + 1 }} ↗</button>
-        </nav>
-        <div v-if="activeRun.failureCode" class="trace-failure">
-          <b>{{ activeRun.failureCode }}</b><span>{{ activeRun.failureStage || '未知阶段' }}</span><p>{{ activeRun.failureMessage }}</p>
+    <aside v-if="!isUtilityView" class="agent-rail" :class="[{ 'is-open': mobileAgentOpen }, `agent-${agentPanelSize}`]">
+      <header class="agent-workspace-head">
+        <div class="agent-title-row">
+          <div><p class="eyebrow">AI KNOWLEDGE</p><h3>{{ activeConversation?.conversation.title || agentTitle }}</h3></div>
+          <div class="agent-head-actions">
+            <button class="agent-tool-button voice-conversation-launch" type="button" :disabled="!voiceModeAvailable" :title="voiceModeUnavailableReason || '进入连续语音 Agent 会话'" @click="openVoiceConversation"><i aria-hidden="true"></i><span>{{ voiceRecognitionSupported ? '语音' : '不可用' }}</span></button>
+            <button class="agent-tool-button" type="button" :aria-expanded="conversationHistoryOpen" @click="toggleConversationHistory"><span aria-hidden="true">☰</span> 历史</button>
+            <button class="new-conversation" type="button" @click="startNewConversation">＋ 新会话</button>
+            <button class="agent-close" type="button" aria-label="关闭 AI 问答" @click="mobileAgentOpen = false">×</button>
+          </div>
         </div>
-        <template v-if="parsedAnswer"><AgentResultBlocks :result="parsedAnswer" :evidence="activeEvidence" @evidence="openEvidence" />
-          <div v-if="parsedAnswer.coverage" class="coverage-strip"><span>范围 {{ parsedAnswer.coverage.scopeDocumentCount }}</span><span>概览 {{ parsedAnswer.coverage.overviewedDocumentIds.length }}</span><span>深入 {{ parsedAnswer.coverage.searchedDocumentIds.length }}</span><span>引用 {{ parsedAnswer.coverage.citedDocumentIds.length }}</span><p v-if="parsedAnswer.coverage.limitations.length">限制：{{ parsedAnswer.coverage.limitations.join('；') }}</p></div>
-        </template>
-        <p v-else-if="activeRun.failureMessage && !activeRun.failureCode" class="error">{{ activeRun.failureMessage }}</p>
-        <p v-else class="waiting">Agent 正在规划检索、读取原文并校验证据…</p>
-        <details v-if="agent?.steps.length || initialReplayCheckpoint" class="agent-trace">
-          <summary>运行轨迹 <b>{{ agent?.steps.length || 0 }} 步<template v-if="activeRun.recoveryCount"> · {{ activeRun.recoveryCount }} 次恢复</template></b></summary>
-          <div v-if="initialReplayCheckpoint && activeRunTerminal" class="initial-replay"><span>初始状态 · Checkpoint #{{ initialReplayCheckpoint.sequence }}</span><button type="button" :disabled="Boolean(replayingCheckpointId)" @click="replayFromCheckpoint(initialReplayCheckpoint.id)">从此重新执行</button></div>
-          <ol>
-            <li v-for="step in agent?.steps || []" :key="step.id" :class="[step.status.toLowerCase(), { expanded: activeStepId === step.id }]">
-              <i></i>
-              <button class="trace-step-open" type="button" :aria-expanded="activeStepId === step.id" @click="toggleStepDetail(step)">
-                <span><b>{{ stepLabel(step.type, step.toolName) }}</b><small>{{ step.summary || step.errorMessage || statusText(step.status) }}</small></span>
-                <span class="trace-metrics"><time>{{ step.durationMs == null ? '—' : formatDuration(step.durationMs) }}</time><em v-if="step.totalTokens != null">{{ step.totalTokens }} tok</em><em v-if="activeRun.recoveryCount">E{{ step.executionEpoch }}</em></span>
-              </button>
-              <button v-if="activeRunTerminal && step.replayable && step.checkpointId" class="trace-replay" type="button" :disabled="Boolean(replayingCheckpointId)" @click.stop="replayFromCheckpoint(step.checkpointId)">{{ replayingCheckpointId === step.checkpointId ? '创建中…' : '从此重新执行' }}</button>
-              <div v-if="activeStepId === step.id" class="trace-detail">
-                <p v-if="stepDetailLoading">正在加载该步的可观察输入与输出…</p>
-                <template v-else-if="activeStepDetail">
-                  <div class="trace-detail-meta"><span>状态 {{ statusText(activeStepDetail.status) }}</span><span v-if="activeStepDetail.finishReason">Finish {{ activeStepDetail.finishReason }}</span><span v-if="activeStepDetail.totalTokens != null">Token {{ activeStepDetail.inputTokens || 0 }} + {{ activeStepDetail.outputTokens || 0 }} = {{ activeStepDetail.totalTokens }}</span></div>
-                  <section><b>可观察输入</b><pre>{{ readableTraceValue(activeStepDetail.input) }}</pre></section>
-                  <section><b>可观察输出</b><pre>{{ readableTraceValue(activeStepDetail.output) }}</pre></section>
-                  <section v-if="activeStepDetail.errorCode || activeStepDetail.errorMessage" class="trace-detail-error"><b>错误定位</b><p>{{ activeStepDetail.errorCode }}<template v-if="activeStepDetail.errorMessage"> · {{ activeStepDetail.errorMessage }}</template></p></section>
-                </template>
-              </div>
-            </li>
-          </ol>
-          <p v-if="traceActionError" class="trace-action-error">{{ traceActionError }}</p>
-        </details>
-      </section>
+        <div class="agent-context-row">
+          <span class="agent-mode-row"><i aria-hidden="true"></i><b>{{ agentModeLabel }}</b></span>
+          <button class="agent-context-tag" :class="{ muted: !voiceMemoryEnabled }" type="button" :disabled="!agentCapabilities?.memoryEnabled" @click="toggleHeaderConversationMemory">记忆{{ voiceMemoryEnabled ? '开启' : '关闭' }}</button>
+          <small v-if="conversationLocked">上下文已锁定</small>
+        </div>
+      </header>
 
-      <section v-if="conversations.length" class="run-history conversation-history"><p class="eyebrow">RECENT CONVERSATIONS</p><button v-for="conversation in conversations.slice(0, 8)" :key="conversation.id" :class="{ active: conversation.id === activeConversation?.conversation.id }" @click="openConversation(conversation)"><span>{{ conversation.title }}</span><small>{{ conversation.status === 'ARCHIVED' ? '已归档' : formatCreatedAt(conversation.updatedAt) }}</small></button><button v-if="activeConversation" class="delete-conversation" type="button" @click="deleteActiveConversation">删除当前会话</button></section>
-      <section v-if="visibleHistory.some(run => !run.conversationId)" class="run-history"><p class="eyebrow">LEGACY RUNS</p><button v-for="run in visibleHistory.filter(run => !run.conversationId).slice(0, 4)" :key="run.id" @click="openHistory(run)"><span>{{ run.question }}</span><small>{{ statusText(run.status) }}</small></button></section>
+      <AgentConversationThread ref="agentThread" :conversation-key="agentConversationKey" :turns="agentThreadTurns"
+        :details="turnDetailsByRunId" :loading-run-ids="turnDetailLoading" :live-progress-by-run-id="agentLiveProgressByRunId" :active-step-run-id="activeStepRunId"
+        :active-step-id="activeStepId" :active-step-detail="activeStepDetail" :step-detail-loading="stepDetailLoading"
+        :replaying-checkpoint-id="replayingCheckpointId" :trace-action-run-id="traceActionRunId" :trace-action-error="traceActionError"
+        @ensure-detail="ensureTurnDetail" @evidence="openTurnEvidence" @toggle-step="toggleStepDetail"
+        @replay="replayFromCheckpoint" @lineage="openLineageRun">
+        <template #empty>
+          <section class="agent-new-state">
+            <div class="agent-empty-intro"><span aria-hidden="true">↳</span><div><b>从资料中继续追问</b><p>{{ agentDescription }}</p></div></div>
+            <div class="agent-suggestions"><button v-for="suggestion in agentSuggestions" :key="suggestion" type="button" @click="useSuggestion(suggestion)">{{ suggestion }} <span>↗</span></button></div>
+            <div v-if="!isDocumentView" class="scope-switch" aria-label="问答范围"><button :class="{ active: libraryScope === 'all' }" :disabled="conversationLocked" @click="libraryScope = 'all'">全部已入库</button><button :class="{ active: libraryScope === 'selected' }" :disabled="conversationLocked" @click="libraryScope = 'selected'">已勾选 · {{ selectedTaskIds.length }}</button></div>
+            <label class="memory-toggle"><input v-model="conversationMemoryEnabled" type="checkbox" :disabled="!agentCapabilities?.memoryEnabled" @change="toggleConversationMemory"><span><b>使用并学习长期记忆</b><small>{{ agentCapabilities?.memoryEnabled ? '仅使用你确认过的记忆' : '当前部署未启用' }}</small></span></label>
+            <p v-if="agentCapabilities?.enabled === false" class="agent-note">自主 Agent 正在灰度中，请在部署环境启用 VOICENOTE_AGENT_ENABLED。</p>
+            <p v-else-if="agentScopeType === 'CURRENT_DOCUMENT' && !canAnalyzeCurrent" class="agent-note">当前音频仍在转写，完成后即可提问。</p>
+            <p v-else-if="agentScopeType === 'SELECTED_DOCUMENTS' && !selectedTaskIds.length" class="agent-note">请先在资料库勾选 1–50 份已收录文档。</p>
+            <p v-else-if="agentScopeType === 'ALL_DOCUMENTS' && !indexedTaskCount" class="agent-note">当前没有已入库资料。请先打开一份正式文档并建立知识库。</p>
+          </section>
+        </template>
+      </AgentConversationThread>
+
+      <footer class="agent-composer">
+        <p v-if="conversationActionError" class="agent-note composer-note">{{ conversationActionError }}</p>
+        <p v-if="skillSelectionNotice" class="skill-selection-notice composer-skill-notice">{{ skillSelectionNotice }}</p>
+        <div class="ask-box">
+          <textarea ref="agentQuestionInput" v-model="question" rows="2" :disabled="agentCapabilities?.enabled === false" :placeholder="activeConversation ? '继续追问这段对话…' : agentPlaceholder" @input="handleAgentQuestionInput" @keydown="handleAgentQuestionKeydown"></textarea>
+          <div class="agent-composer-toolbar">
+            <div class="agent-composer-context">
+              <label v-if="!conversationLocked" class="compact-skill-select" title="选择本次会话的任务方式">
+                <span>方式</span>
+                <select v-model="selectedSkillId" aria-label="任务方式" @change="skillSelectionNotice = ''">
+                  <option value="">自动匹配</option>
+                  <optgroup label="内置 Skill"><option v-for="skill in builtInAgentSkills" :key="skill.id" :value="skill.id" :disabled="Boolean(skillCompatibilityIssue(skill))">{{ skill.displayName }}{{ skillCompatibilityIssue(skill) ? `（${skillCompatibilityIssue(skill)}）` : '' }}</option></optgroup>
+                  <optgroup v-if="customAgentSkills.length" label="我的 Skill"><option v-for="skill in customAgentSkills" :key="skill.id" :value="skill.id" :disabled="Boolean(skillCompatibilityIssue(skill))">{{ skill.displayName }}{{ skillCompatibilityIssue(skill) ? `（${skillCompatibilityIssue(skill)}）` : '' }}</option></optgroup>
+                </select>
+              </label>
+              <span v-else class="compact-skill-lock" :title="`任务方式已随会话锁定：${voiceSkillLabel}`"><i>方式</i><b>{{ voiceSkillLabel }}</b></span>
+              <span class="composer-scope">{{ conversationBusy ? '回答生成中，可先编辑草稿' : agentScopeType === 'CURRENT_DOCUMENT' ? '当前音频' : agentScopeType === 'SELECTED_DOCUMENTS' ? `${selectedTaskIds.length} 份已勾选` : `${indexedTaskCount} 份已入库` }}</span>
+            </div>
+            <small>Enter 发送 · Shift+Enter 换行</small>
+            <button class="send-button" type="button" :disabled="agentSendDisabled" @click="askAgent">{{ conversationBusy ? '回答中' : '发送' }} <b>↑</b></button>
+          </div>
+        </div>
+      </footer>
+
+      <div v-if="conversationHistoryOpen" class="conversation-drawer" role="dialog" aria-label="历史会话">
+        <header><div><p class="eyebrow">CONVERSATIONS</p><h4>历史会话</h4></div><button type="button" aria-label="关闭历史会话" @click="conversationHistoryOpen = false">×</button></header>
+        <div class="conversation-drawer-list">
+          <button v-for="conversation in conversations" :key="conversation.id" type="button" :class="{ active: conversation.id === activeConversation?.conversation.id }" @click="openConversation(conversation)"><span><b>{{ conversation.title }}</b><small>{{ conversation.status === 'ARCHIVED' ? '已归档' : formatCreatedAt(conversation.updatedAt) }}</small></span><i aria-hidden="true">↗</i></button>
+          <template v-if="visibleHistory.some(run => !run.conversationId)"><p class="drawer-section-label">早期单轮问答</p><button v-for="run in visibleHistory.filter(run => !run.conversationId).slice(0, 8)" :key="run.id" type="button" @click="conversationHistoryOpen = false; openHistory(run)"><span><b>{{ run.question }}</b><small>{{ statusText(run.status) }}</small></span><i aria-hidden="true">↗</i></button></template>
+          <div v-if="!conversations.length && !visibleHistory.some(run => !run.conversationId)" class="conversation-drawer-empty"><span>◎</span><p>还没有历史会话，从下方输入第一个问题。</p></div>
+        </div>
+        <footer v-if="activeConversation"><button class="delete-conversation" type="button" @click="deleteActiveConversation">删除当前会话</button></footer>
+      </div>
     </aside>
 
     <VoiceConversationOverlay v-if="voiceConversationOpen"

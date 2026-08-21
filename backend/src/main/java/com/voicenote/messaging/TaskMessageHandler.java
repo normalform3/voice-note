@@ -12,7 +12,7 @@ import com.voicenote.service.KnowledgeIndexWorker;
 import com.voicenote.service.TranscriptionTaskService;
 import com.voicenote.service.SpeakerCorrectionService;
 import com.voicenote.service.SpeakerCorrectionWorker;
-import com.voicenote.service.MemoryWorker;
+import com.voicenote.service.MemoryRunExecutor;
 import com.voicenote.service.AgentRunExecutor;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -33,7 +33,7 @@ public class TaskMessageHandler {
     private final ProgressMessageHandler progress;
     private final SpeakerCorrectionService speakerCorrections;
     private final SpeakerCorrectionWorker speakerCorrectionWorker;
-    private final MemoryWorker memoryWorker;
+    private final MemoryRunExecutor memoryRunExecutor;
     private final AgentRunExecutor agentRunExecutor;
     @Autowired
     public TaskMessageHandler(JdbcTemplate jdbc, OutboxEventRepository outbox, TranscriptionTaskService transcriptionTasks, AnalysisService analyses,
@@ -41,12 +41,12 @@ public class TaskMessageHandler {
                               OrganizedDocumentWorker organizedDocumentWorker, KnowledgeIndexWorker knowledgeIndexWorker,
                               KnowledgeAgentService knowledgeRuns, ProgressMessageHandler progress,
                               SpeakerCorrectionService speakerCorrections, SpeakerCorrectionWorker speakerCorrectionWorker,
-                              MemoryWorker memoryWorker, AgentRunExecutor agentRunExecutor) {
+                              MemoryRunExecutor memoryRunExecutor, AgentRunExecutor agentRunExecutor) {
         this.jdbc = jdbc; this.outbox = outbox; this.transcriptionTasks = transcriptionTasks; this.analyses = analyses;
         this.knowledgeDocuments = knowledgeDocuments; this.organizedDocuments = organizedDocuments; this.organizedDocumentWorker = organizedDocumentWorker;
         this.knowledgeIndexWorker = knowledgeIndexWorker; this.knowledgeRuns = knowledgeRuns; this.progress = progress;
         this.speakerCorrections = speakerCorrections; this.speakerCorrectionWorker = speakerCorrectionWorker;
-        this.memoryWorker = memoryWorker;
+        this.memoryRunExecutor = memoryRunExecutor;
         this.agentRunExecutor = agentRunExecutor;
     }
     public TaskMessageHandler(JdbcTemplate jdbc, OutboxEventRepository outbox, TranscriptionTaskService transcriptionTasks, AnalysisService analyses,
@@ -81,10 +81,10 @@ public class TaskMessageHandler {
             knowledgeRuns.markQueued(event.getAggregateId());
             if (agentRunExecutor != null) afterCommit(() -> agentRunExecutor.execute(event.getAggregateId()));
         }
-        if (memoryWorker != null && event.getEventType() == EventType.MEMORY_EXTRACTION_REQUESTED) afterCommit(() -> memoryWorker.processExtraction(event.getAggregateId()));
-        if (memoryWorker != null && event.getEventType() == EventType.CONVERSATION_SUMMARY_REQUESTED) afterCommit(() -> memoryWorker.processSummary(event.getAggregateId()));
-        if (memoryWorker != null && event.getEventType() == EventType.USER_MEMORY_INDEX_REQUESTED) afterCommit(() -> memoryWorker.processIndex(event.getAggregateId()));
-        if (memoryWorker != null && event.getEventType() == EventType.USER_MEMORY_DELETE_REQUESTED) afterCommit(() -> memoryWorker.processDeletion(event.getAggregateId()));
+        if (memoryRunExecutor != null && event.getEventType() == EventType.MEMORY_EXTRACTION_REQUESTED) afterCommit(() -> memoryRunExecutor.processExtraction(event.getAggregateId()));
+        if (memoryRunExecutor != null && event.getEventType() == EventType.CONVERSATION_SUMMARY_REQUESTED) afterCommit(() -> memoryRunExecutor.processSummary(event.getAggregateId()));
+        if (memoryRunExecutor != null && event.getEventType() == EventType.USER_MEMORY_INDEX_REQUESTED) afterCommit(() -> memoryRunExecutor.processIndex(event.getAggregateId()));
+        if (memoryRunExecutor != null && event.getEventType() == EventType.USER_MEMORY_DELETE_REQUESTED) afterCommit(() -> memoryRunExecutor.processDeletion(event.getAggregateId()));
         if (event.getEventType() == EventType.PROGRESS_CHANGED && "in-process".equals(consumerName)) progress.consume("in-process-progress", eventId);
     }
     private static void afterCommit(Runnable action) {
