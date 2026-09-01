@@ -8,8 +8,10 @@ import com.voicenote.agent.*;
 import com.voicenote.config.AppProperties;
 import com.voicenote.domain.QaRetrievalMode;
 import com.voicenote.domain.TranscriptSegment;
+import com.voicenote.domain.TranscriptSpeaker;
 import com.voicenote.provider.AgentModelClient;
 import com.voicenote.repository.TranscriptSegmentRepository;
+import com.voicenote.repository.TranscriptSpeakerRepository;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 import java.nio.charset.StandardCharsets;
@@ -22,19 +24,26 @@ public class TranscriptContextTool implements AgentTool {
     private static final Pattern TOKEN = Pattern.compile("[\\p{IsHan}]|[\\p{L}\\p{N}_]+", Pattern.UNICODE_CHARACTER_CLASS);
     private final ObjectMapper mapper;
     private final TranscriptSegmentRepository segments;
+    private final TranscriptSpeakerRepository speakers;
     private final int contextTokenLimit;
     private final int outputByteLimit;
 
     @Autowired
-    public TranscriptContextTool(ObjectMapper mapper, TranscriptSegmentRepository segments, AppProperties properties) {
-        this.mapper = mapper; this.segments = segments;
+    public TranscriptContextTool(ObjectMapper mapper, TranscriptSegmentRepository segments, TranscriptSpeakerRepository speakers,
+                                 AppProperties properties) {
+        this.mapper = mapper; this.segments = segments; this.speakers = speakers;
         this.contextTokenLimit = properties.getKnowledge().getRetrievalContextMaxTokens();
         this.outputByteLimit = Math.max(4_096, properties.getAgent().getMaxToolOutputBytes() - 2_048);
     }
 
     /** Compatibility constructor for focused unit tests. */
     public TranscriptContextTool(ObjectMapper mapper, TranscriptSegmentRepository segments) {
-        this(mapper, segments, new AppProperties());
+        this(mapper, segments, null, new AppProperties());
+    }
+
+    /** Compatibility constructor for focused limit tests. */
+    public TranscriptContextTool(ObjectMapper mapper, TranscriptSegmentRepository segments, AppProperties properties) {
+        this(mapper, segments, null, properties);
     }
 
     @Override public AgentModelClient.AgentToolDefinition definition() {
@@ -45,7 +54,7 @@ public class TranscriptContextTool implements AgentTool {
         properties.putObject("documentIds").put("type", "array").put("maxItems", 3).putObject("items").put("type", "string");
         properties.putObject("sourceRefs").put("type", "array").put("maxItems", 6).putObject("items").put("type", "string");
         schema.putArray("required").add("operation"); schema.put("additionalProperties", false);
-        return new AgentModelClient.AgentToolDefinition("transcript_context", "Search transcript segments with local BM25, read adjacent original segments, or read one complete current transcript when it fits the bounded context budget.", schema);
+        return new AgentModelClient.AgentToolDefinition("transcript_context", "Search transcript segments with local BM25, read adjacent original segments, or read one complete current transcript when it fits the bounded context budget. Use its resolved speaker names and roles for speaker-sensitive questions.", schema);
     }
 
     @Override public ToolResult execute(AgentExecutionContext context, JsonNode arguments) {
@@ -56,10 +65,17 @@ public class TranscriptContextTool implements AgentTool {
         else if ("READ_FULL".equals(operation)) selection = readFull(context, arguments);
         else throw new IllegalArgumentException("operation must be SEARCH, READ, or READ_FULL");
         ArrayNode outputSegments = mapper.createArrayNode(); Set<String> covered = new LinkedHashSet<>();
+        Map<String, Map<String, TranscriptSpeaker>> speakerDirectories = new HashMap<>();
         for (TranscriptSegment segment : selection.segments().values()) {
             AgentExecutionContext.ScopeDocument document = context.requireDocument(segment.getTranscriptionTaskId()); covered.add(document.taskId());
+            String speakerId = Objects.toString(segment.getEffectiveSpeakerId(), "");
+            TranscriptSpeaker speaker = speakerDirectories.computeIfAbsent(document.taskId(), ignored -> speakerDirectory(document)).get(speakerId);
+            String speakerName = speaker == null || speaker.getDisplayName() == null || speaker.getDisplayName().isBlank()
+                    ? speakerId : speaker.getDisplayName();
+            String speakerRole = speaker == null ? "UNKNOWN" : speaker.getResolvedRole().name();
             ObjectNode item = outputSegments.addObject(); item.put("documentId", document.taskId()); item.put("title", document.title());
-            item.put("segmentId", segment.getId()); item.put("speakerId", Objects.toString(segment.getEffectiveSpeakerId(), ""));
+            item.put("segmentId", segment.getId()); item.put("speakerId", speakerId);
+            item.put("speakerName", speakerName); item.put("speakerRole", speakerRole);
             item.put("startMs", segment.getStartMs()); item.put("endMs", segment.getEndMs()); item.put("text", segment.getTextContent());
             item.put("sourceRef", context.evidence().registerTranscript(document.knowledgeDocumentId(), document.taskId(), null, segment.getId(), null,
                     segment.getEffectiveSpeakerId(), segment.getStartMs(), segment.getEndMs(), segment.getTextContent()));
@@ -73,6 +89,14 @@ public class TranscriptContextTool implements AgentTool {
         output.put("requiresFormalDocument", selection.requiresFormalDocument());
         String label = switch (operation) { case "SEARCH" -> "原文 BM25 检索"; case "READ_FULL" -> "读取完整原文"; default -> "读取相邻原文"; };
         return ToolResult.value(output, label + "返回 " + outputSegments.size() + " 个 Segment");
+    }
+
+    private Map<String, TranscriptSpeaker> speakerDirectory(AgentExecutionContext.ScopeDocument document) {
+        if (speakers == null) return Map.of();
+        Map<String, TranscriptSpeaker> output = new HashMap<>();
+        speakers.findByTranscriptionTaskIdAndTranscriptVersionOrderByAsrSpeakerId(document.taskId(), document.transcriptVersion())
+                .forEach(speaker -> output.put(speaker.getAsrSpeakerId(), speaker));
+        return output;
     }
 
     private Selection search(AgentExecutionContext context, JsonNode arguments) {

@@ -126,7 +126,7 @@ Skill 管理任务目标、触发样例、参考资料、结果区块和可调�
 
 ![内置 Skill、私人 Skill 与 AI Draft 入口](docs/images/skill-platform.png)
 
-Tools 中心展示当前进程实际注册的工具，以及不同 Skill 的运行时权限。
+Tools 中心按范围定位、证据检索、上下文补充和结果校验展示当前进程实际注册的工具，并区分 Skill 授权与索引、记忆、MCP 等运行条件；模型侧说明与输入 Schema 保留在展开的技术协议中。
 
 ![按 Skill 查看本地与 MCP 工具权限](docs/images/tools-center.png)
 

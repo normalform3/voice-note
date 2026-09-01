@@ -97,7 +97,10 @@ export type UserMemoryCategory = 'PROFILE' | 'PREFERENCE' | 'WORK_STYLE' | 'PROJ
 export type UserMemoryCandidate = { id: string; category: UserMemoryCategory; semanticKey: string; content: string; sourceExcerpt: string; confidence: number; changeType: 'CREATE' | 'UPDATE'; targetMemoryId?: string; currentContent?: string; status: string; createdAt: string }
 export type UserMemory = { id: string; category: UserMemoryCategory; semanticKey: string; versionId: string; versionNumber: number; content: string; indexStatus: string; confirmedAt: string; updatedAt: string; sourceConversationDeleted: boolean }
 export type AgentToolView = {
-  name: string; displayName: string; description: string; source: 'LOCAL' | 'MCP'; userGrantable: boolean
+  name: string; displayName: string; description: string; uiDescription: string
+  category: 'SCOPE' | 'RETRIEVAL' | 'CONTEXT' | 'CONTROL' | 'EXTENSION'
+  accessMode: 'SKILL_CONFIGURABLE' | 'PLATFORM_REQUIRED' | 'PLATFORM_CONDITIONAL' | 'DEPLOYMENT_MANAGED'
+  availabilityHint: string; source: 'LOCAL' | 'MCP'; userGrantable: boolean
   enabledForSkill: boolean | null; disabledReason?: string; parameters: unknown; dynamicParameters: boolean
 }
 export type AgentToolCatalog = { skillId?: string; tools: AgentToolView[] }
