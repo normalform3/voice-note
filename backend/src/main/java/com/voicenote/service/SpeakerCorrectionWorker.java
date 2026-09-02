@@ -1,5 +1,6 @@
 package com.voicenote.service;
 
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.voicenote.config.AppProperties;
@@ -98,7 +99,7 @@ public class SpeakerCorrectionWorker {
     private ParseResult parse(SpeakerCorrectionService.RunWork work, String response, Map<String, TranscriptSegment> source,
                               Set<String> knownSpeakers) {
         JsonNode root;
-        try { root = mapper.readTree(response); }
+        try { root = mapper.reader().with(DeserializationFeature.FAIL_ON_TRAILING_TOKENS).readTree(jsonPayload(response)); }
         catch (Exception exception) { throw new InvalidModelResponse("AI speaker correction must return valid JSON"); }
         JsonNode values = root == null ? null : root.path("suggestions");
         if (root == null || !root.isObject() || values == null || !values.isArray() || values.size() > 1_000) {
@@ -142,6 +143,23 @@ public class SpeakerCorrectionWorker {
             catch (Exception exception) { throw new InvalidModelResponse("AI split proposal could not be validated"); }
         }
         return new ParseResult(output, rejected);
+    }
+
+    private static String jsonPayload(String response) {
+        if (response == null) throw new InvalidModelResponse("AI speaker correction must return valid JSON");
+        String payload = response.strip();
+        if (payload.startsWith("\uFEFF")) payload = payload.substring(1).stripLeading();
+        if (!payload.startsWith("```")) return payload;
+
+        int headerEnd = payload.indexOf('\n');
+        if (headerEnd < 0 || !payload.endsWith("```")) {
+            throw new InvalidModelResponse("AI speaker correction must return valid JSON");
+        }
+        String language = payload.substring(3, headerEnd).trim();
+        if (!language.isEmpty() && !language.equalsIgnoreCase("json")) {
+            throw new InvalidModelResponse("AI speaker correction must return valid JSON");
+        }
+        return payload.substring(headerEnd + 1, payload.length() - 3).strip();
     }
 
     static List<List<TranscriptSegment>> chunks(List<TranscriptSegment> source) {

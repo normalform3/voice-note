@@ -70,6 +70,32 @@ class SpeakerCorrectionWorkerTest {
     }
 
     @Test
+    void acceptsJsonWrappedInAMarkdownCodeFence() {
+        TranscriptSegment segment = new TranscriptSegment("task", 1, 0, "SPEAKER_0", 0, 1_000, "回答");
+        when(service.claim("run")).thenReturn(work(segment));
+        when(model.complete(anyString())).thenReturn("```json\n{\"suggestions\":[]}\n```");
+
+        worker.process("run");
+
+        verify(model, times(1)).complete(anyString());
+        verify(service).complete("run", List.of(), 0);
+    }
+
+    @Test
+    void stillRejectsExplanatoryTextOutsideTheJsonCodeFence() {
+        TranscriptSegment segment = new TranscriptSegment("task", 1, 0, "SPEAKER_0", 0, 1_000, "回答");
+        when(service.claim("run")).thenReturn(work(segment));
+        when(model.complete(anyString())).thenReturn(
+                "结果如下：\n```json\n{\"suggestions\":[]}\n```",
+                "仍然不是 JSON");
+
+        worker.process("run");
+
+        verify(model, times(2)).complete(anyString());
+        verify(service).fail("run", "SPEAKER_CORRECTION_RESPONSE_INVALID", "AI speaker correction must return valid JSON");
+    }
+
+    @Test
     void keepsChunksWithinTheConfiguredTextLimitAndOverlapsBoundaries() {
         List<TranscriptSegment> segments = java.util.stream.IntStream.range(0, 14)
                 .mapToObj(index -> new TranscriptSegment("task", 1, index, "SPEAKER_0", index, index + 1, "字".repeat(1_000))).toList();
