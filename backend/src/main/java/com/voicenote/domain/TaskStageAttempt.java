@@ -51,9 +51,15 @@ public class TaskStageAttempt {
     public String getModelId() { return modelId; }
     public String getResultSnapshot() { return resultSnapshot; }
     public boolean start() {
+        return start(Duration.ofSeconds(90));
+    }
+    public boolean start(Duration leaseDuration) {
         if (status != StageAttemptStatus.QUEUED && status != StageAttemptStatus.RETRY_WAIT) return false;
-        Instant now = Instant.now(); status = StageAttemptStatus.RUNNING; startedAt = now; leaseUntil = now.plusSeconds(90);
+        Instant now = Instant.now(); status = StageAttemptStatus.RUNNING; startedAt = now; leaseUntil = now.plus(leaseDuration);
         waitDurationMs = Duration.between(queuedAt, now).toMillis(); nextRetryAt = null; return true;
+    }
+    public void renewLease(Duration leaseDuration) {
+        if (status == StageAttemptStatus.RUNNING) leaseUntil = Instant.now().plus(leaseDuration);
     }
     public void succeed(String snapshot) { status = StageAttemptStatus.SUCCEEDED; completedAt = Instant.now(); leaseUntil = null; resultSnapshot = snapshot; errorCode = null; errorMessage = null; }
     public void recordModelInvocation(String modelId) { this.modelId = modelId; }

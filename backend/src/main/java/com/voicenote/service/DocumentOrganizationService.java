@@ -17,6 +17,7 @@ import java.util.stream.Collectors;
 /** Builds an evidence-preserving reading document. The model may organize text, never source identity. */
 @Service
 public class DocumentOrganizationService {
+    private static final org.slf4j.Logger log = org.slf4j.LoggerFactory.getLogger(DocumentOrganizationService.class);
     private static final String STRUCTURE_STAGE = "STRUCTURE_V2";
     private static final String SCHEMA_VERSION = "formal-document-v2";
     private static final int MAX_TURN_CHARACTERS = 2_400;
@@ -161,6 +162,9 @@ public class DocumentOrganizationService {
         if (task.isCancelled()) return List.of();
         try {
             blocks.deleteByOrganizedDocumentId(documentId);
+            // Hibernate executes inserts before deferred entity deletes. Flush the replacement boundary so
+            // a regenerated document cannot collide with the prior (document_id, block_index) rows.
+            blocks.flush();
             Map<String, TranscriptSegment> segmentIndex = source.stream().collect(Collectors.toMap(TranscriptSegment::getId, value -> value));
             List<OrganizedDocumentBlock> stored = new ArrayList<>(); int index = 0;
             for (Topic topic : result.topics()) {
@@ -176,7 +180,15 @@ public class DocumentOrganizationService {
             documents.save(document);
             for (RoleSuggestion suggestion : result.roleSuggestions()) speakers.suggest(document.getTranscriptionTaskId(), document.getTranscriptVersion(), suggestion.speakerId(), suggestion.role(), suggestion.confidence());
             return stored;
-        } catch (Exception exception) { throw new IllegalStateException("Cannot persist organized document", exception); }
+        } catch (Exception exception) {
+            log.error("Cannot persist organized document: documentId={}, taskId={}, documentVersion={}",
+                    documentId, document.getTranscriptionTaskId(), document.getVersion(), exception);
+            throw new DocumentPersistenceException("正式文档保存失败，请重试。", exception);
+        }
+    }
+
+    static final class DocumentPersistenceException extends RuntimeException {
+        DocumentPersistenceException(String message, Throwable cause) { super(message, cause); }
     }
 
     /** Kept deterministic so disabled or malformed model calls never send raw ASR directly to indexing. */

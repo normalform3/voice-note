@@ -12,9 +12,14 @@ import com.voicenote.repository.TranscriptionTaskRepository;
 import org.junit.jupiter.api.Test;
 import java.util.Map;
 import java.util.List;
+import java.util.Optional;
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.when;
 
 class DocumentOrganizationServiceTest {
     @Test
@@ -48,6 +53,29 @@ class DocumentOrganizationServiceTest {
 
         assertThat(result.turns()).extracting(DocumentOrganizationService.Turn::speaker)
                 .containsExactly("SPEAKER_0", "SPEAKER_1");
+    }
+
+    @Test
+    void flushesRemovedBlocksBeforePersistingARegeneratedDocument() {
+        OrganizedDocumentRepository documents = mock(OrganizedDocumentRepository.class);
+        OrganizedDocumentBlockRepository blocks = mock(OrganizedDocumentBlockRepository.class);
+        TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class);
+        TranscriptSegment source = new TranscriptSegment("task", 1, 0, "SPEAKER_0", 0, 1_000, "重新生成的内容");
+        OrganizedDocument document = new OrganizedDocument("owner", "task", 1, "正式文档");
+        com.voicenote.domain.TranscriptionTask task = new com.voicenote.domain.TranscriptionTask("owner", "audio", "a".repeat(64), "pipeline");
+        when(documents.findById(document.getId())).thenReturn(Optional.of(document));
+        when(tasks.findById("task")).thenReturn(Optional.of(task));
+        when(blocks.save(any())).thenAnswer(invocation -> invocation.getArgument(0));
+        DocumentOrganizationService service = new DocumentOrganizationService(documents, blocks, mock(TranscriptSegmentRepository.class), tasks,
+                mock(OrganizationInvocationRepository.class), mock(TranscriptSpeakerService.class), mock(OutboxService.class), new ObjectMapper());
+
+        service.complete(document.getId(), DocumentOrganizationService.organize(List.of(source)), List.of(source));
+
+        var ordered = inOrder(blocks);
+        ordered.verify(blocks).deleteByOrganizedDocumentId(document.getId());
+        ordered.verify(blocks).flush();
+        ordered.verify(blocks, times(2)).save(any());
+        assertThat(document.getStatus()).isEqualTo(com.voicenote.domain.OrganizedDocumentStatus.READY);
     }
 
     @Test

@@ -6,7 +6,8 @@ import SkillManager from './SkillManager.vue'
 import ToolsCenter from './ToolsCenter.vue'
 import VoiceConversationOverlay from './VoiceConversationOverlay.vue'
 import { isSpeechRecognitionSupported } from './useSpeechRecognition'
-import { api, hashFile, isSessionExpiredError, key, SESSION_EXPIRED_EVENT, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentAnswerBlockEvent, type AgentCapabilities, type AgentConversation, type AgentConversationDetail, type AgentConversationTurn, type AgentProgressEvent, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AgentStep, type AgentStepDetail, type AiSpeakerCorrectionApplyResult, type AiSpeakerCorrectionDetail, type AiSpeakerCorrectionSuggestion, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PageResult, type PipelineStage, type ResultCitation, type Segment, type Speaker, type SpeakerCorrectionProposalPart, type SpeakerCorrectionResult, type Task, type WorkspaceSnapshot } from './api'
+import { api, hashFile, isSessionExpiredError, key, SESSION_EXPIRED_EVENT, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentAnswerBlockEvent, type AgentCapabilities, type AgentConversation, type AgentConversationDetail, type AgentConversationTurn, type AgentProgressEvent, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AgentStep, type AgentStepDetail, type AiSpeakerCorrectionApplyResult, type AiSpeakerCorrectionDetail, type AiSpeakerCorrectionSuggestion, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PageResult, type PipelineStage, type ResultCitation, type Segment, type Speaker, type SpeakerCorrectionProposalPart, type SpeakerCorrectionResult, type StageAttempt, type Task, type WorkspaceSnapshot } from './api'
+import { knowledgeBuildProgress, latestKnowledgeStages, taskDisplayProgress, taskProgressLabel, visibleStageAttempts } from './pipelineProgress'
 
 type WorkspaceView = 'library' | 'document' | 'skills' | 'tools' | 'profile'
 type DetailTab = 'transcript' | 'summary' | 'organized'
@@ -122,6 +123,7 @@ let reconnectDelay = 1000
 let clockTimer: number | null = null
 let workspaceRequest: Promise<void> | null = null
 let documentRequestVersion = 0
+let knowledgeDocumentsRequestVersion = 0
 const turnDetailRequests = new Map<string, Promise<AgentRunDetail | undefined>>()
 const turnDetailRefreshTimers = new Map<string, number>()
 const turnDetailRefreshDirty = new Set<string>()
@@ -136,6 +138,14 @@ const agentScopeType = computed<AgentScopeType>(() => activeConversation.value?.
   || (isDocumentView.value ? 'CURRENT_DOCUMENT' : libraryScope.value === 'selected' ? 'SELECTED_DOCUMENTS' : 'ALL_DOCUMENTS'))
 const selectedDocument = computed(() => documents.value.find(document => document.transcriptionTaskId === selected.value?.id))
 const knowledgeBuild = computed<KnowledgeIndexBuild | undefined>(() => selectedDocument.value?.currentBuild || selected.value?.knowledgeDocument?.currentBuild)
+const visibleKnowledgeBuild = computed<KnowledgeIndexBuild | undefined>(() => {
+  if (selected.value?.organizedDocument?.status === 'STALE' || knowledgeBuild.value?.status === 'RETIRED') return undefined
+  return knowledgeBuild.value
+})
+function knowledgeBuildForTask(task: Task) {
+  const build = documents.value.find(document => document.transcriptionTaskId === task.id)?.currentBuild || task.knowledgeDocument?.currentBuild
+  return task.organizedDocument?.status === 'STALE' || build?.status === 'RETIRED' ? undefined : build
+}
 const organizedTopics = computed(() => organized.value?.blocks.filter(block => block.type === 'TOPIC') || [])
 const selectedTitle = computed(() => selected.value ? taskTitle(selected.value) : '从资料库选择一份听记')
 const canAnalyzeCurrent = computed(() => selected.value?.qaCapabilities?.currentDocumentAvailable ?? Boolean(selected.value?.transcriptReady))
@@ -409,7 +419,11 @@ async function loadTasks() {
   const { data } = await api.get<Task[]>('/transcription-tasks')
   tasks.value = data
 }
-async function loadDocuments() { const { data } = await api.get<KnowledgeDocument[]>('/knowledge-documents'); documents.value = data }
+async function loadDocuments() {
+  const requestVersion = ++knowledgeDocumentsRequestVersion
+  const { data } = await api.get<KnowledgeDocument[]>('/knowledge-documents')
+  if (requestVersion === knowledgeDocumentsRequestVersion) documents.value = data
+}
 async function loadRuns() { const { data } = await api.get<KnowledgeRun[]>('/knowledge-runs'); runs.value = data }
 async function loadAnalysisRuns() { const { data } = await api.get<AnalysisRun[]>('/analysis-runs'); analysisRuns.value = data }
 async function loadAgentRuns() { const { data } = await api.get<AgentRun[]>('/agent-runs'); agentRuns.value = data }
@@ -1230,6 +1244,8 @@ async function deleteTask() {
   }
 }
 function upsertTask(task: Task) {
+  const known = tasks.value.find(item => item.id === task.id)
+  if (known?.version != null && task.version != null && task.version < known.version) return
   const previous = selected.value?.id === task.id ? selected.value : null
   tasks.value = [task, ...tasks.value.filter(item => item.id !== task.id)]
   if (selected.value?.id === task.id) selected.value = task
@@ -1400,16 +1416,16 @@ function formatDuration(milliseconds?: number) {
   if (milliseconds < 1000) return `${milliseconds}ms`
   return `${Math.round(milliseconds / 1000)} 秒`
 }
-function stageWaitDuration(stage: { status: string; queuedAt: string; totalWaitDurationMs: number }) {
-  if (stage.status !== 'QUEUED') return stage.totalWaitDurationMs
-  return stage.totalWaitDurationMs + Math.max(0, clockNow.value - new Date(stage.queuedAt).getTime())
+function stageWaitDuration(stage: Pick<StageAttempt, 'status' | 'queuedAt' | 'waitDurationMs'>) {
+  if (stage.status !== 'QUEUED') return stage.waitDurationMs || 0
+  return Math.max(0, clockNow.value - new Date(stage.queuedAt).getTime())
 }
 function stageProcessingDuration(stage: { status: string; startedAt?: string; completedAt?: string }) {
   if (!stage.startedAt) return 0
   const endedAt = stage.status === 'RUNNING' ? clockNow.value : stage.completedAt ? new Date(stage.completedAt).getTime() : new Date(stage.startedAt).getTime()
   return Math.max(0, endedAt - new Date(stage.startedAt).getTime())
 }
-function stageDurationText(stage: { stage: PipelineStage; status: string; queuedAt: string; startedAt?: string; completedAt?: string; totalWaitDurationMs: number }) {
+function stageDurationText(stage: StageAttempt) {
   const queueDuration = formatDuration(stageWaitDuration(stage))
   if (stage.stage === 'UPLOAD_COMPLETED') return `导入耗时 ${queueDuration}`
   if (stage.status === 'QUEUED') return `排队等待 ${queueDuration}`
@@ -1584,7 +1600,7 @@ onBeforeUnmount(() => {
                   <small><time :datetime="task.createdAt">{{ formatCreatedAt(task.createdAt) }}</time><span> · </span><span>{{ formatAudioDuration(task.durationMs) }}</span></small>
                 </template>
               </span>
-              <span class="record-progress"><b>{{ task.progressPercent || 0 }}%</b><small>{{ statusText(task.status) }}</small></span>
+              <span class="record-progress"><b>{{ taskDisplayProgress(task, knowledgeBuildForTask(task)) }}%</b><small>{{ taskProgressLabel(task, knowledgeBuildForTask(task)) }}</small></span>
               <span class="record-arrow" aria-hidden="true">→</span>
             </div>
             <button v-if="task.knowledgeDocument?.status === 'FAILED'" class="record-retry" type="button" @click="retryDocument(task.knowledgeDocument)">重试收录</button>
@@ -1597,7 +1613,7 @@ onBeforeUnmount(() => {
         <nav class="breadcrumb" aria-label="当前位置"><button type="button" @click="showLibrary">音频资料库</button><span>/</span><b>{{ selectedTitle }}</b></nav>
         <header class="document-head">
           <div><p class="eyebrow">DOCUMENT LISTENING</p><h2>{{ selectedTitle }}</h2></div>
-          <div v-if="selected" class="document-actions"><span class="state-pill">{{ selected.progressPercent || 0 }}% · {{ stageText(selected.currentStage) }}</span><button v-if="canCreateFormalDocument" class="stage-retry" :disabled="startingFormalDocument" @click="createFormalDocument">{{ startingFormalDocument ? '正在开始…' : selected.organizedDocument?.status === 'STALE' ? '重新生成正式文档' : '生成正式文档' }}</button><button v-if="canCreateKnowledgeBuild" class="stage-retry" :disabled="startingKnowledgeBuild" @click="createKnowledgeBuild">{{ startingKnowledgeBuild ? '正在开始…' : '建立知识库' }}</button><button v-else-if="selectedDocument && selected.organizedDocument?.status === 'READY'" class="text-action" @click="rebuildKnowledge(true)">重建知识库</button><button v-if="canCancelTask" class="text-action" @click="cancelTask">取消任务</button><button v-if="canResubmitTask" class="stage-retry resubmit-task" :disabled="resubmittingTask" @click="resubmitTask">{{ resubmittingTask ? '正在重新提交…' : '重新提交转写' }}</button><button class="text-action danger" @click="deleteTask">删除录音</button><p v-if="taskActionError" class="task-action-error" role="alert">{{ taskActionError }}</p></div>
+          <div v-if="selected" class="document-actions"><span class="state-pill">{{ taskDisplayProgress(selected, visibleKnowledgeBuild) }}% · {{ taskProgressLabel(selected, visibleKnowledgeBuild) }}</span><button v-if="canCreateFormalDocument" class="stage-retry" :disabled="startingFormalDocument" @click="createFormalDocument">{{ startingFormalDocument ? '正在开始…' : selected.organizedDocument?.status === 'STALE' ? '重新生成正式文档' : '生成正式文档' }}</button><button v-if="canCreateKnowledgeBuild" class="stage-retry" :disabled="startingKnowledgeBuild" @click="createKnowledgeBuild">{{ startingKnowledgeBuild ? '正在开始…' : '建立知识库' }}</button><button v-else-if="selectedDocument && selected.organizedDocument?.status === 'READY'" class="text-action" @click="rebuildKnowledge(true)">重建知识库</button><button v-if="canCancelTask" class="text-action" @click="cancelTask">取消任务</button><button v-if="canResubmitTask" class="stage-retry resubmit-task" :disabled="resubmittingTask" @click="resubmitTask">{{ resubmittingTask ? '正在重新提交…' : '重新提交转写' }}</button><button class="text-action danger" @click="deleteTask">删除录音</button><p v-if="taskActionError" class="task-action-error" role="alert">{{ taskActionError }}</p></div>
         </header>
 
         <details v-if="selected" class="metadata-editor">
@@ -1621,17 +1637,17 @@ onBeforeUnmount(() => {
 
         <template v-if="selected">
           <details v-if="selected.stages?.length" class="processing-disclosure" :open="selected.status !== 'SUCCEEDED' && selected.status !== 'CANCELLED'">
-            <summary><span>处理进度</span><b>{{ stageText(selected.currentStage) }} · {{ selected.progressPercent || 0 }}%</b></summary>
+            <summary><span>处理进度</span><b>{{ taskProgressLabel(selected, visibleKnowledgeBuild) }} · {{ taskDisplayProgress(selected, visibleKnowledgeBuild) }}%</b></summary>
             <ol class="pipeline-stages">
-              <li v-for="stage in selected.stages" :key="`${stage.stage}-${stage.attemptNumber}`" :class="stage.status.toLowerCase()">
-                <i></i><div><b>{{ stageText(stage.stage) }}</b><small><span class="stage-status">{{ stageStatusText(stage) }}</span> · {{ stageDurationText(stage) }}</small><small v-if="stage.modelId">模型：{{ stage.modelId }}</small><small v-if="stage.stage === 'KNOWLEDGE_INDEX'">向量库：Qdrant</small><small v-if="stage.nextRetryAt">将在 {{ new Date(stage.nextRetryAt).toLocaleTimeString() }} 自动重试</small><small v-else-if="stage.errorMessage" class="error">{{ stage.errorMessage }}</small></div>
+              <li v-for="stage in visibleStageAttempts(selected)" :key="`${stage.stage}-${stage.attemptNumber}`" :class="stage.status.toLowerCase()">
+                <i></i><div><b>{{ stageText(stage.stage) }}<span v-if="stage.attemptNumber > 1" class="stage-attempt">第 {{ stage.attemptNumber }} 次</span></b><small><span class="stage-status">{{ stageStatusText(stage) }}</span> · {{ stageDurationText(stage) }}</small><small v-if="stage.modelId">模型：{{ stage.modelId }}</small><small v-if="stage.stage === 'KNOWLEDGE_INDEX'">向量库：Qdrant</small><small v-if="stage.nextRetryAt">将在 {{ new Date(stage.nextRetryAt).toLocaleTimeString() }} 自动重试</small><small v-else-if="stage.errorMessage" class="error">{{ stage.errorMessage }}</small></div>
                 <button v-if="canRetryStage(stage.stage)" class="stage-retry" :disabled="retryingStage === stage.stage" @click="retryStage(stage.stage)">{{ retryingStage === stage.stage ? '正在重新提交…' : retryStageLabel(stage.stage) }}</button>
               </li>
             </ol>
-            <section v-if="knowledgeBuild" class="knowledge-build-progress" aria-label="知识库构建进度">
-              <header><span>知识库构建</span><b>{{ knowledgeBuild.progressPercent }}% · {{ statusText(knowledgeBuild.status) }}</b></header>
+            <section v-if="visibleKnowledgeBuild" class="knowledge-build-progress" aria-label="知识库构建进度">
+              <header><span>知识库构建<span v-if="(visibleKnowledgeBuild.generation || 1) > 1" class="stage-attempt">第 {{ visibleKnowledgeBuild.generation }} 次</span></span><b>{{ Math.round(knowledgeBuildProgress(visibleKnowledgeBuild)) }}% · {{ statusText(visibleKnowledgeBuild.status) }}</b></header>
               <ol class="pipeline-stages">
-                <li v-for="stage in knowledgeBuild.stages" :key="stage.stage" :class="stage.status.toLowerCase()"><i></i><div><b>{{ knowledgeStageText(stage.stage) }}</b><small><span class="stage-status">{{ statusText(stage.status) }}</span> · {{ stage.progressPercent }}%</small><small v-if="stage.stage === 'INDEX'">已索引 {{ stage.completedCount }} / {{ stage.totalCount || knowledgeBuild.chunkCount }} 个 Chunk</small><small v-else-if="stage.stage === 'INGEST'">已入库 {{ stage.completedCount }} / {{ stage.totalCount || knowledgeBuild.topicCount }} 个 Topic</small><small v-else-if="stage.stage === 'CHUNK'">已生成 {{ stage.completedCount }} / {{ stage.totalCount || knowledgeBuild.chunkCount }} 个 Chunk</small><small v-if="stage.errorMessage" class="error">{{ stage.errorMessage }}</small></div></li>
+                <li v-for="stage in latestKnowledgeStages(visibleKnowledgeBuild)" :key="`${stage.stage}-${stage.attemptNumber || 1}`" :class="stage.status.toLowerCase()"><i></i><div><b>{{ knowledgeStageText(stage.stage) }}<span v-if="(stage.attemptNumber || 1) > 1" class="stage-attempt">第 {{ stage.attemptNumber }} 次</span></b><small><span class="stage-status">{{ statusText(stage.status) }}</span> · {{ stage.progressPercent }}%</small><small v-if="stage.stage === 'INDEX'">已索引 {{ stage.completedCount }} / {{ stage.totalCount || visibleKnowledgeBuild.chunkCount }} 个 Chunk</small><small v-else-if="stage.stage === 'INGEST'">已入库 {{ stage.completedCount }} / {{ stage.totalCount || visibleKnowledgeBuild.topicCount }} 个 Topic</small><small v-else-if="stage.stage === 'CHUNK'">已生成 {{ stage.completedCount }} / {{ stage.totalCount || visibleKnowledgeBuild.chunkCount }} 个 Chunk</small><small v-if="stage.errorMessage" class="error">{{ stage.errorMessage }}</small></div></li>
               </ol>
             </section>
             <p v-if="stageRetryError" class="retry-feedback" role="alert">{{ stageRetryError }}</p>

@@ -30,6 +30,7 @@ public class OrganizedDocumentWorker {
         if (work == null || !pipeline.begin(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION)) return;
         try {
             DocumentOrganizationService.OrganizationResult result = organize(work);
+            pipeline.renewLease(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION);
             var blocks = documents.complete(documentId, result, work.segments());
             if (blocks.isEmpty()) return;
             pipeline.succeeded(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION,
@@ -41,6 +42,10 @@ public class OrganizedDocumentWorker {
         } catch (ProviderException exception) {
             documents.fail(documentId, exception.getCode() + ": " + exception.getMessage());
             pipeline.failed(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION, exception.getCode(), exception.getMessage(), false);
+        } catch (DocumentOrganizationService.DocumentPersistenceException exception) {
+            documents.fail(documentId, "DOCUMENT_PERSIST_FAILED: " + exception.getMessage());
+            pipeline.failed(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION,
+                    "DOCUMENT_PERSIST_FAILED", exception.getMessage(), false);
         } catch (RuntimeException exception) {
             documents.fail(documentId, "DOCUMENT_ORGANIZATION_FAILED: " + exception.getMessage());
             pipeline.failed(work.document().getTranscriptionTaskId(), PipelineStage.DOCUMENT_ORGANIZATION, "DOCUMENT_ORGANIZATION_FAILED", exception.getMessage(), false);

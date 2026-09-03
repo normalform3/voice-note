@@ -15,6 +15,7 @@ import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
+import java.time.Duration;
 import java.util.*;
 
 @Service
@@ -74,7 +75,7 @@ public class PipelineProgressService {
                 && attempt.getStatus() != StageAttemptStatus.RETRY_WAIT) {
             attempt = stages.save(new TaskStageAttempt(taskId, stage, attempt.getAttemptNumber() + 1));
         }
-        if (!attempt.start()) return false;
+        if (!attempt.start(leaseFor(stage))) return false;
         task.advance(stage, progressFor(stage)); task.mark(statusFor(stage));
         stages.save(attempt); tasks.save(task); notifyTask(task); return true;
     }
@@ -101,10 +102,18 @@ public class PipelineProgressService {
     public void recordModelInvocation(String taskId, PipelineStage stage, String modelId) {
         if (modelId == null || modelId.isBlank()) return;
         TaskStageAttempt attempt = latest(taskId, stage);
-        if (modelId.equals(attempt.getModelId())) return;
-        attempt.recordModelInvocation(modelId);
+        boolean modelChanged = !modelId.equals(attempt.getModelId());
+        if (modelChanged) attempt.recordModelInvocation(modelId);
+        attempt.renewLease(leaseFor(stage));
         stages.save(attempt);
-        tasks.findById(taskId).ifPresent(this::notifyTask);
+        if (modelChanged) tasks.findById(taskId).ifPresent(this::notifyTask);
+    }
+
+    @Transactional
+    public void renewLease(String taskId, PipelineStage stage) {
+        TaskStageAttempt attempt = latest(taskId, stage);
+        attempt.renewLease(leaseFor(stage));
+        stages.save(attempt);
     }
 
     @Transactional
@@ -297,8 +306,9 @@ public class PipelineProgressService {
         attempts.forEach(item -> grouped.computeIfAbsent(item.getStage(), ignored -> new ArrayList<>()).add(item));
         List<StageView> stageViews = new ArrayList<>();
         for (PipelineStage stage : PipelineStage.values()) {
+            if (task.getCurrentStage() != null && stage.ordinal() > task.getCurrentStage().ordinal()) continue;
             List<TaskStageAttempt> history = grouped.get(stage); if (history == null || history.isEmpty()) continue;
-            TaskStageAttempt current = history.get(history.size() - 1);
+            TaskStageAttempt current = history.stream().max(Comparator.comparingInt(TaskStageAttempt::getAttemptNumber)).orElseThrow();
             long totalWait = history.stream().map(TaskStageAttempt::getWaitDurationMs).filter(Objects::nonNull).mapToLong(Long::longValue).sum();
             stageViews.add(new StageView(stage, current.getStatus(), current.getAttemptNumber(), current.getQueuedAt(), current.getStartedAt(), current.getCompletedAt(),
                     current.getWaitDurationMs(), totalWait, current.getNextRetryAt(), current.getErrorCode(), current.getErrorMessage(), current.getModelId()));
@@ -314,7 +324,7 @@ public class PipelineProgressService {
         OrganizedDocumentView organized = organizedEntity == null ? null : new OrganizedDocumentView(organizedEntity.getId(), organizedEntity.getTitle(),
                 organizedEntity.getStatus().name(), organizedEntity.getFailureMessage());
         List<PipelineStage> retryable = stageViews.stream().filter(stage -> stage.status() == StageAttemptStatus.FAILED || stage.status() == StageAttemptStatus.UNKNOWN || stage.status() == StageAttemptStatus.RETRY_WAIT).map(StageView::stage).toList();
-        return new TaskProgressView(task.getId(), task.getAudioBlobId(), task.getStatus(), task.getCurrentPhase(), task.getCurrentStage(), task.getProgressPercent(), task.isTranscriptReady(),
+        return new TaskProgressView(task.getId(), task.getVersion(), task.getAudioBlobId(), task.getStatus(), task.getCurrentPhase(), task.getCurrentStage(), task.getProgressPercent(), task.isTranscriptReady(),
                 task.getCreatedAt(), tasks.findDurationMs(task.getId(), task.getTranscriptVersion()),
                 task.getOccurredAt(), task.getSceneType(), task.getSubject(), parseTags(task),
                 task.getCurrentAttemptNumber(), task.getTranscriptVersion(), task.getSpeakerCorrectionRevision(), task.getFailureCode(), task.getFailureMessage(), task.getFailedStage(),
@@ -353,27 +363,43 @@ public class PipelineProgressService {
         return message == null || message.isBlank() ? failure.getClass().getSimpleName() : message;
     }
     private static int progressFor(PipelineStage stage) { return switch (stage) { case UPLOAD_COMPLETED -> 5; case ASR_SUBMIT -> 10; case ASR_POLL -> 40; case TRANSCRIPT_PERSIST, RAW_DOCUMENT_READY -> 60; case DOCUMENT_ORGANIZATION -> 70; case FORMAL_DOCUMENT_READY -> 80; case KNOWLEDGE_PREPARE -> 85; case KNOWLEDGE_INDEX -> 90; case COMPLETED -> 100; }; }
+    private static Duration leaseFor(PipelineStage stage) {
+        return switch (stage) {
+            case DOCUMENT_ORGANIZATION -> Duration.ofMinutes(10);
+            case KNOWLEDGE_PREPARE, KNOWLEDGE_INDEX -> Duration.ofMinutes(15);
+            default -> Duration.ofSeconds(90);
+        };
+    }
     private static TaskStatus statusFor(PipelineStage stage) { return stage == PipelineStage.UPLOAD_COMPLETED ? TaskStatus.QUEUED : TaskStatus.RUNNING; }
 
     private KnowledgeIndexBuildView indexBuild(String documentId) {
         if (indexVersions == null || indexStages == null) return null;
         return indexVersions.findTopByKnowledgeDocumentIdOrderByGenerationDesc(documentId).map(index -> {
-            List<KnowledgeIndexStageView> stages = indexStages.findByKnowledgeIndexVersionIdOrderByQueuedAtAsc(index.getId()).stream()
-                    .map(value -> new KnowledgeIndexStageView(value.getStage().name(), value.getStatus().name(), value.getProgressPercent(), value.getCompletedCount(), value.getTotalCount(), value.getErrorMessage())).toList();
-            int progress = stages.stream().mapToInt(value -> switch (value.stage()) { case "INGEST" -> value.progressPercent() * 15 / 100; case "CHUNK" -> 15 + value.progressPercent() * 25 / 100; case "INDEX" -> 40 + value.progressPercent() * 60 / 100; default -> 0; }).max().orElse(0);
+            Map<KnowledgeIndexStage, KnowledgeIndexStageAttempt> latest = new EnumMap<>(KnowledgeIndexStage.class);
+            indexStages.findByKnowledgeIndexVersionIdOrderByQueuedAtAsc(index.getId()).forEach(value ->
+                    latest.merge(value.getStage(), value, (left, right) -> left.getAttemptNumber() >= right.getAttemptNumber() ? left : right));
+            List<KnowledgeIndexStageView> stages = Arrays.stream(KnowledgeIndexStage.values()).map(latest::get).filter(Objects::nonNull)
+                    .map(value -> new KnowledgeIndexStageView(value.getStage().name(), value.getStatus().name(), value.getAttemptNumber(),
+                            value.getProgressPercent(), value.getCompletedCount(), value.getTotalCount(), value.getErrorMessage())).toList();
+            int progress = stages.stream().mapToInt(value -> switch (value.stage()) {
+                case "INGEST" -> value.progressPercent() * 15 / 100;
+                case "CHUNK" -> value.status().equals(StageAttemptStatus.QUEUED.name()) ? 0 : 15 + value.progressPercent() * 25 / 100;
+                case "INDEX" -> value.status().equals(StageAttemptStatus.QUEUED.name()) ? 0 : 40 + value.progressPercent() * 60 / 100;
+                default -> 0;
+            }).max().orElse(0);
             if (index.getStatus() == KnowledgeIndexVersionStatus.READY) progress = 100;
-            return new KnowledgeIndexBuildView(index.getId(), index.getStatus().name(), index.getCurrentStage() == null ? null : index.getCurrentStage().name(), progress,
+            return new KnowledgeIndexBuildView(index.getId(), index.getGeneration(), index.getStatus().name(), index.getCurrentStage() == null ? null : index.getCurrentStage().name(), progress,
                     index.getTopicCount(), index.getChunkCount(), index.getIndexedChunkCount(), index.getFailureMessage(), stages);
         }).orElse(null);
     }
-    public record KnowledgeIndexStageView(String stage, String status, int progressPercent, int completedCount, int totalCount, String errorMessage) { }
-    public record KnowledgeIndexBuildView(String id, String status, String currentStage, int progressPercent, int topicCount, int chunkCount, int indexedChunkCount,
+    public record KnowledgeIndexStageView(String stage, String status, int attemptNumber, int progressPercent, int completedCount, int totalCount, String errorMessage) { }
+    public record KnowledgeIndexBuildView(String id, int generation, String status, String currentStage, int progressPercent, int topicCount, int chunkCount, int indexedChunkCount,
                                           String failureMessage, List<KnowledgeIndexStageView> stages) { }
     public record KnowledgeDocumentView(String id, String title, String status, String failureMessage, KnowledgeIndexBuildView currentBuild) { }
     public record OrganizedDocumentView(String id, String title, String status, String failureMessage) { }
     public record StageView(PipelineStage stage, StageAttemptStatus status, int attemptNumber, Instant queuedAt, Instant startedAt, Instant completedAt,
                             Long waitDurationMs, long totalWaitDurationMs, Instant nextRetryAt, String errorCode, String errorMessage, String modelId) { }
-    public record TaskProgressView(String id, String audioBlobId, TaskStatus status, PipelinePhase currentPhase, PipelineStage currentStage, int progressPercent, boolean transcriptReady,
+    public record TaskProgressView(String id, long version, String audioBlobId, TaskStatus status, PipelinePhase currentPhase, PipelineStage currentStage, int progressPercent, boolean transcriptReady,
                                    Instant createdAt, Long durationMs,
                                    Instant occurredAt, SceneType sceneType, String subject, List<String> tags,
                                    int currentAttemptNumber, int transcriptVersion, int speakerCorrectionRevision, String failureCode, String failureMessage, PipelineStage failedStage,

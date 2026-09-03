@@ -16,7 +16,7 @@ export type KnowledgeDocument = { id: string; transcriptionTaskId: string; title
 export type QaRetrievalMode = 'TRANSCRIPT_LOCAL' | 'FORMAL_OVERVIEW' | 'HYBRID_INDEX'
 export type QaCapabilities = { currentDocumentAvailable: boolean; currentMode?: QaRetrievalMode; crossDocumentEligible: boolean; limitationCode?: string }
 export type Task = {
-  id: string; audioBlobId: string; status: string; currentPhase?: PipelinePhase; currentStage?: PipelineStage; progressPercent?: number; transcriptReady?: boolean
+  id: string; version?: number; audioBlobId: string; status: string; currentPhase?: PipelinePhase; currentStage?: PipelineStage; progressPercent?: number; transcriptReady?: boolean
   currentAttemptNumber: number; transcriptVersion: number; speakerCorrectionRevision: number; failureCode?: string; failureMessage?: string; failedStage?: PipelineStage
   createdAt: string; durationMs?: number
   occurredAt: string; sceneType: 'INTERVIEW' | 'MEETING' | 'OTHER'; subject?: string; tags: string[]

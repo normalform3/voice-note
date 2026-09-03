@@ -44,6 +44,7 @@ public class TranscriptionTask {
         this.createdAt = Instant.now(); this.updatedAt = createdAt; this.occurredAt = createdAt; this.sceneType = SceneType.OTHER; this.tags = "[]";
     }
     public String getId() { return id; }
+    public long getVersion() { return version; }
     public String getOwnerId() { return ownerId; }
     public String getAudioBlobId() { return audioBlobId; }
     public String getAsrConfigHash() { return asrConfigHash; }

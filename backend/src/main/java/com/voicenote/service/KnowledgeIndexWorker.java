@@ -32,7 +32,9 @@ public class KnowledgeIndexWorker {
             if (initialBuild) pipeline.begin(work.document().getTranscriptionTaskId(), PipelineStage.KNOWLEDGE_INDEX);
             vectors.ensureAvailable(); vectors.ensureCollection();
             documents.ingestTopics(indexVersionId);
+            if (initialBuild) pipeline.renewLease(work.document().getTranscriptionTaskId(), PipelineStage.KNOWLEDGE_INDEX);
             documents.createChunks(indexVersionId);
+            if (initialBuild) pipeline.renewLease(work.document().getTranscriptionTaskId(), PipelineStage.KNOWLEDGE_INDEX);
             List<KnowledgeChunk> chunks = documents.beginIndexing(indexVersionId);
             Map<String, List<String>> topicIds = documents.topicIdsForChunks(chunks.stream().map(KnowledgeChunk::getId).toList());
             vectors.deleteIndexVersion(work.document().getOwnerId(), indexVersionId);
@@ -41,6 +43,7 @@ public class KnowledgeIndexWorker {
                 if (properties.getDashscope().isEnabled()) pipeline.recordModelInvocation(work.document().getTranscriptionTaskId(), PipelineStage.KNOWLEDGE_INDEX, properties.getDashscope().getEmbeddingModel());
                 vectors.upsert(work.document(), work.indexVersion(), chunk, embeddings.embedDocumentWithUsage(chunk.getTextContent()).vector(), topicIds.getOrDefault(chunk.getId(), List.of()));
                 if ((index + 1) % 10 == 0 || index + 1 == chunks.size()) {
+                    if (initialBuild) pipeline.renewLease(work.document().getTranscriptionTaskId(), PipelineStage.KNOWLEDGE_INDEX);
                     documents.indexedProgress(indexVersionId, index + 1, chunks.size());
                 }
             }

@@ -5,6 +5,7 @@ import com.voicenote.domain.StageAttemptStatus;
 import com.voicenote.domain.TaskStageAttempt;
 import org.junit.jupiter.api.Test;
 
+import java.time.Duration;
 import java.time.Instant;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -24,5 +25,18 @@ class TaskStageAttemptTest {
         assertThat(attempt.getModelId()).isEqualTo("paraformer-v2");
         attempt.retried();
         assertThat(attempt.getStatus()).isEqualTo(StageAttemptStatus.RETRIED);
+    }
+
+    @Test
+    void supportsLongRunningStageLeasesAndRenewal() {
+        TaskStageAttempt attempt = new TaskStageAttempt("task", PipelineStage.DOCUMENT_ORGANIZATION, 1);
+
+        assertThat(attempt.start(Duration.ofMinutes(10))).isTrue();
+        assertThat(attempt.getLeaseUntil()).isAfter(Instant.now().plusSeconds(9 * 60));
+        Instant originalLease = attempt.getLeaseUntil();
+
+        attempt.renewLease(Duration.ofMinutes(10));
+
+        assertThat(attempt.getLeaseUntil()).isAfterOrEqualTo(originalLease);
     }
 }

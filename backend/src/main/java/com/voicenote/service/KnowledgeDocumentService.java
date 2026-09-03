@@ -243,8 +243,16 @@ public class KnowledgeDocumentService {
         return versions.findTopByKnowledgeDocumentIdOrderByGenerationDesc(documentId).map(this::indexBuildView).orElse(null);
     }
     @Transactional(readOnly = true) public IndexBuildView indexBuildView(KnowledgeIndexVersion index) {
-        List<IndexStageView> stages = stageAttempts.findByKnowledgeIndexVersionIdOrderByQueuedAtAsc(index.getId()).stream().map(IndexStageView::from).toList();
-        int progress = stages.isEmpty() ? 0 : stages.stream().mapToInt(value -> switch (value.stage()) { case "INGEST" -> value.progressPercent() * 15 / 100; case "CHUNK" -> 15 + value.progressPercent() * 25 / 100; case "INDEX" -> 40 + value.progressPercent() * 60 / 100; default -> 0; }).max().orElse(0);
+        Map<KnowledgeIndexStage, KnowledgeIndexStageAttempt> latest = new EnumMap<>(KnowledgeIndexStage.class);
+        stageAttempts.findByKnowledgeIndexVersionIdOrderByQueuedAtAsc(index.getId()).forEach(value ->
+                latest.merge(value.getStage(), value, (left, right) -> left.getAttemptNumber() >= right.getAttemptNumber() ? left : right));
+        List<IndexStageView> stages = Arrays.stream(KnowledgeIndexStage.values()).map(latest::get).filter(Objects::nonNull).map(IndexStageView::from).toList();
+        int progress = stages.isEmpty() ? 0 : stages.stream().mapToInt(value -> switch (value.stage()) {
+            case "INGEST" -> value.progressPercent() * 15 / 100;
+            case "CHUNK" -> value.status().equals(StageAttemptStatus.QUEUED.name()) ? 0 : 15 + value.progressPercent() * 25 / 100;
+            case "INDEX" -> value.status().equals(StageAttemptStatus.QUEUED.name()) ? 0 : 40 + value.progressPercent() * 60 / 100;
+            default -> 0;
+        }).max().orElse(0);
         if (index.getStatus() == KnowledgeIndexVersionStatus.READY) progress = 100;
         return new IndexBuildView(index.getId(), index.getGeneration(), index.getStatus().name(), index.getCurrentStage() == null ? null : index.getCurrentStage().name(), progress,
                 index.getTopicCount(), index.getChunkCount(), index.getIndexedChunkCount(), index.getFailureMessage(), index.isActive(), stages);

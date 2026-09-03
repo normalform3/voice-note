@@ -10,8 +10,14 @@ import com.voicenote.domain.TranscriptionTask;
 import com.voicenote.domain.EventType;
 import com.voicenote.domain.OutboxEvent;
 import com.voicenote.domain.OrganizedDocument;
+import com.voicenote.domain.KnowledgeDocument;
+import com.voicenote.domain.KnowledgeIndexStage;
+import com.voicenote.domain.KnowledgeIndexStageAttempt;
+import com.voicenote.domain.KnowledgeIndexVersion;
 import com.voicenote.domain.QaRetrievalMode;
 import com.voicenote.repository.KnowledgeDocumentRepository;
+import com.voicenote.repository.KnowledgeIndexStageAttemptRepository;
+import com.voicenote.repository.KnowledgeIndexVersionRepository;
 import com.voicenote.repository.OrganizedDocumentRepository;
 import com.voicenote.repository.TaskStageAttemptRepository;
 import com.voicenote.repository.TranscriptionTaskRepository;
@@ -48,6 +54,7 @@ class PipelineProgressServiceTest {
         PipelineProgressService.TaskProgressView view = service.ownedView("owner", task.getId());
 
         assertThat(view.tags()).containsExactly("Java", "backend");
+        assertThat(view.version()).isEqualTo(task.getVersion());
         assertThat(view.createdAt()).isEqualTo(task.getCreatedAt());
         assertThat(view.durationMs()).isEqualTo(125_000L);
         assertThat(view.qaCapabilities().currentDocumentAvailable()).isFalse();
@@ -228,6 +235,97 @@ class PipelineProgressServiceTest {
     }
 
     @Test
+    void exposesOnlyLatestAttemptsAndHidesOldDownstreamStagesAfterRollback() {
+        TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class);
+        TaskStageAttemptRepository stages = mock(TaskStageAttemptRepository.class);
+        KnowledgeDocumentRepository documents = mock(KnowledgeDocumentRepository.class);
+        OrganizedDocumentRepository organizedDocuments = mock(OrganizedDocumentRepository.class);
+        TranscriptionTask task = new TranscriptionTask("owner", "audio", "a".repeat(64), "pipeline");
+        task.transcriptPersisted(); task.completePipeline(); task.speakerCorrectionApplied();
+        TaskStageAttempt firstSubmission = succeededAttempt(task.getId(), PipelineStage.ASR_SUBMIT, 1);
+        TaskStageAttempt secondSubmission = new TaskStageAttempt(task.getId(), PipelineStage.ASR_SUBMIT, 2);
+        TaskStageAttempt rawReady = succeededAttempt(task.getId(), PipelineStage.RAW_DOCUMENT_READY, 1);
+        TaskStageAttempt oldOrganization = succeededAttempt(task.getId(), PipelineStage.DOCUMENT_ORGANIZATION, 1);
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(stages.findByTranscriptionTaskIdOrderByQueuedAtAsc(task.getId()))
+                .thenReturn(List.of(secondSubmission, firstSubmission, rawReady, oldOrganization));
+        when(documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion("owner", task.getId(), task.getTranscriptVersion())).thenReturn(Optional.empty());
+        when(organizedDocuments.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion("owner", task.getId(), task.getTranscriptVersion())).thenReturn(Optional.empty());
+        PipelineProgressService service = new PipelineProgressService(tasks, stages, documents, organizedDocuments,
+                mock(ProgressEventPublisher.class), mock(OutboxService.class), new AppProperties());
+
+        PipelineProgressService.TaskProgressView view = service.ownedView("owner", task.getId());
+
+        assertThat(view.stages()).extracting(PipelineProgressService.StageView::stage)
+                .containsExactly(PipelineStage.ASR_SUBMIT, PipelineStage.RAW_DOCUMENT_READY);
+        assertThat(view.stages().get(0).attemptNumber()).isEqualTo(2);
+    }
+
+    @Test
+    void buildsKnowledgeProgressFromTheLatestAttemptInTheLatestGeneration() {
+        TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class);
+        TaskStageAttemptRepository stages = mock(TaskStageAttemptRepository.class);
+        KnowledgeDocumentRepository documents = mock(KnowledgeDocumentRepository.class);
+        OrganizedDocumentRepository organizedDocuments = mock(OrganizedDocumentRepository.class);
+        KnowledgeIndexVersionRepository versions = mock(KnowledgeIndexVersionRepository.class);
+        KnowledgeIndexStageAttemptRepository indexStages = mock(KnowledgeIndexStageAttemptRepository.class);
+        TranscriptionTask task = new TranscriptionTask("owner", "audio", "a".repeat(64), "pipeline");
+        KnowledgeDocument knowledge = new KnowledgeDocument("owner", task.getId(), task.getTranscriptVersion(), "知识文档", "organized", 1);
+        KnowledgeIndexVersion generation = new KnowledgeIndexVersion(knowledge.getId(), 2, "organized", 1, "config");
+        KnowledgeIndexStageAttempt first = new KnowledgeIndexStageAttempt(generation.getId(), KnowledgeIndexStage.INDEX, 1);
+        first.start(); first.progress(10, 10); first.succeed("{}");
+        KnowledgeIndexStageAttempt second = new KnowledgeIndexStageAttempt(generation.getId(), KnowledgeIndexStage.INDEX, 2);
+        second.start(); second.progress(2, 10);
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(stages.findByTranscriptionTaskIdOrderByQueuedAtAsc(task.getId())).thenReturn(List.of());
+        when(documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion("owner", task.getId(), task.getTranscriptVersion())).thenReturn(Optional.of(knowledge));
+        when(organizedDocuments.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion("owner", task.getId(), task.getTranscriptVersion())).thenReturn(Optional.empty());
+        when(versions.findTopByKnowledgeDocumentIdOrderByGenerationDesc(knowledge.getId())).thenReturn(Optional.of(generation));
+        when(indexStages.findByKnowledgeIndexVersionIdOrderByQueuedAtAsc(generation.getId())).thenReturn(List.of(second, first));
+        PipelineProgressService service = new PipelineProgressService(tasks, stages, documents, organizedDocuments, versions, indexStages,
+                mock(ProgressEventPublisher.class), mock(OutboxService.class), new AppProperties(), new DocumentQaPolicy());
+
+        PipelineProgressService.KnowledgeIndexBuildView build = service.ownedView("owner", task.getId()).knowledgeDocument().currentBuild();
+
+        assertThat(build.generation()).isEqualTo(2);
+        assertThat(build.stages()).singleElement().satisfies(stage -> {
+            assertThat(stage.attemptNumber()).isEqualTo(2);
+            assertThat(stage.progressPercent()).isEqualTo(20);
+        });
+        assertThat(build.progressPercent()).isEqualTo(52);
+    }
+
+    @Test
+    void startsAFreshKnowledgeGenerationAtZeroWhileFutureStagesAreQueued() {
+        TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class);
+        TaskStageAttemptRepository stages = mock(TaskStageAttemptRepository.class);
+        KnowledgeDocumentRepository documents = mock(KnowledgeDocumentRepository.class);
+        OrganizedDocumentRepository organizedDocuments = mock(OrganizedDocumentRepository.class);
+        KnowledgeIndexVersionRepository versions = mock(KnowledgeIndexVersionRepository.class);
+        KnowledgeIndexStageAttemptRepository indexStages = mock(KnowledgeIndexStageAttemptRepository.class);
+        TranscriptionTask task = new TranscriptionTask("owner", "audio", "a".repeat(64), "pipeline");
+        KnowledgeDocument knowledge = new KnowledgeDocument("owner", task.getId(), task.getTranscriptVersion(), "知识文档", "organized", 1);
+        KnowledgeIndexVersion generation = new KnowledgeIndexVersion(knowledge.getId(), 2, "organized", 1, "config");
+        List<KnowledgeIndexStageAttempt> queued = List.of(
+                new KnowledgeIndexStageAttempt(generation.getId(), KnowledgeIndexStage.INGEST, 1),
+                new KnowledgeIndexStageAttempt(generation.getId(), KnowledgeIndexStage.CHUNK, 1),
+                new KnowledgeIndexStageAttempt(generation.getId(), KnowledgeIndexStage.INDEX, 1));
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(stages.findByTranscriptionTaskIdOrderByQueuedAtAsc(task.getId())).thenReturn(List.of());
+        when(documents.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion("owner", task.getId(), task.getTranscriptVersion())).thenReturn(Optional.of(knowledge));
+        when(organizedDocuments.findByOwnerIdAndTranscriptionTaskIdAndTranscriptVersion("owner", task.getId(), task.getTranscriptVersion())).thenReturn(Optional.empty());
+        when(versions.findTopByKnowledgeDocumentIdOrderByGenerationDesc(knowledge.getId())).thenReturn(Optional.of(generation));
+        when(indexStages.findByKnowledgeIndexVersionIdOrderByQueuedAtAsc(generation.getId())).thenReturn(queued);
+        PipelineProgressService service = new PipelineProgressService(tasks, stages, documents, organizedDocuments, versions, indexStages,
+                mock(ProgressEventPublisher.class), mock(OutboxService.class), new AppProperties(), new DocumentQaPolicy());
+
+        PipelineProgressService.KnowledgeIndexBuildView build = service.ownedView("owner", task.getId()).knowledgeDocument().currentBuild();
+
+        assertThat(build.generation()).isEqualTo(2);
+        assertThat(build.progressPercent()).isZero();
+    }
+
+    @Test
     void opensANewKnowledgeStageAttemptWhenAFailedKnowledgeBuildIsRetried() {
         TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class);
         TaskStageAttemptRepository stages = mock(TaskStageAttemptRepository.class);
@@ -255,5 +353,10 @@ class PipelineProgressServiceTest {
         assertThat(task.getStatus()).isEqualTo(TaskStatus.RUNNING);
         assertThat(task.getCurrentStage()).isEqualTo(PipelineStage.KNOWLEDGE_INDEX);
         assertThat(task.getFailureMessage()).isNull();
+    }
+
+    private static TaskStageAttempt succeededAttempt(String taskId, PipelineStage stage, int attemptNumber) {
+        TaskStageAttempt attempt = new TaskStageAttempt(taskId, stage, attemptNumber);
+        attempt.start(); attempt.succeed("{}"); return attempt;
     }
 }
