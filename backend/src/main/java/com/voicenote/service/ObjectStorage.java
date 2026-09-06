@@ -10,6 +10,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import java.io.InputStream;
 import java.io.IOException;
+import java.util.OptionalLong;
 
 @Service
 public class ObjectStorage {
@@ -33,6 +34,19 @@ public class ObjectStorage {
             return minio.getObject(GetObjectArgs.builder().bucket(properties.getStorage().getBucket()).object(objectKey).build());
         } catch (Exception exception) {
             throw storageFailure("read", exception);
+        }
+    }
+
+    public OptionalLong sizeIfExists(String objectKey) {
+        try {
+            var response = minio.statObject(StatObjectArgs.builder().bucket(properties.getStorage().getBucket()).object(objectKey).build());
+            return OptionalLong.of(response.size());
+        } catch (ErrorResponseException exception) {
+            String code = minioErrorCode(exception);
+            if ("NoSuchKey".equals(code) || "NoSuchObject".equals(code)) return OptionalLong.empty();
+            throw storageFailure("stat", exception);
+        } catch (Exception exception) {
+            throw storageFailure("stat", exception);
         }
     }
 

@@ -12,6 +12,7 @@ public class AppProperties {
     private final Knowledge knowledge = new Knowledge();
     private final Agent agent = new Agent();
     private final Tts tts = new Tts();
+    private final RealtimeAsr realtimeAsr = new RealtimeAsr();
     private final Memory memory = new Memory();
     private final Mcp mcp = new Mcp();
 
@@ -23,6 +24,7 @@ public class AppProperties {
     public Knowledge getKnowledge() { return knowledge; }
     public Agent getAgent() { return agent; }
     public Tts getTts() { return tts; }
+    public RealtimeAsr getRealtimeAsr() { return realtimeAsr; }
     public Memory getMemory() { return memory; }
     public Mcp getMcp() { return mcp; }
 
@@ -198,6 +200,30 @@ public class AppProperties {
         public void setVoice(String voice) { this.voice = voice; }
         public String getWsUrl() { return wsUrl; }
         public void setWsUrl(String wsUrl) { this.wsUrl = wsUrl; }
+    }
+
+    public static class RealtimeAsr {
+        private boolean enabled;
+        private String model = "paraformer-realtime-v2";
+        private String wsUrl = "wss://dashscope.aliyuncs.com/api-ws/v1/inference";
+        private int maxDurationSeconds = 7200;
+        private int ticketTtlSeconds = 30;
+        private int maxSentenceSilenceMs = 800;
+        private int connectTimeoutSeconds = 10;
+        public boolean isEnabled() { return enabled; }
+        public void setEnabled(boolean enabled) { this.enabled = enabled; }
+        public String getModel() { return model; }
+        public void setModel(String model) { this.model = model; }
+        public String getWsUrl() { return wsUrl; }
+        public void setWsUrl(String wsUrl) { this.wsUrl = wsUrl; }
+        public int getMaxDurationSeconds() { return maxDurationSeconds; }
+        public void setMaxDurationSeconds(int maxDurationSeconds) { this.maxDurationSeconds = Math.max(60, Math.min(7200, maxDurationSeconds)); }
+        public int getTicketTtlSeconds() { return ticketTtlSeconds; }
+        public void setTicketTtlSeconds(int ticketTtlSeconds) { this.ticketTtlSeconds = ticketTtlSeconds; }
+        public int getMaxSentenceSilenceMs() { return maxSentenceSilenceMs; }
+        public void setMaxSentenceSilenceMs(int maxSentenceSilenceMs) { this.maxSentenceSilenceMs = Math.max(200, Math.min(6000, maxSentenceSilenceMs)); }
+        public int getConnectTimeoutSeconds() { return connectTimeoutSeconds; }
+        public void setConnectTimeoutSeconds(int connectTimeoutSeconds) { this.connectTimeoutSeconds = Math.max(1, Math.min(30, connectTimeoutSeconds)); }
     }
 
     public static class Memory {

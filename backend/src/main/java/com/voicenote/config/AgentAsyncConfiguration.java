@@ -18,4 +18,15 @@ public class AgentAsyncConfiguration {
         executor.initialize();
         return executor;
     }
+
+    @Bean(name = "recordingFinalizationExecutor")
+    Executor recordingFinalizationExecutor() {
+        ThreadPoolTaskExecutor executor = new ThreadPoolTaskExecutor();
+        executor.setCorePoolSize(1);
+        executor.setMaxPoolSize(2);
+        executor.setQueueCapacity(50);
+        executor.setThreadNamePrefix("recording-finalization-");
+        executor.initialize();
+        return executor;
+    }
 }

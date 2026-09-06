@@ -14,6 +14,7 @@ import com.voicenote.service.SpeakerCorrectionService;
 import com.voicenote.service.SpeakerCorrectionWorker;
 import com.voicenote.service.MemoryRunExecutor;
 import com.voicenote.service.AgentRunExecutor;
+import com.voicenote.service.RealtimeRecordingWorker;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -35,19 +36,22 @@ public class TaskMessageHandler {
     private final SpeakerCorrectionWorker speakerCorrectionWorker;
     private final MemoryRunExecutor memoryRunExecutor;
     private final AgentRunExecutor agentRunExecutor;
+    private final RealtimeRecordingWorker realtimeRecordingWorker;
     @Autowired
     public TaskMessageHandler(JdbcTemplate jdbc, OutboxEventRepository outbox, TranscriptionTaskService transcriptionTasks, AnalysisService analyses,
                               KnowledgeDocumentService knowledgeDocuments, DocumentOrganizationService organizedDocuments,
                               OrganizedDocumentWorker organizedDocumentWorker, KnowledgeIndexWorker knowledgeIndexWorker,
                               KnowledgeAgentService knowledgeRuns, ProgressMessageHandler progress,
                               SpeakerCorrectionService speakerCorrections, SpeakerCorrectionWorker speakerCorrectionWorker,
-                              MemoryRunExecutor memoryRunExecutor, AgentRunExecutor agentRunExecutor) {
+                              MemoryRunExecutor memoryRunExecutor, AgentRunExecutor agentRunExecutor,
+                              RealtimeRecordingWorker realtimeRecordingWorker) {
         this.jdbc = jdbc; this.outbox = outbox; this.transcriptionTasks = transcriptionTasks; this.analyses = analyses;
         this.knowledgeDocuments = knowledgeDocuments; this.organizedDocuments = organizedDocuments; this.organizedDocumentWorker = organizedDocumentWorker;
         this.knowledgeIndexWorker = knowledgeIndexWorker; this.knowledgeRuns = knowledgeRuns; this.progress = progress;
         this.speakerCorrections = speakerCorrections; this.speakerCorrectionWorker = speakerCorrectionWorker;
         this.memoryRunExecutor = memoryRunExecutor;
         this.agentRunExecutor = agentRunExecutor;
+        this.realtimeRecordingWorker = realtimeRecordingWorker;
     }
     public TaskMessageHandler(JdbcTemplate jdbc, OutboxEventRepository outbox, TranscriptionTaskService transcriptionTasks, AnalysisService analyses,
                               KnowledgeDocumentService knowledgeDocuments, DocumentOrganizationService organizedDocuments,
@@ -55,7 +59,16 @@ public class TaskMessageHandler {
                               KnowledgeAgentService knowledgeRuns, ProgressMessageHandler progress,
                               SpeakerCorrectionService speakerCorrections, SpeakerCorrectionWorker speakerCorrectionWorker) {
         this(jdbc, outbox, transcriptionTasks, analyses, knowledgeDocuments, organizedDocuments, organizedDocumentWorker,
-                knowledgeIndexWorker, knowledgeRuns, progress, speakerCorrections, speakerCorrectionWorker, null, null);
+                knowledgeIndexWorker, knowledgeRuns, progress, speakerCorrections, speakerCorrectionWorker, null, null, null);
+    }
+    TaskMessageHandler(JdbcTemplate jdbc, OutboxEventRepository outbox, TranscriptionTaskService transcriptionTasks, AnalysisService analyses,
+                       KnowledgeDocumentService knowledgeDocuments, DocumentOrganizationService organizedDocuments,
+                       OrganizedDocumentWorker organizedDocumentWorker, KnowledgeIndexWorker knowledgeIndexWorker,
+                       KnowledgeAgentService knowledgeRuns, ProgressMessageHandler progress,
+                       SpeakerCorrectionService speakerCorrections, SpeakerCorrectionWorker speakerCorrectionWorker,
+                       RealtimeRecordingWorker realtimeRecordingWorker) {
+        this(jdbc, outbox, transcriptionTasks, analyses, knowledgeDocuments, organizedDocuments, organizedDocumentWorker,
+                knowledgeIndexWorker, knowledgeRuns, progress, speakerCorrections, speakerCorrectionWorker, null, null, realtimeRecordingWorker);
     }
     @Transactional
     public void consume(String consumerName, String eventId) {
@@ -64,6 +77,9 @@ public class TaskMessageHandler {
         OutboxEvent event = outbox.findById(eventId).orElse(null);
         if (event == null) return;
         if (event.getEventType() == EventType.TRANSCRIPTION_REQUESTED) transcriptionTasks.ensureFirstAttempt(event.getAggregateId());
+        if (event.getEventType() == EventType.RECORDING_FINALIZATION_REQUESTED && realtimeRecordingWorker != null) {
+            afterCommit(() -> realtimeRecordingWorker.process(event.getAggregateId()));
+        }
         if (event.getEventType() == EventType.DOCUMENT_ORGANIZATION_REQUESTED) {
             organizedDocuments.markQueued(event.getAggregateId());
             afterCommit(() -> organizedDocumentWorker.process(event.getAggregateId()));

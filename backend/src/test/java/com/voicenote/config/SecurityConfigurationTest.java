@@ -61,6 +61,20 @@ class SecurityConfigurationTest {
     }
 
     @Test
+    void permitsErrorDispatchSoTheOriginalFailureIsNotMaskedAsUnauthorized() throws Exception {
+        MockHttpServletRequest request = new MockHttpServletRequest("DELETE", "/error");
+        request.setDispatcherType(DispatcherType.ERROR);
+        MockHttpServletResponse response = new MockHttpServletResponse();
+        AtomicBoolean downstreamInvoked = new AtomicBoolean();
+
+        springSecurityFilterChain.doFilter(request, response,
+                (ignoredRequest, ignoredResponse) -> downstreamInvoked.set(true));
+
+        assertThat(downstreamInvoked).isTrue();
+        assertThat(response.getStatus()).isEqualTo(200);
+    }
+
+    @Test
     void returnsUnauthorizedWhenBearerTokenCannotBeParsed() throws Exception {
         MockHttpServletRequest request = new MockHttpServletRequest("GET", "/api/progress-events");
         request.addHeader("Authorization", "Bearer expired-token");

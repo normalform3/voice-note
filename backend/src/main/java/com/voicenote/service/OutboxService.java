@@ -30,15 +30,15 @@ public class OutboxService {
             int inserted = events.insertIgnore(UUID.randomUUID().toString(), aggregateType, aggregateId, eventType.name(), deduplicationKey, payload,
                     OutboxStatus.READY.name(), now, now);
             OutboxEvent event = events.findByDeduplicationKey(deduplicationKey).orElseThrow();
-            if (inserted > 0) applicationEvents.publishEvent(new OutboxEnqueued(event.getId()));
+            if (inserted > 0) applicationEvents.publishEvent(new OutboxEnqueued(event.getId(), eventType));
             return event;
         }
         OutboxEvent event = events.save(new OutboxEvent(aggregateType, aggregateId, eventType, payload, null));
-        applicationEvents.publishEvent(new OutboxEnqueued(event.getId()));
+        applicationEvents.publishEvent(new OutboxEnqueued(event.getId(), eventType));
         return event;
     }
     @Transactional public void deleteAggregate(String aggregateType, String aggregateId) {
         events.deleteByAggregateTypeAndAggregateId(aggregateType, aggregateId);
     }
-    public record OutboxEnqueued(String eventId) { }
+    public record OutboxEnqueued(String eventId, EventType eventType) { }
 }

@@ -25,10 +25,10 @@ public class SecurityConfiguration {
         return http.csrf(AbstractHttpConfigurer::disable)
                 .sessionManagement(session -> session.sessionCreationPolicy(SessionCreationPolicy.STATELESS))
                 .authorizeHttpRequests(auth -> auth
-                        // SseEmitter completes on a servlet ASYNC redispatch. The original REQUEST is
-                        // authenticated above; the redispatch has no Authorization header to parse again.
-                        .dispatcherTypeMatchers(DispatcherType.ASYNC).permitAll()
-                        .requestMatchers("/actuator/health", "/api/auth/**").permitAll()
+                        // Internal redispatches must not be mistaken for new unauthenticated requests:
+                        // ASYNC completes SSE responses, while ERROR renders the original failure.
+                        .dispatcherTypeMatchers(DispatcherType.ASYNC, DispatcherType.ERROR).permitAll()
+                        .requestMatchers("/actuator/health", "/api/auth/**", "/api/realtime-recordings/socket").permitAll()
                         .requestMatchers(HttpMethod.OPTIONS, "/**").permitAll()
                         .anyRequest().authenticated())
                 .exceptionHandling(exceptions -> exceptions.authenticationEntryPoint((request, response, exception) -> {

@@ -28,6 +28,14 @@ public class AudioBlob {
         this.objectKey = "owners/" + ownerId + "/audio/" + id + "/source";
         this.status = BlobStatus.UPLOADING; this.createdAt = Instant.now();
     }
+    public static AudioBlob readyRecording(String id, String ownerId, String sha256, long contentLength, String contentType, String originalFilename) {
+        AudioBlob blob = new AudioBlob(ownerId, sha256, contentLength, contentType, originalFilename);
+        blob.id = id;
+        blob.objectKey = "owners/" + ownerId + "/audio/" + id + "/source";
+        blob.status = BlobStatus.READY;
+        blob.completedAt = Instant.now();
+        return blob;
+    }
     public String getId() { return id; }
     public String getOwnerId() { return ownerId; }
     public String getSha256() { return sha256; }

@@ -1,0 +1,40 @@
+CREATE TABLE realtime_recording_sessions (
+    id CHAR(36) PRIMARY KEY,
+    version BIGINT NOT NULL DEFAULT 0,
+    owner_id CHAR(36) NOT NULL,
+    status VARCHAR(32) NOT NULL,
+    content_type VARCHAR(128) NOT NULL,
+    original_filename VARCHAR(512) NOT NULL,
+    sample_rate INT NOT NULL,
+    language_hints JSON NOT NULL,
+    asr_config JSON NOT NULL,
+    started_at DATETIME(6) NOT NULL,
+    next_part_number INT NOT NULL DEFAULT 0,
+    expected_part_count INT NULL,
+    total_bytes BIGINT NOT NULL DEFAULT 0,
+    last_part_at DATETIME(6) NULL,
+    audio_blob_id CHAR(36) NULL,
+    transcription_task_id CHAR(36) NULL,
+    failure_code VARCHAR(128) NULL,
+    failure_message VARCHAR(1000) NULL,
+    expires_at DATETIME(6) NOT NULL,
+    created_at DATETIME(6) NOT NULL,
+    updated_at DATETIME(6) NOT NULL,
+    CONSTRAINT fk_realtime_recording_owner FOREIGN KEY (owner_id) REFERENCES users(id),
+    CONSTRAINT fk_realtime_recording_blob FOREIGN KEY (audio_blob_id) REFERENCES audio_blobs(id),
+    CONSTRAINT fk_realtime_recording_task FOREIGN KEY (transcription_task_id) REFERENCES transcription_tasks(id),
+    KEY ix_realtime_recording_owner_updated (owner_id, updated_at),
+    KEY ix_realtime_recording_cleanup (status, expires_at)
+);
+
+CREATE TABLE realtime_recording_parts (
+    id CHAR(36) PRIMARY KEY,
+    session_id CHAR(36) NOT NULL,
+    part_number INT NOT NULL,
+    object_key VARCHAR(1024) NOT NULL,
+    content_length BIGINT NOT NULL,
+    sha256 CHAR(64) NOT NULL,
+    received_at DATETIME(6) NOT NULL,
+    CONSTRAINT fk_realtime_recording_part_session FOREIGN KEY (session_id) REFERENCES realtime_recording_sessions(id),
+    UNIQUE KEY uk_realtime_recording_part (session_id, part_number)
+);

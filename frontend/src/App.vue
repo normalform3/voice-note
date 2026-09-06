@@ -5,7 +5,9 @@ import ProfilePage from './ProfilePage.vue'
 import SkillManager from './SkillManager.vue'
 import ToolsCenter from './ToolsCenter.vue'
 import VoiceConversationOverlay from './VoiceConversationOverlay.vue'
+import RealtimeRecordingOverlay from './RealtimeRecordingOverlay.vue'
 import { isSpeechRecognitionSupported } from './useSpeechRecognition'
+import { deleteRecordingDraft, listRecordingDrafts, type RecordingDraft } from './realtimeRecordingStore'
 import { api, hashFile, isSessionExpiredError, key, SESSION_EXPIRED_EVENT, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentAnswerBlockEvent, type AgentCapabilities, type AgentConversation, type AgentConversationDetail, type AgentConversationTurn, type AgentProgressEvent, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AgentStep, type AgentStepDetail, type AiSpeakerCorrectionApplyResult, type AiSpeakerCorrectionDetail, type AiSpeakerCorrectionSuggestion, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PageResult, type PipelineStage, type ResultCitation, type Segment, type Speaker, type SpeakerCorrectionProposalPart, type SpeakerCorrectionResult, type StageAttempt, type Task, type WorkspaceSnapshot } from './api'
 import { knowledgeBuildProgress, latestKnowledgeStages, taskDisplayProgress, taskProgressLabel, visibleStageAttempts } from './pipelineProgress'
 
@@ -109,6 +111,9 @@ const workspaceView = ref<WorkspaceView>('library')
 const detailTab = ref<DetailTab>('transcript')
 const mobileAgentOpen = ref(false)
 const voiceConversationOpen = ref(false)
+const realtimeRecordingOpen = ref(false)
+const realtimeRecordingDraftId = ref<string | null>(null)
+const recoverableRecordingDrafts = ref<RecordingDraft[]>([])
 const voiceLiveRunId = ref('')
 const voiceLiveProgress = ref<AgentProgressEvent[]>([])
 const voiceLiveBlocks = ref<AgentAnswerBlockEvent[]>([])
@@ -392,7 +397,7 @@ async function authenticate() {
     signedInAccount.value = data.account || account.value
     localStorage.setItem('voicenote_token', token.value)
     localStorage.setItem('voicenote_account', signedInAccount.value)
-    await loadWorkspace(); connectProgressEvents()
+    await loadWorkspace(); await loadRealtimeRecordingDrafts(); connectProgressEvents()
   } catch (error: any) { authError.value = error.response?.data?.message || '无法完成登录' }
 }
 async function loadWorkspace() {
@@ -418,6 +423,30 @@ async function retryWorkspace() {
 async function loadTasks() {
   const { data } = await api.get<Task[]>('/transcription-tasks')
   tasks.value = data
+}
+async function loadRealtimeRecordingDrafts() {
+  if (!signedInAccount.value) { recoverableRecordingDrafts.value = []; return }
+  try { recoverableRecordingDrafts.value = await listRecordingDrafts(signedInAccount.value) }
+  catch { recoverableRecordingDrafts.value = [] }
+}
+function openRealtimeRecording(draftId?: string) {
+  realtimeRecordingDraftId.value = draftId || null
+  realtimeRecordingOpen.value = true
+}
+async function handleRealtimeRecordingArchived(taskId: string) {
+  realtimeRecordingOpen.value = false
+  realtimeRecordingDraftId.value = null
+  await Promise.all([loadTasks(), loadRealtimeRecordingDrafts()])
+  const task = tasks.value.find(value => value.id === taskId)
+  if (task) await choose(task)
+}
+async function handleBackgroundRecordingArchived(sessionId: string, taskId: string) {
+  if (realtimeRecordingOpen.value) return
+  const local = recoverableRecordingDrafts.value.find(value => value.serverSessionId === sessionId)
+  if (local) await deleteRecordingDraft(local.id).catch(() => {})
+  await Promise.all([loadTasks(), loadRealtimeRecordingDrafts()])
+  const task = tasks.value.find(value => value.id === taskId)
+  if (task) await choose(task)
 }
 async function loadDocuments() {
   const requestVersion = ++knowledgeDocumentsRequestVersion
@@ -1303,6 +1332,11 @@ async function handleSettledAgentRun(run: AgentRun) {
 }
 function handleProgressEvent(name: string, payload: any) {
   if (name === 'snapshot') { applySnapshot(payload as WorkspaceSnapshot); return }
+  if (name === 'realtime-recording-settled' && payload.sessionId && payload.taskId) {
+    void handleBackgroundRecordingArchived(payload.sessionId, payload.taskId)
+    return
+  }
+  if (name === 'realtime-recording-failed') { void loadRealtimeRecordingDrafts(); return }
   if (name === 'task-stage-settled' && payload.task) { upsertTask(payload.task as Task); return }
   if (name === 'knowledge-index-progress') { void loadDocuments(); return }
   if (name === 'agent-run-progress') {
@@ -1448,6 +1482,9 @@ function logout() {
   stopProgressEvents()
   stopTurnDetailRefreshes()
   voiceConversationOpen.value = false
+  realtimeRecordingOpen.value = false
+  realtimeRecordingDraftId.value = null
+  recoverableRecordingDrafts.value = []
   if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
   token.value = ''
   localStorage.removeItem('voicenote_token')
@@ -1498,7 +1535,7 @@ watch(() => visibleAgentRunIds.value.join('|'), () => {
 onMounted(() => {
   window.addEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired)
   clockTimer = window.setInterval(() => { clockNow.value = Date.now() }, 1000)
-  if (token.value) { void loadWorkspace().catch(() => {}); void connectProgressEvents() }
+  if (token.value) { void loadWorkspace().catch(() => {}); void loadRealtimeRecordingDrafts(); void connectProgressEvents() }
 })
 onBeforeUnmount(() => {
   window.removeEventListener(SESSION_EXPIRED_EVENT, handleSessionExpired)
@@ -1560,11 +1597,20 @@ onBeforeUnmount(() => {
           <button type="button" :disabled="workspaceLoading" @click="retryWorkspace">{{ workspaceLoading ? '正在重连…' : '立即重试' }}</button>
         </div>
 
-        <section class="import-panel" aria-label="导入音频">
+        <section class="import-panel" aria-label="添加音频">
           <div class="import-mark" aria-hidden="true">↥</div>
-          <div class="import-copy"><b>导入新的音频</b><span>支持常见音频格式，上传后自动转写与归档。</span></div>
+          <div class="import-copy"><b>添加新的音频</b><span>导入已有文件，或边录边看实时字幕并持续归档。</span></div>
           <input ref="fileInput" class="visually-hidden" type="file" accept="audio/*" aria-label="选择音频文件" @change="chooseFile">
-          <button class="import-button" type="button" @click="triggerFilePicker">导入音频 <span>+</span></button>
+          <div class="import-actions">
+            <button class="import-button" type="button" @click="triggerFilePicker">导入音频 <span>+</span></button>
+            <button class="realtime-recording-button" type="button" @click="openRealtimeRecording()"><i></i> 实时录音</button>
+          </div>
+        </section>
+
+        <section v-if="recoverableRecordingDrafts.length" class="recording-recovery-banner" aria-label="待归档录音">
+          <span aria-hidden="true">◌</span>
+          <div><b>{{ recoverableRecordingDrafts.length }} 份实时录音等待处理</b><small>本地音频仍安全保留，可从上次上传位置继续归档。</small></div>
+          <button type="button" @click="openRealtimeRecording(recoverableRecordingDrafts[0].id)">恢复录音 <span>→</span></button>
         </section>
 
         <section v-if="file || progress" class="upload-queue" aria-live="polite">
@@ -1802,5 +1848,8 @@ onBeforeUnmount(() => {
       :memory-enabled="voiceMemoryEnabled" :submit-message="submitVoiceAgentMessage"
       :live-progress="voiceLiveProgress" :live-blocks="voiceLiveBlocks" :tts-enabled="agentCapabilities?.ttsEnabled === true"
       @close="closeVoiceConversation" @evidence="openVoiceEvidence" />
+    <RealtimeRecordingOverlay v-if="realtimeRecordingOpen" :account="signedInAccount" :draft-id="realtimeRecordingDraftId"
+      @close="realtimeRecordingOpen = false; realtimeRecordingDraftId = null"
+      @drafts-changed="loadRealtimeRecordingDrafts" @archived="handleRealtimeRecordingArchived" />
   </main>
 </template>

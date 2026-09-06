@@ -15,7 +15,7 @@ VoiceNote 面向会议、访谈与面试等音频场景。它不只完成 ASR �
 
 | 用户场景 | 可以完成的操作 | 系统提供的保障 |
 | --- | --- | --- |
-| 音频听记 | 导入录音，查看转写阶段、说话人和时间轴 | 长任务异步执行，阶段状态、耗时和失败位置持久化。 |
+| 音频听记 | 导入已有录音，或实时录音并查看低延迟字幕 | 音频持续归档；完整音频始终重新 ASR，实时字幕不污染最终文档。 |
 | 原文校对 | 播放原音、修改说话人，或审核 AI 校正建议 | 人工修改优先；过期 AI 建议不能覆盖新的修订。 |
 | 文档整理 | 生成按主题组织的正式文档和带来源摘要 | 每个 Topic、问答对和摘要结论保留原始 Segment 引用。 |
 | 知识检索 | 在当前、勾选或全部已入库录音中检索 | Dense + BM25 混合召回，命中后仍按用户和索引版本回查。 |
@@ -76,6 +76,19 @@ Qdrant 同时维护 Dense 向量和 BM25 稀疏向量，通过 RRF 融合候选�
 - [OutboxService](backend/src/main/java/com/voicenote/service/OutboxService.java)：在业务事务中创建带去重键的事件。
 - [TaskMessageHandler](backend/src/main/java/com/voicenote/messaging/TaskMessageHandler.java)：用 Inbox 唯一键消费事件并在提交后启动 Worker。
 
+### 实时字幕与最终转写强制分离
+
+实时录音同时运行两条互不依赖的链路。浏览器每秒把 WebM/Opus 块写入 IndexedDB，每约十秒按顺序上传一个带 SHA-256 的 MinIO 临时分片；AudioWorklet 另行产生 PCM16LE 帧，经带 30 秒专用票据的后端 WebSocket 代理调用实时 ASR。实时返回只更新录音页面的临时或已确认字幕，不会写入 `transcript_segments`。
+
+结束录音后，Worker 先通过数据库原子领取归档任务，避免重复投递或多实例并发生成同一份音频。若完整对象尚不存在，它会按序把 MinIO 临时分片合并到受控的服务端临时文件，校验总字节数并计算整体哈希，再上传完整 WebM；随后创建或复用 `AudioBlob`，并使用录音开始时间和预选说话人配置创建现有 `TranscriptionTask`。`paraformer-v2` 对完整音频的批量结果才是原始文档、正式文档、摘要和 RAG 的唯一来源；合并失败会保留临时分片与本地副本以便重试。
+
+相关实现：
+
+- [RealtimeRecordingService](backend/src/main/java/com/voicenote/service/RealtimeRecordingService.java)：会话权限、顺序分片、哈希幂等与完成事件。
+- [RealtimeRecordingWorker](backend/src/main/java/com/voicenote/service/RealtimeRecordingWorker.java)：原子领取归档任务、两阶段合并、整体哈希、音频去重和最终转写建单。
+- [RealtimeAsrGateway](backend/src/main/java/com/voicenote/provider/RealtimeAsrGateway.java)：实时 ASR 协议、心跳、字幕事件和三次退避重连。
+- [RealtimeRecordingOverlay](frontend/src/RealtimeRecordingOverlay.vue)：录音、字幕、持续上传、断点恢复与安全归档工作台。
+
 ### 人工与 AI 双重说话人校准
 
 用户可以在原始文档中选择单句或连续片段，人工改派到已有说话人；也可以启动 AI 语义校正，让模型结合相邻发言提出整段改派或句内拆分建议。AI 只生成建议，界面展示建议类型、置信度和修改前后内容，用户选择后才会应用。
@@ -91,9 +104,19 @@ Qdrant 同时维护 Dense 向量和 BM25 稀疏向量，通过 RRF 融合候选�
 
 ## 功能介绍
 
-### 1. 导入音频并观察处理进度
+### 1. 导入音频或开始实时录音
 
-资料库是完整链路的入口。用户选择音频后，可以开启说话人识别并按需填写人数；上传完成后页面继续显示转写和后续阶段，不需要停留等待同步请求。列表同时展示每份录音的时长、完成度、当前状态，以及是否可以加入跨文档问答范围。
+资料库是完整链路的入口。“导入音频”和“实时录音”作为同级操作：已有文件继续使用上传意图；实时录音打开独立工作台，展示计时器、麦克风电平、归档上传状态、实时 ASR 状态、已确认字幕和浅色临时字幕。实时模式开始前同样可以选择最终转写的说话人识别配置。
+
+录音时 WebM 块逐秒保存在 IndexedDB，网络可用时每约十秒顺序上传；实时字幕连接失败只降级字幕，不停止录音。主动结束、达到两小时或本地存储失败都会进入安全归档；刷新后资料库会提示未完成草稿，用户可以继续上传、下载本地副本或确认删除。只有服务端返回最终任务 ID 后，本地草稿才会清理并自动打开任务详情。
+
+实时录音工作台把录音状态、字幕状态和归档进度集中在同一屏：计时器明确显示两小时上限，状态卡分别反馈实时字幕连接与本地录音块上传进度；已确认字幕按时间追加，临时字幕只在当前页面原位更新。
+
+![实时录音工作台中的计时器、归档进度与中英文实时字幕](docs/images/realtime-recording-live-captions.png)
+
+*录音期间，实时字幕只负责即时反馈；WebM 音频会持续保存并上传，结束后仍以完整音频的批量 ASR 结果作为最终文档来源。*
+
+资料库同时保留已有音频文件的导入、处理状态和检索范围管理：
 
 ![声音资料库、音频导入与跨文档范围选择](docs/images/audio-library-home.png)
 
@@ -176,15 +199,18 @@ flowchart TB
     subgraph Experience["体验层"]
         User["用户"] --> Web["Vue 3 工作台"]
         Speech["Web Speech API"] -.-> Web
+        Recorder["MediaRecorder / AudioWorklet"] --> Web
     end
 
     subgraph Application["应用层"]
         Api["Spring Boot API"]
+        Realtime["实时录音会话 / WS 代理"]
         Pipeline["任务编排"]
         Agent["ReAct Agent Runtime"]
         Registry["Skill / Tool Registry"]
         Api --> Pipeline
         Api --> Agent
+        Api --> Realtime
         Agent --> Registry
     end
 
@@ -199,18 +225,21 @@ flowchart TB
 
     subgraph Data["数据与外部能力"]
         MySQL["MySQL<br/>权威状态"]
-        MinIO["MinIO<br/>原始音频"]
+        MinIO["MinIO<br/>录音分片 / 完整音频"]
         Qdrant["Qdrant<br/>可重建索引"]
         Models["DashScope<br/>ASR / Chat / Embedding / TTS"]
         MCP["MCP<br/>只读外部工具"]
     end
 
     Web -->|"HTTP / JWT"| Api
+    Web -->|"PCM / 专用票据"| Realtime
     Api -->|"SSE"| Web
     Pipeline --> Events
     Agent --> Events
     Api --> MySQL
     Pipeline --> MinIO
+    Realtime --> MinIO
+    Realtime -.-> Models
     Workers --> MySQL
     Workers --> MinIO
     Workers -.-> Qdrant
@@ -226,7 +255,7 @@ flowchart TB
 | 组件 | 数据边界 |
 | --- | --- |
 | MySQL | 保存账号、任务、阶段、文档版本、Agent Run、证据、Outbox/Inbox 和 Checkpoint，是权威状态来源。 |
-| MinIO | 保存原始音频对象；数据库保存所有权、哈希和对象引用。 |
+| MinIO | 保存上传原音、实时录音临时分片与归档后的完整音频；数据库保存所有权、哈希和对象引用。 |
 | Qdrant | 保存可从 MySQL 正式文档和索引版本重建的 Dense + BM25 数据，不决定活动版本。 |
 | RocketMQ | 可选的至少一次投递通道；重复消息仍由 Inbox 和业务约束去重。 |
 | DashScope / MCP | 外部能力按配置启用；失败时由对应任务或 Agent Step 显式记录，不隐藏错误。 |
@@ -235,10 +264,10 @@ flowchart TB
 
 | 层次 | 技术 | 在项目中的职责 |
 | --- | --- | --- |
-| Web | Vue 3、TypeScript、Vite | 资料库、录音工作台、说话人审核、证据展开和语音交互。 |
-| API | Java 17、Spring Boot 3、Spring Security | HTTP API、JWT 用户隔离、输入校验、事务和 Agent 边界。 |
+| Web | Vue 3、TypeScript、Vite、IndexedDB、AudioWorklet | 资料库、实时录音、字幕、本地恢复、说话人审核和语音交互。 |
+| API | Java 17、Spring Boot 3、Spring Security、WebSocket | HTTP API、实时 ASR 代理、JWT 用户隔离、输入校验、事务和 Agent 边界。 |
 | 权威数据 | MySQL、Flyway、Spring Data JPA | 保存任务、版本、会话、证据、Outbox/Inbox 和 Trace。 |
-| 对象存储 | MinIO | 保存原始音频。 |
+| 对象存储 | MinIO | 保存上传原音、实时录音临时分片和归档后的完整音频。 |
 | 异步投递 | 进程内 Publisher、可选 RocketMQ | 驱动 ASR、文档、索引、分析、Agent 和记忆任务。 |
 | 检索 | Qdrant | 保存版本化 Dense + BM25 可重建索引。 |
 | 模型能力 | DashScope | 按配置提供 ASR、Chat、Embedding、Rerank 和 TTS。 |
@@ -295,6 +324,7 @@ Vite 默认监听 `http://localhost:5173`，并将 `/api` 代理到本地 `8080`
 | --- | --- |
 | RocketMQ 消费 | `ROCKETMQ_ENABLED=true` |
 | ASR、Chat 与 Embedding | `DASHSCOPE_ENABLED=true` 与 `DASHSCOPE_API_KEY` |
+| 实时录音字幕 | 上述 DashScope 配置，加 `VOICENOTE_REALTIME_ASR_ENABLED=true` |
 | 知识索引 | `VOICENOTE_KNOWLEDGE_ENABLED=true` 与 `VOICENOTE_QDRANT_URL` |
 | ReAct Agent | `VOICENOTE_AGENT_ENABLED=true` |
 | 长短期记忆 | `VOICENOTE_MEMORY_ENABLED=true` |
@@ -321,6 +351,8 @@ Vite 默认监听 `http://localhost:5173`，并将 `/api` 代理到本地 `8080`
 | --- | --- | --- |
 | 认证 | `/api/auth/*` | 注册、登录并获取 JWT。 |
 | 上传 | `/api/uploads/intents/*` | 创建上传意图、写入音频并完成校验。 |
+| 实时录音 | `/api/realtime-recordings/*` | 创建会话、顺序上传分片、完成归档、恢复状态和签发实时票据。 |
+| 实时字幕 | `/api/realtime-recordings/socket` | 通过专用 WebSocket 子协议发送 PCM，并接收瞬时字幕与连接状态。 |
 | 听记任务 | `/api/transcription-tasks/*` | 读取阶段、重试、校正、生成正式文档和建立索引。 |
 | 文档与分析 | `/api/organized-documents/*`、`/api/analysis-runs/*` | 读取正式文档并生成带证据摘要。 |
 | Agent 会话 | `/api/agent-conversations/*`、`/api/agent-runs/*` | 创建固定范围会话、提交 Turn、查看 Trace 和回放。 |
@@ -337,6 +369,7 @@ cd backend
 mvn test
 
 cd ../frontend
+npm test
 npm run build
 ```
 
@@ -345,6 +378,8 @@ Agent 脱敏评测数据格式和指标计算见 [Agent 评测说明](docs/agent
 ## 当前边界
 
 - 项目仍处于开发阶段；外部 ASR、模型、Qdrant、RocketMQ、MCP、记忆和 TTS 需要按环境启用。
+- 实时录音首版只支持桌面 Chrome / Edge、单声道 WebM/Opus、最长两小时和开始/结束操作；最终批量 ASR 始终重跑，不直接沉淀实时 final sentence。
+- 已完成一次正常录音、实时中英文字幕和持续归档状态的桌面浏览器验证并收录截图；麦克风拒绝、断网、刷新恢复、两小时自动结束和对象存储故障恢复仍需完成浏览器矩阵验证。
 - 账号密码登录和 JWT 用户隔离已经实现，但当前不是具备组织级 RBAC 的多租户管理后台。
 - 长期记忆默认关闭，只保存用户确认的内容，不支持团队共享。
 - 私人 Skill 仅创建者可见，只能调用本地只读 Tool；MCP 仅接受部署配置和内置 Skill 白名单。
@@ -361,5 +396,6 @@ Agent 脱敏评测数据格式和指标计算见 [Agent 评测说明](docs/agent
 ## 设计文档
 
 - [Agent 长短期记忆设计](docs/agent-memory.md)
+- [实时录音双转写与持续归档](docs/realtime-recording.md)
 - [语音 Agent 实时反馈设计](docs/voice-agent-realtime.md)
 - [Agent 评测说明](docs/agent-evaluation.md)

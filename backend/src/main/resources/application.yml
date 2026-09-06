@@ -91,6 +91,14 @@ app:
     model: ${DASHSCOPE_TTS_MODEL:qwen3-tts-flash-realtime}
     voice: ${DASHSCOPE_TTS_VOICE:Cherry}
     ws-url: ${DASHSCOPE_TTS_WS_URL:wss://dashscope.aliyuncs.com/api-ws/v1/realtime}
+  realtime-asr:
+    enabled: ${VOICENOTE_REALTIME_ASR_ENABLED:false}
+    model: ${DASHSCOPE_REALTIME_ASR_MODEL:paraformer-realtime-v2}
+    ws-url: ${DASHSCOPE_REALTIME_ASR_WS_URL:wss://dashscope.aliyuncs.com/api-ws/v1/inference}
+    max-duration-seconds: ${VOICENOTE_REALTIME_ASR_MAX_DURATION_SECONDS:7200}
+    ticket-ttl-seconds: ${VOICENOTE_REALTIME_ASR_TICKET_TTL_SECONDS:30}
+    max-sentence-silence-ms: ${VOICENOTE_REALTIME_ASR_SENTENCE_SILENCE_MS:800}
+    connect-timeout-seconds: ${VOICENOTE_REALTIME_ASR_CONNECT_TIMEOUT_SECONDS:10}
   memory:
     enabled: ${VOICENOTE_MEMORY_ENABLED:false}
     collection: ${VOICENOTE_MEMORY_COLLECTION:voicenote_user_memories}

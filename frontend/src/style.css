@@ -114,9 +114,17 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); box-sha
 .import-copy { display: grid; gap: 3px; min-width: 0; }
 .import-copy b { color: var(--ink); font-size: 15px; }
 .import-copy span { color: var(--muted); font-size: 12px; }
+.import-actions { display: flex; align-items: center; gap: 8px; }
 .import-button { display: inline-flex; align-items: center; gap: 18px; border: 0; border-radius: 10px; padding: 10px 13px; color: #fff; background: var(--accent-deep); font-size: 13px; font-weight: 600; transition: transform .18s ease, box-shadow .18s ease; }
 .import-button span { font-family: 'DM Mono', monospace; font-size: 17px; line-height: .8; }
 .import-button:hover { box-shadow: 0 8px 18px rgba(89, 102, 159, .2); transform: translateY(-1px); }
+.realtime-recording-button { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; border: 1px solid #cdd1df; border-radius: 10px; padding: 9px 13px; color: var(--accent-deep); background: rgba(255,255,255,.72); font-size: 13px; font-weight: 650; transition: transform .18s ease, border-color .18s ease, background .18s ease; }
+.realtime-recording-button i { width: 9px; height: 9px; border-radius: 50%; background: #c55c50; box-shadow: 0 0 0 4px rgba(197,92,80,.09); }
+.realtime-recording-button:hover { border-color: #aeb5ce; background: #fff; transform: translateY(-1px); }
+.recording-recovery-banner { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px; margin-top: 12px; padding: 12px 15px; border: 1px solid #e5d6b7; border-radius: 12px; color: #584d38; background: #fff9ed; }
+.recording-recovery-banner > span { display: grid; width: 30px; height: 30px; place-items: center; border-radius: 50%; color: #9b7641; background: #f1e4c9; font: 18px 'DM Mono', monospace; }
+.recording-recovery-banner div { display: grid; gap: 2px; }.recording-recovery-banner b { font-size: 12px; }.recording-recovery-banner small { color: #897c66; font-size: 10px; }
+.recording-recovery-banner button { display: inline-flex; align-items: center; gap: 12px; border: 0; color: #785f38; background: transparent; font-size: 11px; font-weight: 700; }
 .upload-queue { display: flex; align-items: center; gap: 14px; margin-top: 12px; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--surface-soft); }
 .picked-file { display: flex; min-width: 0; align-items: center; gap: 9px; }
 .file-glyph { display: grid; width: 28px; height: 28px; flex: 0 0 auto; place-items: center; border-radius: 8px; color: var(--accent-deep); background: var(--accent-wash); }
@@ -491,7 +499,8 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); box-sha
   .auth-panel { padding: clamp(22px, 6vw, 32px) clamp(20px, 7vw, 28px); }
   .topbar { gap: 8px; padding: 0 12px; }.brand { font-size: 22px; }.topbar-meta { display: flex; gap: 4px; }.skill-nav { width: 36px; justify-content: center; padding: 5px; }.account-nav { width: 38px; justify-content: center; padding: 5px; }
   .library-page, .document-page { padding: 30px 18px 48px; }.page-intro { align-items: start; }.page-intro h2, .document-head h2 { font-size: 35px; }.page-intro p:not(.eyebrow) { font-size: 13px; }.collection-count { min-width: auto; font-size: 22px; }
-  .import-panel { grid-template-columns: auto minmax(0, 1fr); gap: 11px; padding: 14px; }.import-button { grid-column: 1 / -1; justify-content: space-between; width: 100%; }.import-copy span { font-size: 11px; }
+  .import-panel { grid-template-columns: auto minmax(0, 1fr); gap: 11px; padding: 14px; }.import-actions { grid-column: 1 / -1; display: grid; grid-template-columns: 1fr 1fr; width: 100%; }.import-button, .realtime-recording-button { justify-content: space-between; width: 100%; }.import-copy span { font-size: 11px; }
+  .recording-recovery-banner { grid-template-columns: auto minmax(0, 1fr); }.recording-recovery-banner button { grid-column: 1 / -1; justify-content: space-between; padding: 7px 3px 0; }
   .upload-queue { align-items: stretch; flex-wrap: wrap; }.upload-queue p { flex-basis: 100%; }.upload-start { width: 100%; margin-left: 0; }
   .records-head { margin-top: 38px; }.records-head > span { display: none; }.record-main { grid-template-columns: 35px minmax(0, 1fr) 18px; gap: 10px; padding-top: 16px; padding-bottom: 16px; }.record-progress { display: none; }.record-retry { right: 30px; }
   .document-head { display: grid; gap: 14px; }.document-actions { max-width: none; justify-content: start; padding-top: 0; }.metadata-grid { grid-template-columns: 1fr; }.metadata-wide, .metadata-actions { grid-column: 1; }.player-surface { margin-top: 24px; padding-right: 13px; padding-left: 13px; }

@@ -34,4 +34,17 @@ class RocketMqMessagePublisherTest {
 
         verify(rocket).syncSend("voicenote-analysis:USER_MEMORY_INDEX_REQUESTED", event.getId());
     }
+
+    @Test
+    void sendsRecordingFinalizationToTheTranscriptionTopic() {
+        RocketMQTemplate rocket = mock(RocketMQTemplate.class);
+        AppProperties properties = new AppProperties();
+        properties.getRocketmq().setTranscriptionTopic("voicenote-transcription");
+        OutboxEvent event = new OutboxEvent("realtime_recording", "session-id",
+                EventType.RECORDING_FINALIZATION_REQUESTED, "{}", null);
+
+        new RocketMqMessagePublisher(rocket, properties).publish(event);
+
+        verify(rocket).syncSend("voicenote-transcription:RECORDING_FINALIZATION_REQUESTED", event.getId());
+    }
 }
