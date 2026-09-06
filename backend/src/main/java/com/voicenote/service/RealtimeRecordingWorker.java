@@ -10,6 +10,8 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.scheduling.annotation.Scheduled;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.io.IOException;
 import java.io.InputStream;
@@ -44,6 +46,7 @@ public class RealtimeRecordingWorker {
         this.transcriptionTasks = transcriptionTasks; this.progress = progress; this.mapper = mapper; this.properties = properties;
     }
 
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public void process(String sessionId) {
         if (!activeSessions.add(sessionId)) return;
         long startedAt = System.nanoTime();

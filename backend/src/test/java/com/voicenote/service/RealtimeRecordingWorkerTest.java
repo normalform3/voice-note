@@ -9,6 +9,8 @@ import com.voicenote.repository.RealtimeRecordingSessionRepository;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 import org.mockito.InOrder;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 import java.io.ByteArrayInputStream;
 import java.security.MessageDigest;
@@ -23,6 +25,15 @@ import static org.mockito.ArgumentMatchers.*;
 import static org.mockito.Mockito.*;
 
 class RealtimeRecordingWorkerTest {
+    @Test
+    void suspendsTheConsumerTransactionBeforeStartingFinalization() throws Exception {
+        Transactional transactional = RealtimeRecordingWorker.class.getMethod("process", String.class)
+                .getAnnotation(Transactional.class);
+
+        assertThat(transactional).isNotNull();
+        assertThat(transactional.propagation()).isEqualTo(Propagation.NOT_SUPPORTED);
+    }
+
     @Test
     void mergesPartsByteForByteAndCreatesTheCanonicalBatchTranscriptionTask() throws Exception {
         RealtimeRecordingSessionRepository sessions = mock(RealtimeRecordingSessionRepository.class);
