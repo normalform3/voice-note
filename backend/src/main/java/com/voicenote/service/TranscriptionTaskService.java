@@ -14,6 +14,7 @@ import java.time.Instant;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 @Service
 public class TranscriptionTaskService {
@@ -232,9 +233,13 @@ public class TranscriptionTaskService {
             normalizedTags.add(value);
             if (normalizedTags.size() > 20) throw new ApiException(HttpStatus.BAD_REQUEST, "TOO_MANY_TAGS", "At most 20 tags are allowed");
         }
+        boolean retrievalContextChanged = !Objects.equals(task.getOccurredAt(), occurredAt)
+                || task.getSceneType() != normalizedScene || !Objects.equals(task.getSubject(), normalizedSubject);
         try { task.updateMetadata(occurredAt, normalizedScene, normalizedSubject, mapper.writeValueAsString(normalizedTags)); }
         catch (Exception exception) { throw new IllegalStateException("Cannot serialize task metadata", exception); }
-        return tasks.save(task);
+        TranscriptionTask saved = tasks.save(task);
+        if (retrievalContextChanged) knowledgeDocuments.refreshForMetadata(ownerId, taskId);
+        return saved;
     }
 
     public record CreateTaskCommand(String audioBlobId, AsrConfig asrConfig) { }

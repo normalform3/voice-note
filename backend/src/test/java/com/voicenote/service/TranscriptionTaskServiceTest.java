@@ -3,6 +3,7 @@ package com.voicenote.service;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.voicenote.domain.AudioBlob;
 import com.voicenote.domain.IdempotencyRecord;
+import com.voicenote.domain.SceneType;
 import com.voicenote.domain.TranscriptionTask;
 import com.voicenote.repository.AudioBlobRepository;
 import com.voicenote.repository.TaskAttemptRepository;
@@ -11,6 +12,7 @@ import com.voicenote.web.ApiException;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.time.Instant;
 import java.util.List;
 import java.util.Optional;
 
@@ -85,5 +87,25 @@ class TranscriptionTaskServiceTest {
         assertThat(configHashes.getAllValues().get(0)).isNotEqualTo(configHashes.getAllValues().get(1));
         assertThat(first.getHotwordLibraryRevision()).isEqualTo(1);
         assertThat(second.getHotwordLibraryRevision()).isEqualTo(2);
+    }
+
+    @Test
+    void rebuildsKnowledgeOnlyWhenRetrievalContextMetadataChanges() {
+        TranscriptionTaskRepository tasks = mock(TranscriptionTaskRepository.class);
+        KnowledgeDocumentService knowledge = mock(KnowledgeDocumentService.class);
+        TranscriptionTask task = new TranscriptionTask("owner", "audio", "hash", "{}", "pipeline");
+        Instant occurredAt = Instant.parse("2026-09-07T00:00:00Z");
+        task.updateMetadata(occurredAt, SceneType.OTHER, null, "[]");
+        when(tasks.findById(task.getId())).thenReturn(Optional.of(task));
+        when(tasks.save(task)).thenReturn(task);
+        TranscriptionTaskService service = new TranscriptionTaskService(tasks, mock(TaskAttemptRepository.class), mock(AudioBlobRepository.class),
+                mock(IdempotencyService.class), mock(OutboxService.class), new ObjectMapper(), mock(PipelineProgressService.class), knowledge,
+                mock(DocumentOrganizationService.class), mock(KnowledgeVectorStore.class), mock(HotwordLibraryService.class));
+
+        service.updateMetadata("owner", task.getId(), occurredAt, SceneType.OTHER, null, List.of("tag-only"));
+        verifyNoInteractions(knowledge);
+
+        service.updateMetadata("owner", task.getId(), occurredAt, SceneType.MEETING, "roadmap", List.of("tag-only"));
+        verify(knowledge).refreshForMetadata("owner", task.getId());
     }
 }

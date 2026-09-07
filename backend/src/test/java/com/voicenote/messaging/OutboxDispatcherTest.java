@@ -7,10 +7,12 @@ import com.voicenote.service.PipelineProgressService;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Optional;
 
 import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class OutboxDispatcherTest {
@@ -24,12 +26,26 @@ class OutboxDispatcherTest {
         OutboxEvent event = new OutboxEvent("transcription_task", "task-id", EventType.TRANSCRIPTION_REQUESTED, "{}", null);
         RuntimeException failure = new IllegalStateException("send timeout");
         when(state.readyIds()).thenReturn(List.of(event.getId()));
-        when(state.load(event.getId())).thenReturn(event);
+        when(state.load(event.getId())).thenReturn(Optional.of(event));
         doThrow(failure).when(publisher).publish(event);
 
         new OutboxDispatcher(properties, state, publisher, pipeline).dispatch();
 
         verify(state).markFailed(event.getId());
         verify(pipeline).failDelivery(event, failure);
+    }
+
+    @Test
+    void ignoresAnEventThatWasRemovedBeforeImmediateDispatch() {
+        AppProperties properties = new AppProperties();
+        properties.getWorkers().setEnabled(true);
+        OutboxDispatchState state = mock(OutboxDispatchState.class);
+        MessagePublisher publisher = mock(MessagePublisher.class);
+        PipelineProgressService pipeline = mock(PipelineProgressService.class);
+        when(state.load("deleted-event")).thenReturn(Optional.empty());
+
+        new OutboxDispatcher(properties, state, publisher, pipeline).dispatchOne("deleted-event");
+
+        verifyNoInteractions(publisher, pipeline);
     }
 }

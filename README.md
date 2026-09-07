@@ -52,9 +52,9 @@ Tool 的输入使用 JSON Schema 校验，Tools 中心可以按 Skill 查看实�
 
 ### 可追溯混合 RAG
 
-正式文档先按说话人轮次形成完整内容单元，再由模型组织为 Topic、问答对或叙述。知识切片以 Topic 为主要边界，保留说话人、时间范围和原始 Segment；过长 Topic 按 Embedding Provider 实际返回的 Token 用量拆分，短 Topic 只在不超过目标上限时合并。
+正式文档先按说话人轮次形成完整内容单元，再由模型组织为 Topic、问答对或叙述。知识切片使用 `topic-v4-scene-adaptive`：600-token 以内的短文档保持整篇，面试、会议、单人讲述和多人对话使用不同目标大小；不同 Topic 和不同面试问题不会为了填满预算而合并。长回答按回答轮次和原始 Segment 拆分并重复问题上下文，只有无法安全拆分的超长单 Segment 才保留约 80 tokens 的重叠。切块规划使用本地保守估算，Embedding Provider 的实际 Token 用量在索引时回写用于监控。
 
-Qdrant 同时维护 Dense 向量和 BM25 稀疏向量，通过 RRF 融合候选，并可在多文档范围内进行 Rerank。Tool 返回的 Chunk 仍会按用户、文档和冻结的索引 generation 回查 MySQL；最终 `sourceRef` 可以回到对应原文和音频时间位置。
+每个 Chunk 保存三种表示：正式文档 `displayText` 返回给 Agent，带场景、主题和说话人上下文的 `denseText` 用于 Dense 与 Rerank，附加原始转写的 `lexicalText` 用于 BM25。Qdrant 通过 RRF 融合每份文档默认 8 个候选，Rerank 后才为会议、对话和单人讲述补同 Topic 前后窗口。Tool 按 10,000-token 与 32KB 序列化结果双重预算返回完整 Chunk，不再截断半个 Chunk；所有结果仍按用户、文档和冻结的索引 generation 回查 MySQL，`sourceRef` 可以回到对应原文和音频时间位置。
 
 相关实现：
 

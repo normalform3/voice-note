@@ -7,6 +7,8 @@ import com.voicenote.provider.ProviderException;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 
 @Component
 public class OrganizedDocumentWorker {
@@ -21,6 +23,7 @@ public class OrganizedDocumentWorker {
     }
 
     /** Invoked after the RocketMQ consumer commits the durable QUEUED transition. */
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public void process(String documentId) { if (properties.getWorkers().isEnabled()) organize(documentId); }
     /** Recovery-only sweep for a process crash between consumer commit and work handoff. */
     public void recoverQueued() { if (properties.getWorkers().isEnabled()) documents.queuedDocumentIds().forEach(this::organize); }

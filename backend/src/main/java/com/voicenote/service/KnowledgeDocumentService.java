@@ -69,8 +69,20 @@ public class KnowledgeDocumentService {
         return indexBuildView(requestIndex(document, source, force));
     }
 
+    /** Rebuilds the next generation when metadata embedded into v4 retrieval context changes. */
+    @Transactional
+    public void refreshForMetadata(String ownerId, String taskId) {
+        documents.findTopByOwnerIdAndTranscriptionTaskIdOrderByUpdatedAtDesc(ownerId, taskId).ifPresent(document -> {
+            if (document.getOrganizedDocumentId() == null) return;
+            organizedDocuments.findById(document.getOrganizedDocumentId())
+                    .filter(source -> source.getOwnerId().equals(ownerId) && source.getStatus() == OrganizedDocumentStatus.READY)
+                    .ifPresent(source -> requestIndex(document, source, false));
+        });
+    }
+
     private KnowledgeIndexVersion requestIndex(KnowledgeDocument document, OrganizedDocument source, boolean force) {
-        String configurationHash = configurationHash();
+        TranscriptionTask task = tasks.findById(document.getTranscriptionTaskId()).orElse(null);
+        String configurationHash = configurationHash(task);
         KnowledgeIndexVersion latest = versions.findTopByKnowledgeDocumentIdOrderByGenerationDesc(document.getId()).orElse(null);
         if (!force && latest != null && latest.getOrganizedDocumentVersion() == source.getVersion() && latest.getConfigurationHash().equals(configurationHash)
                 && latest.getStatus() != KnowledgeIndexVersionStatus.FAILED && latest.getStatus() != KnowledgeIndexVersionStatus.RETIRED) return latest;
@@ -159,7 +171,10 @@ public class KnowledgeDocumentService {
     public List<KnowledgeChunk> createChunks(String indexVersionId) {
         KnowledgeIndexVersion index = versions.findById(indexVersionId).orElseThrow(); KnowledgeDocument document = documents.findById(index.getKnowledgeDocumentId()).orElseThrow();
         beginStage(index, KnowledgeIndexStage.CHUNK);
-        List<KnowledgeChunker.EmbeddedChunk> drafts = chunker.buildFromTopics(document.getTitle(), topics.findByKnowledgeIndexVersionIdOrderByTopicIndex(indexVersionId));
+        TranscriptionTask task = tasks.findById(document.getTranscriptionTaskId()).orElse(null);
+        KnowledgeChunker.ChunkingContext context = new KnowledgeChunker.ChunkingContext(document.getTitle(),
+                task == null ? SceneType.OTHER : task.getSceneType(), task == null ? null : task.getSubject(), task == null ? null : task.getOccurredAt());
+        List<KnowledgeChunker.EmbeddedChunk> drafts = chunker.buildFromTopics(context, topics.findByKnowledgeIndexVersionIdOrderByTopicIndex(indexVersionId));
         if (drafts.isEmpty()) throw new ApiException(HttpStatus.UNPROCESSABLE_ENTITY, "KNOWLEDGE_CHUNKS_EMPTY", "Formal document produced no semantic chunks");
         List<KnowledgeChunk> existing = chunks.findByKnowledgeIndexVersionIdOrderByChunkIndex(indexVersionId);
         if (!existing.isEmpty()) { chunkTopics.deleteByKnowledgeChunkIdIn(existing.stream().map(KnowledgeChunk::getId).toList()); chunks.deleteByKnowledgeIndexVersionId(indexVersionId); }
@@ -167,9 +182,13 @@ public class KnowledgeDocumentService {
         try {
             for (int position = 0; position < drafts.size(); position++) {
                 KnowledgeChunker.EmbeddedChunk draft = drafts.get(position); String content = draft.content();
+                String contentHash = Hashing.canonicalJsonHash(Map.of(
+                        "displayText", content, "denseText", draft.denseText(), "lexicalText", draft.lexicalText(),
+                        "profile", draft.profile().name(), "chunkKind", draft.kind().name()));
                 KnowledgeChunk chunk = chunks.save(new KnowledgeChunk(document.getId(), indexVersionId, position, draft.startMs(), draft.endMs(), mapper.writeValueAsString(draft.segmentIds()),
                         mapper.writeValueAsString(draft.blockIds()), draft.topicTitle(), mapper.writeValueAsString(draft.speakerIds()), mapper.writeValueAsString(draft.sourceFragments()),
-                        mapper.writeValueAsString(draft.contextSegmentIds()), draft.tokenCount(), draft.oversized(), content, Hashing.sha256(content)));
+                        mapper.writeValueAsString(draft.contextSegmentIds()), draft.profile(), draft.kind(), draft.tokenCount(), draft.oversized(),
+                        content, draft.denseText(), draft.lexicalText(), contentHash));
                 for (int topicOrder = 0; topicOrder < draft.topics().size(); topicOrder++) {
                     KnowledgeChunker.TopicReference topic = draft.topics().get(topicOrder);
                     int topicChunkIndex = topicChunkIndexes.merge(topic.id(), 1, Integer::sum) - 1;
@@ -186,6 +205,12 @@ public class KnowledgeDocumentService {
     public List<KnowledgeChunk> beginIndexing(String indexVersionId) {
         KnowledgeIndexVersion index = versions.findById(indexVersionId).orElseThrow(); beginStage(index, KnowledgeIndexStage.INDEX);
         return chunks.findByKnowledgeIndexVersionIdOrderByChunkIndex(indexVersionId);
+    }
+    @Transactional
+    public KnowledgeChunk confirmEmbeddingUsage(String indexVersionId, String chunkId, int actualTokens) {
+        KnowledgeChunk chunk = chunks.findById(chunkId).filter(value -> indexVersionId.equals(value.getKnowledgeIndexVersionId())).orElseThrow();
+        chunk.confirmEmbeddingUsage(actualTokens);
+        return chunks.save(chunk);
     }
     @Transactional(readOnly = true)
     public Map<String, List<String>> topicIdsForChunks(Collection<String> chunkIds) {
@@ -266,9 +291,23 @@ public class KnowledgeDocumentService {
         KnowledgeIndexStageAttempt attempt = latestStage(index.getId(), stage); attempt.progress(completed, total); attempt.succeed(snapshot); stageAttempts.save(attempt);
     }
     private KnowledgeIndexStageAttempt latestStage(String indexVersionId, KnowledgeIndexStage stage) { return stageAttempts.findTopByKnowledgeIndexVersionIdAndStageOrderByAttemptNumberDesc(indexVersionId, stage).orElseThrow(); }
-    private String configurationHash() {
-        return Hashing.canonicalJsonHash(Map.of("chunker", "topic-v3-atomic", "shortTopicTokens", properties.getKnowledge().getShortTopicTokens(), "targetTokens", properties.getKnowledge().getChunkTargetTokens(),
-                "maxTokens", properties.getKnowledge().getChunkMaxTokens(), "embeddingModel", String.valueOf(properties.getDashscope().getEmbeddingModel()), "embeddingDimension", properties.getDashscope().getEmbeddingDimension()));
+    private String configurationHash(TranscriptionTask task) {
+        Map<String, Object> configuration = new LinkedHashMap<>();
+        configuration.put("chunker", "topic-v4-scene-adaptive");
+        configuration.put("shortDocumentTokens", 600);
+        configuration.put("profiles", Map.of(
+                "SHORT_DOCUMENT", Map.of("target", 1000, "max", 1000),
+                "INTERVIEW_QA", Map.of("target", 600, "max", 1000),
+                "MEETING_DISCUSSION", Map.of("target", 650, "max", 1000),
+                "MONOLOGUE", Map.of("target", 850, "max", 1200),
+                "CONVERSATION", Map.of("target", 600, "max", 1000)));
+        configuration.put("hardSplitOverlapTokens", 80);
+        configuration.put("sceneType", task == null || task.getSceneType() == null ? SceneType.OTHER.name() : task.getSceneType().name());
+        configuration.put("subject", task == null ? null : task.getSubject());
+        configuration.put("occurredAt", task == null || task.getOccurredAt() == null ? null : task.getOccurredAt().toString());
+        configuration.put("embeddingModel", String.valueOf(properties.getDashscope().getEmbeddingModel()));
+        configuration.put("embeddingDimension", properties.getDashscope().getEmbeddingDimension());
+        return Hashing.canonicalJsonHash(configuration);
     }
     private void publish(String ownerId, String indexVersionId) { progressEvents.publish(new ProgressEventPublisher.ProgressNotification(ownerId, "knowledge-index-progress", indexVersionId)); }
     private String titleFor(String filename) { int extension = filename.lastIndexOf('.'); return extension > 0 ? filename.substring(0, extension) : filename; }

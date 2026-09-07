@@ -10,6 +10,8 @@ import com.voicenote.repository.OrganizationInvocationRepository;
 import com.voicenote.repository.TranscriptSegmentRepository;
 import com.voicenote.repository.TranscriptionTaskRepository;
 import org.junit.jupiter.api.Test;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 import java.util.Map;
 import java.util.List;
 import java.util.Optional;
@@ -22,6 +24,15 @@ import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.when;
 
 class DocumentOrganizationServiceTest {
+    @Test
+    void workerSuspendsTheCommittedConsumerTransactionBeforeOrganizing() throws Exception {
+        Transactional transactional = OrganizedDocumentWorker.class.getMethod("process", String.class)
+                .getAnnotation(Transactional.class);
+
+        assertThat(transactional).isNotNull();
+        assertThat(transactional.propagation()).isEqualTo(Propagation.NOT_SUPPORTED);
+    }
+
     @Test
     void cleansTextMergesAdjacentSpeakerTurnsAndKeepsEverySourceSegment() {
         TranscriptSegment first = new TranscriptSegment("task", 1, 0, "甲", 0, 1_000, "  第一   句 ");

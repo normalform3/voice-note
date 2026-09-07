@@ -62,13 +62,14 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
                               List<Double> denseVector, List<String> topicIds) throws Exception {
         List<String> speakerIds = chunk.getSpeakerIds() == null ? List.of() : mapper.readValue(chunk.getSpeakerIds(), new TypeReference<>() { });
         Map<String, Object> bm25 = new LinkedHashMap<>();
-        bm25.put("text", chunk.getTextContent()); bm25.put("model", "qdrant/bm25");
+        bm25.put("text", chunk.getLexicalText()); bm25.put("model", "qdrant/bm25");
         bm25.put("options", Map.of("language", "none", "tokenizer", "multilingual"));
         Map<String, Object> payload = new LinkedHashMap<>();
         payload.put("ownerId", document.getOwnerId()); payload.put("documentId", document.getId()); payload.put("indexVersionId", indexVersion.getId());
         payload.put("chunkId", chunk.getId()); payload.put("topicIds", topicIds); payload.put("chunkIndex", chunk.getChunkIndex());
         payload.put("startMs", chunk.getStartMs()); payload.put("endMs", chunk.getEndMs()); payload.put("speakerIds", speakerIds);
         payload.put("searchable", false); payload.put("tokenCount", chunk.getTokenCount()); payload.put("oversized", chunk.isOversized());
+        payload.put("profile", chunk.getChunkProfile().name()); payload.put("chunkKind", chunk.getChunkKind().name());
         return Map.of("id", chunk.getId(), "vector", Map.of(DENSE, denseVector, BM25, bm25), "payload", payload);
     }
 
@@ -103,7 +104,7 @@ public class QdrantKnowledgeVectorStore implements KnowledgeVectorStore {
                 Map.of("key", "ownerId", "match", Map.of("value", ownerId)),
                 Map.of("key", "documentId", "match", Map.of("value", documentId)),
                 Map.of("key", "indexVersionId", "match", Map.of("value", indexVersionId))));
-        Map<String, Object> body = searchBody(query, denseVector, limit, Math.max(limit, 8), filter);
+        Map<String, Object> body = searchBody(query, denseVector, limit, properties.getKnowledge().getRetrievalPrefetchLimit(), filter);
         return executeSearch(body);
     }
 

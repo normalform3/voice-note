@@ -22,7 +22,8 @@ public class OutboxDispatcher {
 
     public void dispatchOne(String eventId) {
         if (!properties.getWorkers().isEnabled()) return;
-        OutboxEvent event = state.load(eventId);
+        OutboxEvent event = state.load(eventId).orElse(null);
+        if (event == null) return;
         if (event.getStatus() != OutboxStatus.READY) return;
         try { publisher.publish(event); state.markPublished(eventId); }
         catch (RuntimeException failure) {

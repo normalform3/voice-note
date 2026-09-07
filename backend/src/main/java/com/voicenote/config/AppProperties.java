@@ -123,15 +123,12 @@ public class AppProperties {
         private String qdrantUrl;
         private String qdrantApiKey;
         private String collection = "voicenote_knowledge";
-        private int chunkCharacters = 2000;
-        private int shortTopicTokens = 200;
-        private int chunkTargetTokens = 800;
-        private int chunkMaxTokens = 1200;
         private int retrievalPrefetchLimit = 50;
+        private int retrievalCandidatePerDocument = 8;
         private int retrievalSeedLimit = 4;
         private int retrievalContextMaxChunks = 12;
         private int retrievalContextMaxTokens = 10_000;
-        private boolean rerankEnabled;
+        private boolean rerankEnabled = true;
         private String rerankModel = "qwen3-rerank";
         public boolean isEnabled() { return enabled; }
         public void setEnabled(boolean enabled) { this.enabled = enabled; }
@@ -141,16 +138,10 @@ public class AppProperties {
         public void setQdrantApiKey(String qdrantApiKey) { this.qdrantApiKey = qdrantApiKey; }
         public String getCollection() { return collection; }
         public void setCollection(String collection) { this.collection = collection; }
-        public int getChunkCharacters() { return chunkCharacters; }
-        public void setChunkCharacters(int chunkCharacters) { this.chunkCharacters = chunkCharacters; }
-        public int getShortTopicTokens() { return shortTopicTokens; }
-        public void setShortTopicTokens(int shortTopicTokens) { this.shortTopicTokens = shortTopicTokens; }
-        public int getChunkTargetTokens() { return chunkTargetTokens; }
-        public void setChunkTargetTokens(int chunkTargetTokens) { this.chunkTargetTokens = chunkTargetTokens; }
-        public int getChunkMaxTokens() { return chunkMaxTokens; }
-        public void setChunkMaxTokens(int chunkMaxTokens) { this.chunkMaxTokens = chunkMaxTokens; }
         public int getRetrievalPrefetchLimit() { return retrievalPrefetchLimit; }
         public void setRetrievalPrefetchLimit(int retrievalPrefetchLimit) { this.retrievalPrefetchLimit = retrievalPrefetchLimit; }
+        public int getRetrievalCandidatePerDocument() { return retrievalCandidatePerDocument; }
+        public void setRetrievalCandidatePerDocument(int retrievalCandidatePerDocument) { this.retrievalCandidatePerDocument = retrievalCandidatePerDocument; }
         public int getRetrievalSeedLimit() { return retrievalSeedLimit; }
         public void setRetrievalSeedLimit(int retrievalSeedLimit) { this.retrievalSeedLimit = retrievalSeedLimit; }
         public int getRetrievalContextMaxChunks() { return retrievalContextMaxChunks; }

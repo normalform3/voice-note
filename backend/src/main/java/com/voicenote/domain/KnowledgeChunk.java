@@ -5,7 +5,7 @@ import java.time.Instant;
 import java.util.UUID;
 
 @Entity
-@Table(name = "knowledge_chunks", uniqueConstraints = @UniqueConstraint(name = "uk_knowledge_chunk_index", columnNames = {"knowledge_document_id", "chunk_index"}))
+@Table(name = "knowledge_chunks", uniqueConstraints = @UniqueConstraint(name = "uk_knowledge_chunk_version_index", columnNames = {"knowledge_index_version_id", "chunk_index"}))
 public class KnowledgeChunk {
     @Id @Column(columnDefinition = "CHAR(36)") private String id;
     @Column(name = "knowledge_document_id", nullable = false, columnDefinition = "CHAR(36)") private String knowledgeDocumentId;
@@ -19,9 +19,13 @@ public class KnowledgeChunk {
     @Column(name = "speaker_ids", columnDefinition = "json") private String speakerIds;
     @Column(name = "source_fragments", columnDefinition = "json") private String sourceFragments;
     @Column(name = "context_segment_ids", columnDefinition = "json") private String contextSegmentIds;
+    @Enumerated(EnumType.STRING) @Column(name = "chunk_profile", nullable = false) private ChunkProfile chunkProfile;
+    @Enumerated(EnumType.STRING) @Column(name = "chunk_kind", nullable = false) private KnowledgeChunkKind chunkKind;
     @Column(name = "token_count") private Integer tokenCount;
     @Column(name = "oversized", nullable = false) private boolean oversized;
     @Column(name = "text_content", nullable = false, columnDefinition = "TEXT") private String textContent;
+    @Column(name = "dense_text", nullable = false, columnDefinition = "MEDIUMTEXT") private String denseText;
+    @Column(name = "lexical_text", nullable = false, columnDefinition = "MEDIUMTEXT") private String lexicalText;
     @Column(name = "content_hash", nullable = false, columnDefinition = "CHAR(64)") private String contentHash;
     @Column(name = "created_at", nullable = false) private Instant createdAt;
 
@@ -29,6 +33,8 @@ public class KnowledgeChunk {
     public KnowledgeChunk(String documentId, int chunkIndex, long startMs, long endMs, String segmentIds, String textContent, String contentHash) {
         this.id = UUID.randomUUID().toString(); this.knowledgeDocumentId = documentId; this.chunkIndex = chunkIndex;
         this.startMs = startMs; this.endMs = endMs; this.segmentIds = segmentIds; this.textContent = textContent;
+        this.denseText = textContent; this.lexicalText = textContent;
+        this.chunkProfile = ChunkProfile.MONOLOGUE; this.chunkKind = KnowledgeChunkKind.NARRATIVE;
         this.contentHash = contentHash; this.createdAt = Instant.now();
     }
     public KnowledgeChunk(String documentId, int chunkIndex, long startMs, long endMs, String segmentIds, String blockIds, String textContent, String contentHash) {
@@ -46,6 +52,14 @@ public class KnowledgeChunk {
         this(documentId, chunkIndex, startMs, endMs, segmentIds, blockIds, topicTitle, speakerIds, sourceFragments, contextSegmentIds, tokenCount, oversized, textContent, contentHash);
         this.knowledgeIndexVersionId = indexVersionId;
     }
+    public KnowledgeChunk(String documentId, String indexVersionId, int chunkIndex, long startMs, long endMs, String segmentIds, String blockIds, String topicTitle,
+                          String speakerIds, String sourceFragments, String contextSegmentIds, ChunkProfile chunkProfile, KnowledgeChunkKind chunkKind,
+                          Integer tokenCount, boolean oversized, String textContent, String denseText, String lexicalText, String contentHash) {
+        this(documentId, indexVersionId, chunkIndex, startMs, endMs, segmentIds, blockIds, topicTitle, speakerIds, sourceFragments,
+                contextSegmentIds, tokenCount, oversized, textContent, contentHash);
+        this.chunkProfile = chunkProfile; this.chunkKind = chunkKind;
+        this.denseText = denseText; this.lexicalText = lexicalText;
+    }
     public String getId() { return id; }
     public String getKnowledgeDocumentId() { return knowledgeDocumentId; }
     public String getKnowledgeIndexVersionId() { return knowledgeIndexVersionId; }
@@ -58,8 +72,16 @@ public class KnowledgeChunk {
     public String getSpeakerIds() { return speakerIds; }
     public String getSourceFragments() { return sourceFragments; }
     public String getContextSegmentIds() { return contextSegmentIds; }
+    public ChunkProfile getChunkProfile() { return chunkProfile == null ? ChunkProfile.MONOLOGUE : chunkProfile; }
+    public KnowledgeChunkKind getChunkKind() { return chunkKind == null ? KnowledgeChunkKind.NARRATIVE : chunkKind; }
     public Integer getTokenCount() { return tokenCount; }
     public boolean isOversized() { return oversized; }
     public String getTextContent() { return textContent; }
+    public String getDenseText() { return denseText == null ? textContent : denseText; }
+    public String getLexicalText() { return lexicalText == null ? getDenseText() : lexicalText; }
     public String getContentHash() { return contentHash; }
+    public void confirmEmbeddingUsage(int actualTokens) {
+        tokenCount = actualTokens;
+        oversized = oversized || actualTokens > getChunkProfile().maximumTokens();
+    }
 }

@@ -5,9 +5,13 @@ import com.voicenote.domain.KnowledgeChunk;
 import com.voicenote.domain.PipelineStage;
 import com.voicenote.provider.ProviderException;
 import com.voicenote.provider.TextEmbeddingClient;
+import com.voicenote.provider.TextEmbeddingClient.EmbeddedDocument;
 import org.springframework.stereotype.Component;
+import org.springframework.transaction.annotation.Propagation;
+import org.springframework.transaction.annotation.Transactional;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 
 @Component
 public class KnowledgeIndexWorker {
@@ -22,6 +26,7 @@ public class KnowledgeIndexWorker {
     }
 
     /** Invoked after the consumer commits the durable queued transition for an index version. */
+    @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public void process(String indexVersionId) { if (properties.getWorkers().isEnabled()) index(indexVersionId); }
     public void recoverQueued() { if (properties.getWorkers().isEnabled()) documents.queuedIndexVersionIds().forEach(this::index); }
 
@@ -41,7 +46,10 @@ public class KnowledgeIndexWorker {
             for (int index = 0; index < chunks.size(); index++) {
                 KnowledgeChunk chunk = chunks.get(index);
                 if (properties.getDashscope().isEnabled()) pipeline.recordModelInvocation(work.document().getTranscriptionTaskId(), PipelineStage.KNOWLEDGE_INDEX, properties.getDashscope().getEmbeddingModel());
-                vectors.upsert(work.document(), work.indexVersion(), chunk, embeddings.embedDocumentWithUsage(chunk.getTextContent()).vector(), topicIds.getOrDefault(chunk.getId(), List.of()));
+                EmbeddedDocument embedded = embeddings.embedDocumentWithUsage(chunk.getDenseText());
+                int actualTokens = embedded.promptTokens() == null ? Objects.requireNonNullElse(chunk.getTokenCount(), 0) : embedded.promptTokens();
+                chunk = documents.confirmEmbeddingUsage(indexVersionId, chunk.getId(), actualTokens);
+                vectors.upsert(work.document(), work.indexVersion(), chunk, embedded.vector(), topicIds.getOrDefault(chunk.getId(), List.of()));
                 if ((index + 1) % 10 == 0 || index + 1 == chunks.size()) {
                     if (initialBuild) pipeline.renewLease(work.document().getTranscriptionTaskId(), PipelineStage.KNOWLEDGE_INDEX);
                     documents.indexedProgress(indexVersionId, index + 1, chunks.size());
