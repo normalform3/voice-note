@@ -23,6 +23,7 @@ public interface RealtimeRecordingSessionRepository extends JpaRepository<Realti
     List<RealtimeRecordingSession> findTop100ByStatusInAndExpiresAtBefore(Collection<RealtimeRecordingStatus> statuses, Instant cutoff);
     List<RealtimeRecordingSession> findTop20ByStatusAndUpdatedAtBeforeOrderByUpdatedAtAsc(RealtimeRecordingStatus status, Instant cutoff);
     List<RealtimeRecordingSession> findTop20ByStatusInAndUpdatedAtBeforeOrderByUpdatedAtAsc(Collection<RealtimeRecordingStatus> statuses, Instant cutoff);
+    boolean existsByHotwordLibraryIdAndStatusIn(String hotwordLibraryId, Collection<RealtimeRecordingStatus> statuses);
 
     @Modifying
     @Transactional

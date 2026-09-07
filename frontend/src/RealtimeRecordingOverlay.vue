@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
-import { api } from './api'
+import { api, type HotwordLibrary } from './api'
 import {
   deleteRecordingDraft,
   getRecordingChunks,
@@ -39,7 +39,7 @@ type RealtimeEvent = {
   code?: string
 }
 
-const props = defineProps<{ account: string; draftId?: string | null }>()
+const props = defineProps<{ account: string; draftId?: string | null; hotwordLibraries: HotwordLibrary[] }>()
 const emit = defineEmits<{
   close: []
   archived: [taskId: string]
@@ -52,6 +52,7 @@ const draft = ref<RecordingDraft | null>(null)
 const speakerDiarization = ref(true)
 const speakerCount = ref<number | null>(null)
 const language = ref<'zh-en' | 'zh' | 'en'>('zh-en')
+const hotwordLibraryId = ref('')
 const elapsedMs = ref(0)
 const microphoneLevel = ref(0)
 const realtimeStatus = ref<'idle' | 'connecting' | 'connected' | 'reconnecting' | 'degraded' | 'finished'>('idle')
@@ -199,6 +200,7 @@ async function startRecording() {
         languageHints: chosenLanguages(),
         diarizationEnabled: speakerDiarization.value,
         speakerCount: speakerDiarization.value ? speakerCount.value : null,
+        hotwordLibraryId: hotwordLibraryId.value || null,
       },
     })
     draft.value = {
@@ -206,6 +208,7 @@ async function startRecording() {
       startedAt: startedAt.toISOString(), filename: filenameAt(startedAt), mimeType,
       sampleRate: audioContext.sampleRate, language: language.value,
       speakerDiarization: speakerDiarization.value, speakerCount: speakerCount.value || undefined,
+      hotwordLibraryId: hotwordLibraryId.value || undefined,
       status: 'RECORDING', chunkCount: 0, uploadedChunkCount: 0, nextPartNumber: 0,
       partBoundaries: [], finalCaptions: [], updatedAt: new Date().toISOString(),
     }
@@ -538,6 +541,7 @@ async function restoreDraft() {
     language.value = (local.language === 'zh' || local.language === 'en') ? local.language : 'zh-en'
     speakerDiarization.value = local.speakerDiarization
     speakerCount.value = local.speakerCount || null
+    hotwordLibraryId.value = local.hotwordLibraryId || ''
     const durationEnd = local.stoppedAt
       || (local.status === 'RECORDING' || local.status === 'INTERRUPTED' ? new Date().toISOString() : local.updatedAt)
     elapsedMs.value = new Date(durationEnd).getTime() - new Date(local.startedAt).getTime()
@@ -766,6 +770,10 @@ onBeforeUnmount(() => {
             </label>
             <label class="recording-check"><input v-model="speakerDiarization" type="checkbox" :disabled="phase === 'PREPARING'"> 最终转写识别说话人</label>
             <label v-if="speakerDiarization">说话人数（可选）<input v-model.number="speakerCount" type="number" min="2" max="100" placeholder="自动判断" :disabled="phase === 'PREPARING'"></label>
+            <label class="recording-hotword-option">最终转写热词库
+              <select v-model="hotwordLibraryId" :disabled="phase === 'PREPARING'"><option value="">不使用热词</option><option v-for="library in hotwordLibraries" :key="library.id" :value="library.id">{{ library.name }} · {{ library.entries.length }}词</option></select>
+              <small>仅影响录音结束后的最终转写，实时字幕不使用热词。</small>
+            </label>
           </div>
           <div v-if="!browserSupported" class="recording-alert">首版仅支持桌面版 Chrome / Edge，并需要允许麦克风与本地存储。</div>
           <div v-else-if="capabilities && !capabilities.enabled" class="recording-alert">服务端尚未启用实时 ASR，请配置 DashScope 实时识别后重试。</div>
@@ -846,6 +854,7 @@ onBeforeUnmount(() => {
 .recording-options label { display: grid; gap: 7px; color: #676d77; font-size: 11px; }
 .recording-options select, .recording-options input[type='number'] { min-width: 0; height: 40px; border: 1px solid #d7d8d4; border-radius: 9px; padding: 0 11px; color: #2d3340; background: #fff; }
 .recording-options .recording-check { height: 40px; display: flex; align-items: center; padding: 0 11px; border: 1px solid #d7d8d4; border-radius: 9px; color: #414752; background: #fff; white-space: nowrap; }
+.recording-options .recording-hotword-option { grid-column: span 3; grid-template-columns: 110px minmax(180px, 1fr) 1fr; align-items: center; }.recording-hotword-option small { color: #8d9198; font-size: 9px; }
 .recording-alert { width: min(620px, 100%); margin: 0 0 14px; padding: 10px 13px; border: 1px solid #e4c9c2; border-radius: 9px; color: #854c43; background: #fbefeb; font-size: 12px; text-align: left; }
 .recording-start-button { display: inline-flex; align-items: center; gap: 11px; margin: 8px 0 12px; padding: 13px 24px; border: 0; border-radius: 12px; color: #fff; background: #293149; font-weight: 700; cursor: pointer; box-shadow: 0 12px 26px rgba(41,49,73,.2); }
 .recording-start-button span { width: 10px; height: 10px; border: 2px solid rgba(255,255,255,.8); border-radius: 50%; background: #c5584b; }
@@ -884,7 +893,7 @@ onBeforeUnmount(() => {
 .recording-processing > span { width: 18px; height: 18px; border: 2px solid #d5d7de; border-top-color: #59669f; border-radius: 50%; animation: recording-orbit .8s linear infinite; }.recording-processing p { display: grid; margin: 0; }.recording-processing b { font-size: 11px; }.recording-processing small { color: #90949b; font-size: 9px; }
 @media (max-width: 700px) {
   .realtime-recording-backdrop { padding: 0; }.realtime-recording-workbench { min-height: 100vh; border-radius: 0; }
-  .recording-preflight { padding: 34px 22px; }.recording-options { grid-template-columns: 1fr; }.recording-live-head { grid-template-columns: 1fr; gap: 16px; }
+  .recording-preflight { padding: 34px 22px; }.recording-options { grid-template-columns: 1fr; }.recording-options .recording-hotword-option { grid-column: auto; grid-template-columns: 1fr; }.recording-live-head { grid-template-columns: 1fr; gap: 16px; }
   .recording-clock { justify-content: center; }.recording-status-grid { grid-template-columns: 1fr; }.realtime-caption-panel { margin: 0 14px; }.recording-actions { padding: 14px; flex-wrap: wrap; }
 }
 </style>

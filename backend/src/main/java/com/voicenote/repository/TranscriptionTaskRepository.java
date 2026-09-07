@@ -14,4 +14,5 @@ public interface TranscriptionTaskRepository extends JpaRepository<Transcription
     Long findDurationMs(@Param("taskId") String taskId, @Param("transcriptVersion") int transcriptVersion);
     long countByAudioBlobId(String audioBlobId);
     long countByOwnerId(String ownerId);
+    boolean existsByHotwordLibraryIdAndTranscriptReadyFalse(String hotwordLibraryId);
 }

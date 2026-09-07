@@ -98,9 +98,15 @@ public class RealtimeRecordingWorker {
                     session.getTotalBytes(), session.getContentType(), session.getOriginalFilename()));
             else if (!blob.getId().equals(session.getId())) storage.removeQuietly(finalKey);
 
-            TranscriptionTaskService.AsrConfig asr = mapper.readValue(session.getAsrConfig(), TranscriptionTaskService.AsrConfig.class);
-            task = transcriptionTasks.create(session.getOwnerId(), "realtime-final-" + sessionId,
-                    new TranscriptionTaskService.CreateTaskCommand(blob.getId(), asr), Instant.now());
+            com.fasterxml.jackson.databind.JsonNode asrDocument = mapper.readTree(session.getAsrConfig());
+            if (asrDocument.has("vocabularyId") || asrDocument.has("hotwordLibraryRevision")) {
+                TranscriptionTaskService.StoredAsrConfig asr = mapper.treeToValue(asrDocument, TranscriptionTaskService.StoredAsrConfig.class);
+                task = transcriptionTasks.createResolved(session.getOwnerId(), "realtime-final-" + sessionId, blob.getId(), asr, Instant.now());
+            } else {
+                TranscriptionTaskService.AsrConfig asr = mapper.treeToValue(asrDocument, TranscriptionTaskService.AsrConfig.class);
+                task = transcriptionTasks.create(session.getOwnerId(), "realtime-final-" + sessionId,
+                        new TranscriptionTaskService.CreateTaskCommand(blob.getId(), asr), Instant.now());
+            }
             transcriptionTasks.updateMetadata(session.getOwnerId(), task.getId(), session.getStartedAt(), SceneType.OTHER, null, List.of());
             session.ready(blob.getId(), task.getId()); sessions.save(session);
         } catch (Exception exception) {

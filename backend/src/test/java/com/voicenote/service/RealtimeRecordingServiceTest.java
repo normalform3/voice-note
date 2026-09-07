@@ -115,6 +115,26 @@ class RealtimeRecordingServiceTest {
         assertThat(session.getStatus()).isEqualTo(com.voicenote.domain.RealtimeRecordingStatus.FINALIZING);
     }
 
+    @Test
+    void storesTheSelectedHotwordForFinalTranscription() throws Exception {
+        TranscriptionTaskService transcriptionTasks = mock(TranscriptionTaskService.class);
+        ObjectMapper mapper = new ObjectMapper();
+        RealtimeRecordingService hotwordService = new RealtimeRecordingService(
+                sessions, parts, storage, outbox, mapper, enabledProperties(), transcriptionTasks);
+        var requested = new TranscriptionTaskService.AsrConfig(List.of("zh", "en"), true, null, "library-1");
+        var resolved = new TranscriptionTaskService.StoredAsrConfig(
+                List.of("en", "zh"), true, null, "library-1", 3, "vocab-1");
+        when(transcriptionTasks.resolveConfig("session-owner", requested)).thenReturn(resolved);
+        when(sessions.save(any())).thenAnswer(call -> call.getArgument(0));
+
+        RealtimeRecordingSession session = hotwordService.create("session-owner", new RealtimeRecordingService.CreateCommand(
+                Instant.now(), "audio/webm;codecs=opus", "recording.webm", 48_000, List.of("zh", "en"), requested));
+
+        assertThat(session.getHotwordLibraryId()).isEqualTo("library-1");
+        assertThat(session.getHotwordLibraryRevision()).isEqualTo(3);
+        assertThat(mapper.readTree(session.getAsrConfig()).path("vocabularyId").asText()).isEqualTo("vocab-1");
+    }
+
     private static RealtimeRecordingSession recording() {
         return new RealtimeRecordingSession("session-owner", "audio/webm;codecs=opus", "recording.webm", 48_000,
                 "[\"zh\",\"en\"]", "{\"languageHints\":[\"zh\",\"en\"],\"diarizationEnabled\":true}", Instant.now());

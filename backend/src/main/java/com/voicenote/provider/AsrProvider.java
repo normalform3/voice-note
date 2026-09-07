@@ -8,7 +8,11 @@ public interface AsrProvider {
     AsrPollResult poll(String providerTaskId);
 
     record AsrSubmission(String providerTaskId, String providerInputUrl) { }
-    record AsrOptions(List<String> languageHints, boolean diarizationEnabled, Integer speakerCount) { }
+    record AsrOptions(List<String> languageHints, boolean diarizationEnabled, Integer speakerCount, String vocabularyId) {
+        public AsrOptions(List<String> languageHints, boolean diarizationEnabled, Integer speakerCount) {
+            this(languageHints, diarizationEnabled, speakerCount, null);
+        }
+    }
     record AsrAudioMetadata(Integer channelCount, Long durationMs) { }
     record AsrPollResult(Status status, String errorCode, String errorMessage, List<AsrSegment> segments, AsrAudioMetadata audioMetadata,
                          String rawResultDocument) {

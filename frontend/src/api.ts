@@ -81,6 +81,14 @@ export type SkillDetail = {
 }
 export type TriggerPreview = { passed: boolean; positiveCount: number; negativeCount: number; conflicts: { text: string; expected: boolean; actual: boolean; reason: string }[] }
 export type Profile = { account: string; createdAt: string; statistics: { recordingCount: number; indexedDocumentCount: number; agentRunCount: number; customSkillCount: number } }
+export type HotwordLanguage = 'zh' | 'en'
+export type HotwordEntry = { text: string; language: HotwordLanguage }
+export type HotwordLibraryStatus = 'SYNCING' | 'READY' | 'SYNC_FAILED' | 'DELETING' | 'DELETE_FAILED' | 'DELETED'
+export type HotwordLibrary = {
+  id: string; name: string; entries: HotwordEntry[]; revision: number; status: HotwordLibraryStatus
+  errorCode?: string; errorMessage?: string; nextUpdateAt?: string; createdAt: string; updatedAt: string
+}
+export type HotwordLibraryCatalog = { items: HotwordLibrary[]; capacity: { used: number; limit: number } }
 export type ResultCitation = { sourceRef?: string; chunkId?: string; segmentId?: string; kind?: AgentEvidence['sourceKind'] }
 export type ResultStatement = { text: string; evidence?: ResultCitation[] }
 export type ResultItem = { title?: string; content?: string; status?: string; owner?: string | null; dueAt?: string | null; question?: string; answer?: string; dimension?: string; assessment?: string; followUp?: string; label?: string; values?: string[]; statements?: ResultStatement[]; cells?: ResultStatement[]; evidence?: ResultCitation[] }

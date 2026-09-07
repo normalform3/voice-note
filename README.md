@@ -89,6 +89,12 @@ Qdrant 同时维护 Dense 向量和 BM25 稀疏向量，通过 RRF 融合候选�
 - [RealtimeAsrGateway](backend/src/main/java/com/voicenote/provider/RealtimeAsrGateway.java)：实时 ASR 协议、心跳、字幕事件和三次退避重连。
 - [RealtimeRecordingOverlay](frontend/src/RealtimeRecordingOverlay.vue)：录音、字幕、持续上传、断点恢复与安全归档工作台。
 
+### 账号级热词库
+
+用户可以在个人中心维护私有的中英文热词库，并在导入音频或开始实时录音前为最终转写选择一个词库。后端使用现有 DashScope 凭据把词库同步为 `paraformer-v2` 的预编译词表，转写提交时仅传递服务端解析出的 `vocabulary_id`；客户端不能直接指定供应商资源。实时字幕链路不使用热词。
+
+DashScope 对同一账号最多提供 10 个预编译词表，每个 Paraformer 词表最多 500 个词。本系统在数据库中串行控制 10 库容量，词条固定使用权重 4，并遵守同一词表至少间隔 5 分钟更新的建议。供应商同步失败会保留可重试状态，不会把未就绪词库提供给新转写。
+
 ### 人工与 AI 双重说话人校准
 
 用户可以在原始文档中选择单句或连续片段，人工改派到已有说话人；也可以启动 AI 语义校正，让模型结合相邻发言提出整段改派或句内拆分建议。AI 只生成建议，界面展示建议类型、置信度和修改前后内容，用户选择后才会应用。
@@ -354,6 +360,7 @@ Vite 默认监听 `http://localhost:5173`，并将 `/api` 代理到本地 `8080`
 | 实时录音 | `/api/realtime-recordings/*` | 创建会话、顺序上传分片、完成归档、恢复状态和签发实时票据。 |
 | 实时字幕 | `/api/realtime-recordings/socket` | 通过专用 WebSocket 子协议发送 PCM，并接收瞬时字幕与连接状态。 |
 | 听记任务 | `/api/transcription-tasks/*` | 读取阶段、重试、校正、生成正式文档和建立索引。 |
+| 热词库 | `/api/hotword-libraries/*` | 管理账号私有词库、查看共享额度并重试 DashScope 同步。 |
 | 文档与分析 | `/api/organized-documents/*`、`/api/analysis-runs/*` | 读取正式文档并生成带证据摘要。 |
 | Agent 会话 | `/api/agent-conversations/*`、`/api/agent-runs/*` | 创建固定范围会话、提交 Turn、查看 Trace 和回放。 |
 | 实时事件 | `/api/progress-events` | 通过 SSE 接收处理进度和语音 Agent 瞬时区块。 |
@@ -379,6 +386,7 @@ Agent 脱敏评测数据格式和指标计算见 [Agent 评测说明](docs/agent
 
 - 项目仍处于开发阶段；外部 ASR、模型、Qdrant、RocketMQ、MCP、记忆和 TTS 需要按环境启用。
 - 实时录音首版只支持桌面 Chrome / Edge、单声道 WebM/Opus、最长两小时和开始/结束操作；最终批量 ASR 始终重跑，不直接沉淀实时 final sentence。
+- 热词首版仅支持中文和英文、每次最终转写最多选择一个词库；实时字幕不应用热词，已有转写不会被追溯修改。
 - 已完成一次正常录音、实时中英文字幕和持续归档状态的桌面浏览器验证并收录截图；麦克风拒绝、断网、刷新恢复、两小时自动结束和对象存储故障恢复仍需完成浏览器矩阵验证。
 - 账号密码登录和 JWT 用户隔离已经实现，但当前不是具备组织级 RBAC 的多租户管理后台。
 - 长期记忆默认关闭，只保存用户确认的内容，不支持团队共享。

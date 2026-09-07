@@ -146,7 +146,7 @@ class RealtimeRecordingWorkerTest {
         AudioBlobRepository blobs = mock(AudioBlobRepository.class);
         ObjectStorage storage = mock(ObjectStorage.class);
         TranscriptionTaskService tasks = mock(TranscriptionTaskService.class);
-        RealtimeRecordingSession session = finalizingSession();
+        RealtimeRecordingSession session = finalizingHotwordSession();
         String finalKey = "owners/owner/audio/" + session.getId() + "/source";
         when(sessions.claimFinalization(eq(session.getId()), any(Instant.class))).thenAnswer(call -> { session.beginProcessing(); return 1; });
         when(sessions.findById(session.getId())).thenReturn(Optional.of(session));
@@ -156,7 +156,7 @@ class RealtimeRecordingWorkerTest {
         when(blobs.findByOwnerIdAndSha256(eq("owner"), anyString())).thenReturn(Optional.empty());
         when(blobs.save(any())).thenAnswer(call -> call.getArgument(0));
         TranscriptionTask task = new TranscriptionTask("owner", session.getId(), "pipeline", "provider");
-        when(tasks.create(eq("owner"), eq("realtime-final-" + session.getId()), any(), any(Instant.class))).thenReturn(task);
+        when(tasks.createResolved(eq("owner"), eq("realtime-final-" + session.getId()), eq(session.getId()), any(), any(Instant.class))).thenReturn(task);
         when(tasks.updateMetadata(eq("owner"), eq(task.getId()), eq(session.getStartedAt()), eq(SceneType.OTHER), isNull(), eq(List.of()))).thenReturn(task);
         RealtimeRecordingWorker worker = new RealtimeRecordingWorker(sessions, parts, blobs, storage, tasks,
                 mock(ProgressEventPublisher.class), new ObjectMapper(), enabledProperties());
@@ -164,6 +164,10 @@ class RealtimeRecordingWorkerTest {
         worker.process(session.getId());
 
         assertThat(session.getStatus()).isEqualTo(RealtimeRecordingStatus.READY);
+        verify(tasks).createResolved(eq("owner"), eq("realtime-final-" + session.getId()), eq(session.getId()),
+                argThat(config -> "library-1".equals(config.hotwordLibraryId())
+                        && Integer.valueOf(3).equals(config.hotwordLibraryRevision())
+                        && "vocab-1".equals(config.vocabularyId())), any(Instant.class));
         verify(storage, never()).get("part-0");
         verify(storage, never()).put(anyString(), any(), anyLong(), anyString());
     }
@@ -171,6 +175,17 @@ class RealtimeRecordingWorkerTest {
     private static RealtimeRecordingSession finalizingSession() {
         RealtimeRecordingSession session = new RealtimeRecordingSession("owner", "audio/webm;codecs=opus", "recording.webm", 48_000,
                 "[\"zh\",\"en\"]", "{\"languageHints\":[\"zh\",\"en\"],\"diarizationEnabled\":true}", Instant.now().minusSeconds(30));
+        session.partReceived(0, 3);
+        session.partReceived(1, 2);
+        session.beginFinalizing(2);
+        return session;
+    }
+
+    private static RealtimeRecordingSession finalizingHotwordSession() {
+        RealtimeRecordingSession session = new RealtimeRecordingSession("owner", "audio/webm;codecs=opus", "recording.webm", 48_000,
+                "[\"zh\",\"en\"]", "{\"languageHints\":[\"en\",\"zh\"],\"diarizationEnabled\":true,\"hotwordLibraryId\":\"library-1\",\"hotwordLibraryRevision\":3,\"vocabularyId\":\"vocab-1\"}",
+                Instant.now().minusSeconds(30));
+        session.attachHotword("library-1", 3);
         session.partReceived(0, 3);
         session.partReceived(1, 2);
         session.beginFinalizing(2);

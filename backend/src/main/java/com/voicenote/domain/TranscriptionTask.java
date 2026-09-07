@@ -13,6 +13,8 @@ public class TranscriptionTask {
     @Column(name = "audio_blob_id", nullable = false, columnDefinition = "CHAR(36)") private String audioBlobId;
     @Column(name = "asr_config_hash", nullable = false, columnDefinition = "CHAR(64)") private String asrConfigHash;
     @Column(name = "asr_config", columnDefinition = "json") private String asrConfig;
+    @Column(name = "hotword_library_id", columnDefinition = "CHAR(36)") private String hotwordLibraryId;
+    @Column(name = "hotword_library_revision") private Integer hotwordLibraryRevision;
     @Column(name = "pipeline_version", nullable = false) private String pipelineVersion;
     @Enumerated(EnumType.STRING) @Column(nullable = false) private TaskStatus status;
     @Enumerated(EnumType.STRING) @Column(name = "current_stage") private PipelineStage currentStage;
@@ -49,6 +51,8 @@ public class TranscriptionTask {
     public String getAudioBlobId() { return audioBlobId; }
     public String getAsrConfigHash() { return asrConfigHash; }
     public String getAsrConfig() { return asrConfig; }
+    public String getHotwordLibraryId() { return hotwordLibraryId; }
+    public Integer getHotwordLibraryRevision() { return hotwordLibraryRevision; }
     public TaskStatus getStatus() { return status; }
     public PipelineStage getCurrentStage() { return currentStage; }
     public PipelinePhase getCurrentPhase() { return currentPhase; }
@@ -67,6 +71,7 @@ public class TranscriptionTask {
     public String getFailureMessage() { return failureMessage; }
     public PipelineStage getFailedStage() { return failedStage; }
     public boolean isCancelled() { return status == TaskStatus.CANCELLED; }
+    public void attachHotword(String libraryId, Integer revision) { this.hotwordLibraryId = libraryId; this.hotwordLibraryRevision = revision; }
     public int nextAttemptNumber() { currentAttemptNumber += 1; updatedAt = Instant.now(); return currentAttemptNumber; }
     public void mark(TaskStatus status) { this.status = status; this.updatedAt = Instant.now(); }
     public void advance(PipelineStage stage, int progress) { this.currentStage = stage; this.currentPhase = phaseFor(stage); this.progressPercent = progress; this.failureCode = null; this.failureMessage = null; this.failedStage = null; this.updatedAt = Instant.now(); }

@@ -10,6 +10,7 @@ import org.springframework.web.util.DefaultUriBuilderFactory;
 import java.io.IOException;
 import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -19,6 +20,18 @@ class DashscopeAsrProviderTest {
     @AfterEach
     void stopServer() {
         if (server != null) server.stop(0);
+    }
+
+    @Test
+    void includesVocabularyIdOnlyWhenAHotwordLibraryWasSelected() {
+        ObjectMapper mapper = new ObjectMapper();
+        var withHotwords = DashscopeAsrProvider.submissionBody(mapper, "paraformer-v2", "oss://audio",
+                new AsrProvider.AsrOptions(List.of("zh", "en"), true, 2, "vocab-123"));
+        var withoutHotwords = DashscopeAsrProvider.submissionBody(mapper, "paraformer-v2", "oss://audio",
+                new AsrProvider.AsrOptions(List.of("zh", "en"), true, null));
+
+        assertThat(withHotwords.path("parameters").path("vocabulary_id").asText()).isEqualTo("vocab-123");
+        assertThat(withoutHotwords.path("parameters").has("vocabulary_id")).isFalse();
     }
 
     @Test

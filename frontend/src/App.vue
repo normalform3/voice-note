@@ -8,7 +8,7 @@ import VoiceConversationOverlay from './VoiceConversationOverlay.vue'
 import RealtimeRecordingOverlay from './RealtimeRecordingOverlay.vue'
 import { isSpeechRecognitionSupported } from './useSpeechRecognition'
 import { deleteRecordingDraft, listRecordingDrafts, type RecordingDraft } from './realtimeRecordingStore'
-import { api, hashFile, isSessionExpiredError, key, SESSION_EXPIRED_EVENT, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentAnswerBlockEvent, type AgentCapabilities, type AgentConversation, type AgentConversationDetail, type AgentConversationTurn, type AgentProgressEvent, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AgentStep, type AgentStepDetail, type AiSpeakerCorrectionApplyResult, type AiSpeakerCorrectionDetail, type AiSpeakerCorrectionSuggestion, type AnalysisRun, type AnalysisRunDetail, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PageResult, type PipelineStage, type ResultCitation, type Segment, type Speaker, type SpeakerCorrectionProposalPart, type SpeakerCorrectionResult, type StageAttempt, type Task, type WorkspaceSnapshot } from './api'
+import { api, hashFile, isSessionExpiredError, key, SESSION_EXPIRED_EVENT, stageStatusText, stageText, statusText, timecode, uploadErrorMessage, type AgentAnswerBlockEvent, type AgentCapabilities, type AgentConversation, type AgentConversationDetail, type AgentConversationTurn, type AgentProgressEvent, type AgentResult as AgentResultDocument, type AgentRun, type AgentRunDetail, type AgentScopeType, type AgentSkill, type AgentStep, type AgentStepDetail, type AiSpeakerCorrectionApplyResult, type AiSpeakerCorrectionDetail, type AiSpeakerCorrectionSuggestion, type AnalysisRun, type AnalysisRunDetail, type HotwordLibrary, type HotwordLibraryCatalog, type KnowledgeDocument, type KnowledgeIndexBuild, type KnowledgeRun, type KnowledgeRunDetail, type OrganizedDocumentDetail, type PageResult, type PipelineStage, type ResultCitation, type Segment, type Speaker, type SpeakerCorrectionProposalPart, type SpeakerCorrectionResult, type StageAttempt, type Task, type WorkspaceSnapshot } from './api'
 import { knowledgeBuildProgress, latestKnowledgeStages, taskDisplayProgress, taskProgressLabel, visibleStageAttempts } from './pipelineProgress'
 
 type WorkspaceView = 'library' | 'document' | 'skills' | 'tools' | 'profile'
@@ -74,6 +74,7 @@ const clockNow = ref(Date.now())
 const retryingStage = ref<PipelineStage | null>(null)
 const stageRetryError = ref('')
 const resubmittingTask = ref(false)
+const deletingTaskId = ref<string | null>(null)
 const taskActionError = ref('')
 const savingMetadata = ref(false)
 const metadataSaved = ref(false)
@@ -92,6 +93,8 @@ const agentThread = ref<{ scrollToLatest: (behavior?: ScrollBehavior) => void } 
 const fileInput = ref<HTMLInputElement | null>(null)
 const speakerDiarization = ref(true)
 const speakerCount = ref<number | null>(null)
+const hotwordLibraries = ref<HotwordLibrary[]>([])
+const hotwordLibraryId = ref('')
 const savingSpeakerId = ref<string | null>(null)
 const speakerEditMode = ref(false)
 const selectedSegmentIds = ref<string[]>([])
@@ -403,7 +406,7 @@ async function authenticate() {
 async function loadWorkspace() {
   if (workspaceRequest) return workspaceRequest
   workspaceLoading.value = true
-  workspaceRequest = Promise.all([loadTasks(), loadDocuments(), loadRuns(), loadAnalysisRuns(), loadAgentRuns(), loadAgentConversations(), loadPendingMemoryCount(), loadAgentSkills(), loadAgentCapabilities()])
+  workspaceRequest = Promise.all([loadTasks(), loadDocuments(), loadRuns(), loadAnalysisRuns(), loadAgentRuns(), loadAgentConversations(), loadPendingMemoryCount(), loadAgentSkills(), loadAgentCapabilities(), loadHotwords()])
     .then(() => { workspaceLoadError.value = '' })
     .catch((error) => {
       workspaceLoadError.value = isSessionExpiredError(error)
@@ -423,6 +426,11 @@ async function retryWorkspace() {
 async function loadTasks() {
   const { data } = await api.get<Task[]>('/transcription-tasks')
   tasks.value = data
+}
+async function loadHotwords() {
+  const { data } = await api.get<HotwordLibraryCatalog>('/hotword-libraries')
+  hotwordLibraries.value = data.items.filter(item => item.status === 'READY')
+  if (hotwordLibraryId.value && !hotwordLibraries.value.some(item => item.id === hotwordLibraryId.value)) hotwordLibraryId.value = ''
 }
 async function loadRealtimeRecordingDrafts() {
   if (!signedInAccount.value) { recoverableRecordingDrafts.value = []; return }
@@ -806,6 +814,7 @@ async function ensureAudio(startMs = 0, play = true) {
 }
 function chooseFile(event: Event) {
   file.value = (event.target as HTMLInputElement).files?.[0] || null
+  hotwordLibraryId.value = ''
   progress.value = ''
 }
 async function upload() {
@@ -828,10 +837,11 @@ async function upload() {
     }
     phase = 'task'; progress.value = '正在创建异步处理任务…'
     const { data: task } = await api.post<Task>(`/uploads/intents/${intent.data.audioBlobId}/complete`, {
-      asrConfig: { diarizationEnabled: speakerDiarization.value, speakerCount: speakerCount.value || null },
+      asrConfig: { diarizationEnabled: speakerDiarization.value, speakerCount: speakerCount.value || null, hotwordLibraryId: hotwordLibraryId.value || null },
       clientImportStartedAt: new Date(startedAt).toISOString()
     }, { headers: { 'Idempotency-Key': key() } })
     file.value = null
+    hotwordLibraryId.value = ''
     if (fileInput.value) fileInput.value.value = ''
     upsertTask(task)
     await choose(task)
@@ -1255,21 +1265,34 @@ async function resubmitTask() {
 }
 async function deleteTask() {
   const task = selected.value
-  if (!task || !window.confirm('删除后将移除原始录音、转写、整理文档和知识库切片，且无法恢复。确定删除吗？')) return
+  if (!task || deletingTaskId.value || !window.confirm('删除后将移除原始录音、转写、整理文档和知识库切片，且无法恢复。确定删除吗？')) return
+  deletingTaskId.value = task.id
+  taskActionError.value = ''
   try {
     await api.delete(`/transcription-tasks/${task.id}`, { headers: { 'Idempotency-Key': key() } })
-    if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
-    selected.value = null
-    segments.value = []
-    speakers.value = []
-    organized.value = null
-    analysis.value = null
-    knowledge.value = null
-    audioUrl.value = ''
-    showLibrary()
-    await loadWorkspace()
+    tasks.value = tasks.value.filter(value => value.id !== task.id)
+    documents.value = documents.value.filter(value => value.transcriptionTaskId !== task.id)
+    analysisRuns.value = analysisRuns.value.filter(value => value.transcriptionTaskId !== task.id)
+    selectedTaskIds.value = selectedTaskIds.value.filter(id => id !== task.id)
+    if (selected.value?.id === task.id) {
+      documentRequestVersion++
+      if (audioUrl.value) URL.revokeObjectURL(audioUrl.value)
+      selected.value = null
+      segments.value = []
+      speakers.value = []
+      organized.value = null
+      analysis.value = null
+      knowledge.value = null
+      audioUrl.value = ''
+      showLibrary()
+    }
+    void loadWorkspace().catch(() => { /* The optimistic local update already reflects the completed deletion. */ })
   } catch (error: any) {
-    window.alert(error.response?.data?.message || '删除失败，请稍后重试。')
+    const message = error.response?.data?.message || '删除失败，请稍后重试。'
+    if (selected.value?.id === task.id) taskActionError.value = message
+    else window.alert(message)
+  } finally {
+    if (deletingTaskId.value === task.id) deletingTaskId.value = null
   }
 }
 function upsertTask(task: Task) {
@@ -1490,6 +1513,8 @@ function logout() {
   localStorage.removeItem('voicenote_token')
   localStorage.removeItem('voicenote_account')
   signedInAccount.value = ''
+  hotwordLibraries.value = []
+  hotwordLibraryId.value = ''
   selected.value = null
   documents.value = []
   runs.value = []
@@ -1581,7 +1606,7 @@ onBeforeUnmount(() => {
     <section class="content-pane">
       <SkillManager v-if="workspaceView === 'skills'" @catalog-changed="refreshSkillCatalog" />
       <ToolsCenter v-else-if="workspaceView === 'tools'" :skills="agentSkills" :mcp-enabled="agentCapabilities?.mcpEnabled === true" />
-      <ProfilePage v-else-if="workspaceView === 'profile'" :account="signedInAccount" @logout="logout" />
+      <ProfilePage v-else-if="workspaceView === 'profile'" :account="signedInAccount" @logout="logout" @hotwords-changed="loadHotwords" />
       <section v-else-if="workspaceView === 'library'" class="library-page page-reveal">
         <header class="page-intro">
           <div>
@@ -1617,6 +1642,9 @@ onBeforeUnmount(() => {
           <div v-if="file" class="picked-file"><span class="file-glyph" aria-hidden="true">♫</span><div><b>{{ file.name }}</b><small>{{ formatFileSize(file.size) }}</small></div></div>
           <label v-if="file" class="diarization-option"><input v-model="speakerDiarization" type="checkbox"> 识别说话人 <small>仅单声道</small></label>
           <label v-if="file && speakerDiarization" class="speaker-count-option">说话人数（可选）<input v-model.number="speakerCount" type="number" min="2" max="100" placeholder="自动判断"></label>
+          <label v-if="file" class="hotword-select-option">最终转写热词库
+            <select v-model="hotwordLibraryId"><option value="">不使用热词</option><option v-for="library in hotwordLibraries" :key="library.id" :value="library.id">{{ library.name }} · {{ library.entries.length }}词</option></select>
+          </label>
           <p v-if="progress">{{ progress }}<b v-if="uploading" class="upload-timer"> · 导入用时 {{ formatDuration(importElapsedMs) }}</b></p>
           <button v-if="file" class="primary upload-start" :disabled="uploading" @click="upload">{{ uploading ? '正在导入' : '上传并转写' }} <span>→</span></button>
         </section>
@@ -1659,7 +1687,7 @@ onBeforeUnmount(() => {
         <nav class="breadcrumb" aria-label="当前位置"><button type="button" @click="showLibrary">音频资料库</button><span>/</span><b>{{ selectedTitle }}</b></nav>
         <header class="document-head">
           <div><p class="eyebrow">DOCUMENT LISTENING</p><h2>{{ selectedTitle }}</h2></div>
-          <div v-if="selected" class="document-actions"><span class="state-pill">{{ taskDisplayProgress(selected, visibleKnowledgeBuild) }}% · {{ taskProgressLabel(selected, visibleKnowledgeBuild) }}</span><button v-if="canCreateFormalDocument" class="stage-retry" :disabled="startingFormalDocument" @click="createFormalDocument">{{ startingFormalDocument ? '正在开始…' : selected.organizedDocument?.status === 'STALE' ? '重新生成正式文档' : '生成正式文档' }}</button><button v-if="canCreateKnowledgeBuild" class="stage-retry" :disabled="startingKnowledgeBuild" @click="createKnowledgeBuild">{{ startingKnowledgeBuild ? '正在开始…' : '建立知识库' }}</button><button v-else-if="selectedDocument && selected.organizedDocument?.status === 'READY'" class="text-action" @click="rebuildKnowledge(true)">重建知识库</button><button v-if="canCancelTask" class="text-action" @click="cancelTask">取消任务</button><button v-if="canResubmitTask" class="stage-retry resubmit-task" :disabled="resubmittingTask" @click="resubmitTask">{{ resubmittingTask ? '正在重新提交…' : '重新提交转写' }}</button><button class="text-action danger" @click="deleteTask">删除录音</button><p v-if="taskActionError" class="task-action-error" role="alert">{{ taskActionError }}</p></div>
+          <div v-if="selected" class="document-actions"><span class="state-pill">{{ taskDisplayProgress(selected, visibleKnowledgeBuild) }}% · {{ taskProgressLabel(selected, visibleKnowledgeBuild) }}</span><button v-if="canCreateFormalDocument" class="stage-retry" :disabled="startingFormalDocument || deletingTaskId === selected.id" @click="createFormalDocument">{{ startingFormalDocument ? '正在开始…' : selected.organizedDocument?.status === 'STALE' ? '重新生成正式文档' : '生成正式文档' }}</button><button v-if="canCreateKnowledgeBuild" class="stage-retry" :disabled="startingKnowledgeBuild || deletingTaskId === selected.id" @click="createKnowledgeBuild">{{ startingKnowledgeBuild ? '正在开始…' : '建立知识库' }}</button><button v-else-if="selectedDocument && selected.organizedDocument?.status === 'READY'" class="text-action" :disabled="deletingTaskId === selected.id" @click="rebuildKnowledge(true)">重建知识库</button><button v-if="canCancelTask" class="text-action" :disabled="deletingTaskId === selected.id" @click="cancelTask">取消任务</button><button v-if="canResubmitTask" class="stage-retry resubmit-task" :disabled="resubmittingTask || deletingTaskId === selected.id" @click="resubmitTask">{{ resubmittingTask ? '正在重新提交…' : '重新提交转写' }}</button><button class="text-action danger" :disabled="Boolean(deletingTaskId)" :aria-busy="deletingTaskId === selected.id" @click="deleteTask">{{ deletingTaskId === selected.id ? '正在删除…' : '删除录音' }}</button><p v-if="taskActionError" class="task-action-error" role="alert">{{ taskActionError }}</p></div>
         </header>
 
         <details v-if="selected" class="metadata-editor">
@@ -1848,7 +1876,7 @@ onBeforeUnmount(() => {
       :memory-enabled="voiceMemoryEnabled" :submit-message="submitVoiceAgentMessage"
       :live-progress="voiceLiveProgress" :live-blocks="voiceLiveBlocks" :tts-enabled="agentCapabilities?.ttsEnabled === true"
       @close="closeVoiceConversation" @evidence="openVoiceEvidence" />
-    <RealtimeRecordingOverlay v-if="realtimeRecordingOpen" :account="signedInAccount" :draft-id="realtimeRecordingDraftId"
+    <RealtimeRecordingOverlay v-if="realtimeRecordingOpen" :account="signedInAccount" :draft-id="realtimeRecordingDraftId" :hotword-libraries="hotwordLibraries"
       @close="realtimeRecordingOpen = false; realtimeRecordingDraftId = null"
       @drafts-changed="loadRealtimeRecordingDrafts" @archived="handleRealtimeRecordingArchived" />
   </main>

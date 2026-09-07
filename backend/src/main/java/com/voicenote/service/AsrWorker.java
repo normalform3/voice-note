@@ -171,14 +171,14 @@ public class AsrWorker {
             }
         }
         private AsrProvider.AsrOptions asrOptions(TranscriptionTask task) {
-            TranscriptionTaskService.AsrConfig config = asrConfig(task);
-            return new AsrProvider.AsrOptions(config.languageHints(), config.diarizationEnabled(), config.speakerCount());
+            TranscriptionTaskService.StoredAsrConfig config = asrConfig(task);
+            return new AsrProvider.AsrOptions(config.languageHints(), config.diarizationEnabled(), config.speakerCount(), config.vocabularyId());
         }
-        private TranscriptionTaskService.AsrConfig asrConfig(TranscriptionTask task) {
+        private TranscriptionTaskService.StoredAsrConfig asrConfig(TranscriptionTask task) {
             try {
-                TranscriptionTaskService.AsrConfig config = task.getAsrConfig() == null
-                        ? TranscriptionTaskService.AsrConfig.defaultConfig()
-                        : mapper.readValue(task.getAsrConfig(), TranscriptionTaskService.AsrConfig.class);
+                TranscriptionTaskService.StoredAsrConfig config = task.getAsrConfig() == null
+                        ? new TranscriptionTaskService.StoredAsrConfig(List.of("zh", "en"), true, null, null, null, null)
+                        : mapper.readValue(task.getAsrConfig(), TranscriptionTaskService.StoredAsrConfig.class);
                 return config.normalized();
             } catch (Exception exception) {
                 throw new ProviderException(ProviderException.Kind.FINAL_REJECTION, "ASR_CONFIG_INVALID", "Stored ASR configuration is invalid");

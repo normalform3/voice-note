@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 import java.time.Instant;
 import java.util.LinkedHashSet;
 import java.util.List;
+import java.util.Map;
 
 @Service
 public class TranscriptionTaskService {
@@ -30,12 +31,14 @@ public class TranscriptionTaskService {
     private final KnowledgeDocumentService knowledgeDocuments;
     private final DocumentOrganizationService organizedDocuments;
     private final KnowledgeVectorStore vectors;
+    private final HotwordLibraryService hotwords;
 
     public TranscriptionTaskService(TranscriptionTaskRepository tasks, TaskAttemptRepository attempts, AudioBlobRepository blobs,
                                     IdempotencyService idempotency, OutboxService outbox, ObjectMapper mapper, PipelineProgressService pipeline,
-                                    KnowledgeDocumentService knowledgeDocuments, DocumentOrganizationService organizedDocuments, KnowledgeVectorStore vectors) {
+                                    KnowledgeDocumentService knowledgeDocuments, DocumentOrganizationService organizedDocuments, KnowledgeVectorStore vectors,
+                                    HotwordLibraryService hotwords) {
         this.tasks = tasks; this.attempts = attempts; this.blobs = blobs; this.idempotency = idempotency; this.outbox = outbox; this.mapper = mapper;
-        this.pipeline = pipeline; this.knowledgeDocuments = knowledgeDocuments; this.organizedDocuments = organizedDocuments; this.vectors = vectors;
+        this.pipeline = pipeline; this.knowledgeDocuments = knowledgeDocuments; this.organizedDocuments = organizedDocuments; this.vectors = vectors; this.hotwords = hotwords;
     }
 
     @Transactional
@@ -46,19 +49,27 @@ public class TranscriptionTaskService {
     @Transactional
     public TranscriptionTask create(String ownerId, String key, CreateTaskCommand command, Instant uploadStartedAt) {
         AsrConfig config = command.asrConfig() == null ? AsrConfig.defaultConfig() : command.asrConfig().normalized();
-        String requestHash = Hashing.canonicalJsonHash(new CreateTaskCommand(command.audioBlobId(), config));
+        StoredAsrConfig stored = resolveConfig(ownerId, config);
+        return createResolved(ownerId, key, command.audioBlobId(), stored, uploadStartedAt);
+    }
+
+    @Transactional
+    public TranscriptionTask createResolved(String ownerId, String key, String audioBlobId, StoredAsrConfig config, Instant uploadStartedAt) {
+        StoredAsrConfig stored = config.normalized();
+        String requestHash = Hashing.canonicalJsonHash(Map.of("audioBlobId", audioBlobId, "asrConfig", stored));
         IdempotencyRecord record = idempotency.reserve(ownerId, CREATE_OPERATION, key, requestHash);
         if (record.getResourceId() != null) return ownedTask(ownerId, record.getResourceId());
-        AudioBlob blob = blobs.findById(command.audioBlobId()).filter(value -> value.getOwnerId().equals(ownerId))
+        AudioBlob blob = blobs.findById(audioBlobId).filter(value -> value.getOwnerId().equals(ownerId))
                 .orElseThrow(() -> new ApiException(HttpStatus.NOT_FOUND, "AUDIO_NOT_FOUND", "Audio was not found"));
         if (blob.getStatus() != BlobStatus.READY) throw new ApiException(HttpStatus.CONFLICT, "AUDIO_NOT_READY", "Wait for the upload to finish before creating a task");
-        String configHash = Hashing.canonicalJsonHash(config);
+        String configHash = Hashing.canonicalJsonHash(stored);
         String configDocument;
-        try { configDocument = mapper.writeValueAsString(config); }
+        try { configDocument = mapper.writeValueAsString(stored); }
         catch (Exception exception) { throw new IllegalStateException("Cannot serialize ASR configuration", exception); }
         TranscriptionTask task = tasks.findByOwnerIdAndAudioBlobIdAndAsrConfigHashAndPipelineVersion(ownerId, blob.getId(), configHash, PIPELINE_VERSION)
                 .orElseGet(() -> {
                     TranscriptionTask created = tasks.save(new TranscriptionTask(ownerId, blob.getId(), configHash, configDocument, PIPELINE_VERSION));
+                    created.attachHotword(stored.hotwordLibraryId(), stored.hotwordLibraryRevision());
                     pipeline.initialize(created, uploadStartedAt == null ? Instant.now() : uploadStartedAt);
                     outbox.enqueue("transcription_task", created.getId(), EventType.TRANSCRIPTION_REQUESTED);
                     return created;
@@ -66,6 +77,15 @@ public class TranscriptionTaskService {
         try { idempotency.complete(record, task.getId(), mapper.writeValueAsString(TaskView.from(task))); }
         catch (Exception exception) { throw new IllegalStateException("Cannot persist idempotent task response", exception); }
         return task;
+    }
+
+    @Transactional(readOnly = true)
+    public StoredAsrConfig resolveConfig(String ownerId, AsrConfig input) {
+        AsrConfig config = input == null ? AsrConfig.defaultConfig() : input.normalized();
+        HotwordLibraryService.Selection selection = hotwords.resolveForUse(ownerId, config.hotwordLibraryId());
+        return new StoredAsrConfig(config.languageHints(), config.diarizationEnabled(), config.speakerCount(),
+                selection == null ? null : selection.libraryId(), selection == null ? null : selection.revision(),
+                selection == null ? null : selection.vocabularyId()).normalized();
     }
 
     @Transactional
@@ -218,8 +238,9 @@ public class TranscriptionTaskService {
     }
 
     public record CreateTaskCommand(String audioBlobId, AsrConfig asrConfig) { }
-    public record AsrConfig(List<String> languageHints, Boolean diarizationEnabled, Integer speakerCount) {
-        public static AsrConfig defaultConfig() { return new AsrConfig(List.of("zh", "en"), true, null); }
+    public record AsrConfig(List<String> languageHints, Boolean diarizationEnabled, Integer speakerCount, String hotwordLibraryId) {
+        public AsrConfig(List<String> languageHints, Boolean diarizationEnabled, Integer speakerCount) { this(languageHints, diarizationEnabled, speakerCount, null); }
+        public static AsrConfig defaultConfig() { return new AsrConfig(List.of("zh", "en"), true, null, null); }
         public AsrConfig normalized() {
             boolean normalizedDiarization = diarizationEnabled == null || diarizationEnabled;
             if (speakerCount != null && (speakerCount < 2 || speakerCount > 100)) {
@@ -228,7 +249,15 @@ public class TranscriptionTaskService {
             if (!normalizedDiarization && speakerCount != null) {
                 throw new ApiException(HttpStatus.BAD_REQUEST, "SPEAKER_COUNT_REQUIRES_DIARIZATION", "speakerCount requires speaker diarization to be enabled");
             }
-            return new AsrConfig(languageHints == null || languageHints.isEmpty() ? List.of("zh", "en") : languageHints.stream().sorted().toList(), normalizedDiarization, speakerCount);
+            String libraryId = hotwordLibraryId == null || hotwordLibraryId.isBlank() ? null : hotwordLibraryId.trim();
+            return new AsrConfig(languageHints == null || languageHints.isEmpty() ? List.of("zh", "en") : languageHints.stream().sorted().toList(), normalizedDiarization, speakerCount, libraryId);
+        }
+    }
+    public record StoredAsrConfig(List<String> languageHints, Boolean diarizationEnabled, Integer speakerCount,
+                                  String hotwordLibraryId, Integer hotwordLibraryRevision, String vocabularyId) {
+        public StoredAsrConfig normalized() {
+            AsrConfig basic = new AsrConfig(languageHints, diarizationEnabled, speakerCount, hotwordLibraryId).normalized();
+            return new StoredAsrConfig(basic.languageHints(), basic.diarizationEnabled(), basic.speakerCount(), basic.hotwordLibraryId(), hotwordLibraryRevision, vocabularyId);
         }
     }
     public record TaskView(String id, TaskStatus status, int currentAttemptNumber, int transcriptVersion, String failureCode, String failureMessage) {

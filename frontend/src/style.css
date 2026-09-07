@@ -136,6 +136,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); box-sha
 .diarization-option small { color: var(--muted); font-family: 'DM Mono', monospace; font-size: 9px; }
 .speaker-count-option { display: inline-flex; align-items: center; gap: 7px; color: var(--ink); font-size: 11px; }
 .speaker-count-option input { width: 94px; min-height: 30px; padding: 4px 7px; font-size: 11px; }
+.hotword-select-option { display: inline-flex; align-items: center; gap: 7px; color: var(--ink); font-size: 11px; white-space: nowrap; }.hotword-select-option select { min-height: 30px; max-width: 190px; border: 1px solid var(--line); border-radius: 7px; padding: 4px 27px 4px 8px; color: var(--ink); background: var(--paper); font-size: 11px; }
 .upload-queue p { margin: 0; flex: 1; line-height: 1.5; }
 .upload-timer { color: var(--accent-deep); font-weight: 500; }
 .upload-start { min-width: 130px; margin-left: auto; padding: 10px 12px; font-size: 12px; }
@@ -209,6 +210,7 @@ input:focus, textarea:focus, select:focus { border-color: var(--accent); box-sha
 .state-pill { border: 1px solid #dfe2f0; border-radius: 999px; padding: 6px 10px; color: var(--accent-deep); background: #f6f7fd; font-family: 'DM Mono', monospace; font-size: 10px; white-space: nowrap; }
 .text-action { border: 0; padding: 3px 0; color: var(--accent-deep); background: transparent; font-size: 11px; text-decoration: underline; text-decoration-color: #cdd1e5; text-underline-offset: 4px; }
 .text-action:hover { color: #404e86; }
+.text-action:disabled { opacity: .55; cursor: wait; text-decoration: none; }
 .text-action.danger { color: var(--danger); text-decoration-color: #e4bbbb; }
 .player-surface { margin-top: 31px; padding: 18px 20px 13px; border: 1px solid #e0e3ee; border-radius: 16px; background: linear-gradient(135deg, #f7f8fe, #fffefa); }
 .player-caption { display: flex; align-items: center; gap: 8px; color: var(--muted); font-size: 12px; }

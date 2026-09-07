@@ -50,11 +50,12 @@ describe('realtime recording local archive', () => {
   })
 
   it('persists a Vue reactive draft as a plain IndexedDB value', async () => {
-    const value = reactive(draft({ finalCaptions: [{ sequence: 1, text: '实时字幕' }] }))
+    const value = reactive(draft({ hotwordLibraryId: 'library-1', finalCaptions: [{ sequence: 1, text: '实时字幕' }] }))
 
     await expect(saveRecordingDraft(value)).resolves.toBeUndefined()
     expect(await getRecordingDraft(value.id)).toMatchObject({
       id: 'draft-1',
+      hotwordLibraryId: 'library-1',
       finalCaptions: [{ sequence: 1, text: '实时字幕' }],
     })
   })

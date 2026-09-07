@@ -8,6 +8,7 @@ import com.voicenote.repository.RealtimeRecordingPartRepository;
 import com.voicenote.repository.RealtimeRecordingSessionRepository;
 import com.voicenote.web.ApiException;
 import org.springframework.http.HttpStatus;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -33,10 +34,19 @@ public class RealtimeRecordingService {
     private final OutboxService outbox;
     private final ObjectMapper mapper;
     private final AppProperties properties;
+    private final TranscriptionTaskService transcriptionTasks;
 
+    @Autowired
     public RealtimeRecordingService(RealtimeRecordingSessionRepository sessions, RealtimeRecordingPartRepository parts,
-                                    ObjectStorage storage, OutboxService outbox, ObjectMapper mapper, AppProperties properties) {
+                                    ObjectStorage storage, OutboxService outbox, ObjectMapper mapper, AppProperties properties,
+                                    TranscriptionTaskService transcriptionTasks) {
         this.sessions = sessions; this.parts = parts; this.storage = storage; this.outbox = outbox; this.mapper = mapper; this.properties = properties;
+        this.transcriptionTasks = transcriptionTasks;
+    }
+
+    RealtimeRecordingService(RealtimeRecordingSessionRepository sessions, RealtimeRecordingPartRepository parts,
+                             ObjectStorage storage, OutboxService outbox, ObjectMapper mapper, AppProperties properties) {
+        this(sessions, parts, storage, outbox, mapper, properties, null);
     }
 
     public boolean isEnabled() {
@@ -53,9 +63,14 @@ public class RealtimeRecordingService {
         validate(command);
         try {
             List<String> languages = normalizeLanguages(command.languageHints());
-            TranscriptionTaskService.AsrConfig asr = (command.asrConfig() == null ? TranscriptionTaskService.AsrConfig.defaultConfig() : command.asrConfig()).normalized();
-            return sessions.save(new RealtimeRecordingSession(ownerId, command.contentType().trim(), command.originalFilename().trim(), command.sampleRate(),
-                    mapper.writeValueAsString(languages), mapper.writeValueAsString(asr), command.startedAt()));
+            TranscriptionTaskService.AsrConfig requested = command.asrConfig() == null ? TranscriptionTaskService.AsrConfig.defaultConfig() : command.asrConfig();
+            TranscriptionTaskService.StoredAsrConfig asr = transcriptionTasks == null
+                    ? new TranscriptionTaskService.StoredAsrConfig(requested.languageHints(), requested.diarizationEnabled(), requested.speakerCount(), null, null, null).normalized()
+                    : transcriptionTasks.resolveConfig(ownerId, requested);
+            RealtimeRecordingSession session = new RealtimeRecordingSession(ownerId, command.contentType().trim(), command.originalFilename().trim(), command.sampleRate(),
+                    mapper.writeValueAsString(languages), mapper.writeValueAsString(asr), command.startedAt());
+            session.attachHotword(asr.hotwordLibraryId(), asr.hotwordLibraryRevision());
+            return sessions.save(session);
         } catch (ApiException exception) { throw exception; }
         catch (Exception exception) { throw new IllegalStateException("Cannot create realtime recording session", exception); }
     }

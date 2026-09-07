@@ -16,6 +16,8 @@ public class RealtimeRecordingSession {
     @Column(name = "sample_rate", nullable = false) private int sampleRate;
     @Column(name = "language_hints", nullable = false, columnDefinition = "json") private String languageHints;
     @Column(name = "asr_config", nullable = false, columnDefinition = "json") private String asrConfig;
+    @Column(name = "hotword_library_id", columnDefinition = "CHAR(36)") private String hotwordLibraryId;
+    @Column(name = "hotword_library_revision") private Integer hotwordLibraryRevision;
     @Column(name = "started_at", nullable = false) private Instant startedAt;
     @Column(name = "next_part_number", nullable = false) private int nextPartNumber;
     @Column(name = "expected_part_count") private Integer expectedPartCount;
@@ -46,6 +48,8 @@ public class RealtimeRecordingSession {
     public int getSampleRate() { return sampleRate; }
     public String getLanguageHints() { return languageHints; }
     public String getAsrConfig() { return asrConfig; }
+    public String getHotwordLibraryId() { return hotwordLibraryId; }
+    public Integer getHotwordLibraryRevision() { return hotwordLibraryRevision; }
     public Instant getStartedAt() { return startedAt; }
     public int getNextPartNumber() { return nextPartNumber; }
     public Integer getExpectedPartCount() { return expectedPartCount; }
@@ -57,6 +61,7 @@ public class RealtimeRecordingSession {
     public Instant getExpiresAt() { return expiresAt; }
     public Instant getCreatedAt() { return createdAt; }
     public Instant getUpdatedAt() { return updatedAt; }
+    public void attachHotword(String libraryId, Integer revision) { this.hotwordLibraryId = libraryId; this.hotwordLibraryRevision = revision; }
     public void partReceived(int partNumber, long length) {
         if (status != RealtimeRecordingStatus.RECORDING || partNumber != nextPartNumber) throw new IllegalStateException("Recording part is out of sequence");
         nextPartNumber += 1; totalBytes += length; lastPartAt = Instant.now(); updatedAt = lastPartAt; expiresAt = lastPartAt.plusSeconds(24 * 3600);

@@ -25,6 +25,7 @@ export type RecordingDraft = {
   language: string
   speakerDiarization: boolean
   speakerCount?: number
+  hotwordLibraryId?: string
   status: 'RECORDING' | 'INTERRUPTED' | 'STOPPED' | 'UPLOADING' | 'FINALIZING' | 'FAILED'
   chunkCount: number
   uploadedChunkCount: number

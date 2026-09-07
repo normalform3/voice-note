@@ -51,16 +51,7 @@ public class DashscopeAsrProvider implements AsrProvider {
             String key = data.path("upload_dir").asText() + "/" + safeName(audio.getOriginalFilename());
             uploadToDashscope(data, key, audio);
             String inputUrl = "oss://" + key;
-            var bodyNode = mapper.createObjectNode();
-            bodyNode.put("model", properties.getDashscope().getAsrModel());
-            bodyNode.set("input", mapper.createObjectNode().set("file_urls", mapper.createArrayNode().add(inputUrl)));
-            boolean diarizationEnabled = options == null || options.diarizationEnabled();
-            var parameters = mapper.createObjectNode().put("diarization_enabled", diarizationEnabled);
-            if (options != null && options.languageHints() != null && !options.languageHints().isEmpty()) {
-                parameters.set("language_hints", mapper.valueToTree(options.languageHints()));
-            }
-            if (options != null && options.speakerCount() != null) parameters.put("speaker_count", options.speakerCount());
-            bodyNode.set("parameters", parameters);
+            JsonNode bodyNode = submissionBody(mapper, properties.getDashscope().getAsrModel(), inputUrl, options);
             String body = mapper.writeValueAsString(bodyNode);
             JsonNode response = client.post().uri(TRANSCRIPTION_PATH)
                     .header(HttpHeaders.CONTENT_TYPE, MediaType.APPLICATION_JSON_VALUE)
@@ -131,6 +122,18 @@ public class DashscopeAsrProvider implements AsrProvider {
 
     private static void writeField(OutputStream output, String boundary, String key, String value) throws IOException {
         output.write(("--" + boundary + "\r\nContent-Disposition: form-data; name=\"" + key + "\"\r\n\r\n" + value + "\r\n").getBytes(StandardCharsets.UTF_8));
+    }
+    static JsonNode submissionBody(ObjectMapper mapper, String model, String inputUrl, AsrOptions options) {
+        var bodyNode = mapper.createObjectNode();
+        bodyNode.put("model", model);
+        bodyNode.set("input", mapper.createObjectNode().set("file_urls", mapper.createArrayNode().add(inputUrl)));
+        boolean diarizationEnabled = options == null || options.diarizationEnabled();
+        var parameters = mapper.createObjectNode().put("diarization_enabled", diarizationEnabled);
+        if (options != null && options.languageHints() != null && !options.languageHints().isEmpty()) parameters.set("language_hints", mapper.valueToTree(options.languageHints()));
+        if (options != null && options.speakerCount() != null) parameters.put("speaker_count", options.speakerCount());
+        if (options != null && options.vocabularyId() != null && !options.vocabularyId().isBlank()) parameters.put("vocabulary_id", options.vocabularyId());
+        bodyNode.set("parameters", parameters);
+        return bodyNode;
     }
     private static String safeName(String input) { return input.replaceAll("[^A-Za-z0-9._-]", "_"); }
     static ProviderException classifyHttp(int status, String body) {
